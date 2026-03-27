@@ -15,6 +15,7 @@ from claude_worker.manager import (
     create_runtime_dir,
     get_base_dir,
     get_runtime_dir,
+    get_saved_session,
     run_manager,
 )
 
@@ -48,8 +49,8 @@ def get_worker_status(runtime: Path) -> str:
     """Determine worker status from PID and log state.
 
     In -p stream-json mode, each turn emits a `result` message but the process
-    stays alive waiting for more input. So `result` only means "done" if the
-    process is dead. If alive, `result` means "waiting" (turn complete).
+    stays alive waiting for more input. A claude session never truly "completes" —
+    it either idles (waiting), works, or its process dies.
     """
     pid_file = runtime / "pid"
     log_file = runtime / "log"
@@ -213,6 +214,15 @@ def cmd_start(args: argparse.Namespace) -> None:
     """Start a new claude worker."""
     name = args.name or generate_name()
 
+    # Handle --resume: look up saved session ID and pass to claude
+    claude_args = list(args.claude_args or [])
+    if args.resume:
+        session_id = get_saved_session(name)
+        if not session_id:
+            print(f"Error: no saved session for worker '{name}'", file=sys.stderr)
+            sys.exit(1)
+        claude_args = ["--resume", session_id] + claude_args
+
     # Build initial message from prompt-file and/or prompt
     parts = []
     if args.prompt_file:
@@ -266,7 +276,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     run_manager(
         name=name,
         cwd=args.cwd,
-        claude_args=args.claude_args or [],
+        claude_args=claude_args,
         initial_message=initial_message,
     )
     os._exit(0)
@@ -324,18 +334,31 @@ def cmd_read(args: argparse.Namespace) -> None:
     )
     from claude_logs.dateparse import parse_datetime
 
-    filters = FilterConfig(
-        hidden={"progress", "file-history-snapshot", "last-prompt"},
-    )
+    # Default: conversational messages only (user text, assistant text, queue-ops)
+    # --verbose: also show tool calls, tool results, thinking
+    hidden = {
+        "progress",
+        "file-history-snapshot",
+        "last-prompt",
+        "system",
+        "result",
+    }
+    if not args.verbose:
+        hidden |= {"thinking", "tools", "tool-result", "metadata"}
+
+    filters = FilterConfig(hidden=hidden)
     config = RenderConfig(filters=filters, timestamp_format="%H:%M:%S")
 
     # Handle --since
     since_ts = None
     since_uuid = None
     if args.since:
-        # Try as UUID first (contains dashes, 36 chars)
         val = args.since.strip()
-        if len(val) == 36 and val.count("-") == 4:
+        # Accept full UUIDs (36 chars) or short prefixes (like the 8-char
+        # IDs shown in read output). Hex-only strings are treated as UUID
+        # prefixes; anything else is parsed as a timestamp.
+        hex_val = val.replace("-", "")
+        if hex_val and all(c in "0123456789abcdefABCDEF" for c in hex_val):
             since_uuid = val
         else:
             try:
@@ -372,9 +395,11 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
 
             # Handle --since filtering
             if not found_since:
-                if since_uuid and data.get("uuid") == since_uuid:
-                    found_since = True
-                    continue  # skip the since message itself
+                if since_uuid:
+                    msg_uuid = data.get("uuid", "")
+                    if msg_uuid.startswith(since_uuid) or msg_uuid == since_uuid:
+                        found_since = True
+                        continue  # skip the since message itself
                 if since_ts:
                     ts_str = data.get("timestamp", "")
                     if ts_str:
@@ -393,19 +418,16 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
             if should_show_message(msg, data, config):
                 messages.append((data, msg))
 
-    # Handle --last-turn: find last turn boundary, show everything after
+    # Handle --last-turn: show everything since the last user message.
+    # Claude's work involves multiple assistant turns with tool use in between,
+    # so "last turn" means "everything since the user last spoke".
     if args.last_turn:
-        last_end = -1
+        last_user = -1
         for i, (data, msg) in enumerate(messages):
-            msg_type = data.get("type")
-            if msg_type == "result":
-                last_end = i
-            elif msg_type == "assistant":
-                sr = data.get("message", {}).get("stop_reason")
-                if sr == "end_turn":
-                    last_end = i
-        if last_end >= 0:
-            messages = messages[last_end:]
+            if data.get("type") == "user":
+                last_user = i
+        if last_user >= 0:
+            messages = messages[last_user + 1:]
 
     for data, msg in messages:
         uuid = data.get("uuid", "")[:8]
@@ -616,6 +638,11 @@ def main():
     p_start.add_argument("--prompt-file", help="File to send as initial prompt content")
     p_start.add_argument("--prompt", help="String to send as initial prompt")
     p_start.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume a previous session with the same worker name",
+    )
+    p_start.add_argument(
         "--background",
         action="store_true",
         help="Return immediately without waiting for claude's response",
@@ -645,7 +672,15 @@ def main():
     p_read.add_argument("--follow", "-f", action="store_true", help="Tail the log")
     p_read.add_argument("--since", help="Show messages after this UUID or timestamp")
     p_read.add_argument(
-        "--last-turn", action="store_true", help="Show only the last assistant turn"
+        "--last-turn",
+        action="store_true",
+        help="Show everything since the last user message",
+    )
+    p_read.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Include tool calls, tool results, and thinking blocks",
     )
 
     # -- wait-for-turn --

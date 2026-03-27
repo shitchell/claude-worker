@@ -44,6 +44,36 @@ def cleanup_runtime_dir(name: str) -> None:
         runtime.rmdir()
 
 
+def get_sessions_file() -> Path:
+    """Return path to the persistent name→session_id map."""
+    return get_base_dir() / ".sessions.json"
+
+
+def save_session(name: str, session_id: str) -> None:
+    """Persist a name→session_id mapping."""
+    path = get_sessions_file()
+    sessions = {}
+    if path.exists():
+        try:
+            sessions = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    sessions[name] = session_id
+    path.write_text(json.dumps(sessions, indent=2))
+
+
+def get_saved_session(name: str) -> str | None:
+    """Look up a saved session ID by worker name."""
+    path = get_sessions_file()
+    if not path.exists():
+        return None
+    try:
+        sessions = json.loads(path.read_text())
+        return sessions.get(name)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def run_manager(
     name: str,
     cwd: str | None,
@@ -125,6 +155,7 @@ def run_manager(
                         ):
                             sid = data.get("session_id", "")
                             session_file.write_text(sid)
+                            save_session(name, sid)
                             session_captured.set()
                     except (json.JSONDecodeError, KeyError):
                         pass
