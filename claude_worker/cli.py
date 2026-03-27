@@ -553,10 +553,53 @@ def cmd_stop(args: argparse.Namespace) -> None:
         print(f"Cleaned up {runtime}")
 
 
+EXAMPLES = """\
+examples:
+  # Start a worker with a system prompt
+  claude-worker start --name researcher --prompt "You are a research assistant"
+
+  # Send a message and wait for the response
+  claude-worker send researcher "summarize the architecture of this repo"
+  claude-worker wait-for-turn researcher
+
+  # Read the latest response
+  claude-worker read researcher --last-turn
+
+  # Continue the conversation
+  claude-worker send researcher "now focus on the database layer"
+  claude-worker wait-for-turn researcher
+  claude-worker read researcher --last-turn
+
+  # Follow output in real-time
+  claude-worker read researcher --follow
+
+  # List all workers
+  claude-worker list
+
+  # Stop and clean up
+  claude-worker stop researcher
+
+  # Start with a prompt file and extra claude args
+  claude-worker start --name coder --cwd /path/to/repo \\
+    --prompt-file instructions.md --prompt "begin with step 1" \\
+    -- --model sonnet
+
+  # Pipe a message via stdin
+  cat question.txt | claude-worker send researcher
+
+  # Script: send, wait, and capture the result JSON
+  claude-worker send myworker "do the thing"
+  result=$(claude-worker wait-for-turn myworker)
+  echo "$result" | jq .result
+"""
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="claude-worker",
         description="Launch and communicate with Claude Code subprocess workers",
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
