@@ -359,21 +359,26 @@ def cmd_read(args: argparse.Namespace) -> None:
     )
     from claude_logs.dateparse import parse_datetime
 
-    # Default: conversational messages only (user text, assistant text, queue-ops)
-    # --verbose: also show tool calls, tool results, thinking
+    # We always hide these — we render our own prefix with uuid + local time
     hidden = {
-        "progress",
-        "file-history-snapshot",
-        "last-prompt",
-        "system",
-        "result",
-        "timestamps",  # we render our own prefix with uuid + local time
-        "metadata",  # we render uuid in our prefix
+        "timestamps",
+        "metadata",
     }
-    if not args.verbose:
-        hidden |= {"thinking", "tools", "tool-result"}
 
-    filters = FilterConfig(hidden=hidden)
+    if args.verbose:
+        # Show everything meaningful
+        hidden |= {"progress", "file-history-snapshot", "last-prompt"}
+        filters = FilterConfig(hidden=hidden)
+    else:
+        # Default: conversational messages only — whitelist user-input (human-
+        # typed messages) and assistant, hiding tool results, system, etc.
+        # Also hide tool/thinking content blocks from assistant messages.
+        hidden |= {"thinking", "tools"}
+        filters = FilterConfig(
+            show_only={"user-input", "assistant", "queue-operation"},
+            hidden=hidden,
+        )
+
     config = RenderConfig(filters=filters)
 
     # Handle --since
@@ -454,8 +459,22 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
                     continue
 
             msg = parse_message(data)
-            if should_show_message(msg, data, config):
-                messages.append((data, msg))
+            if not should_show_message(msg, data, config):
+                continue
+
+            # In non-verbose mode, skip messages with no text content
+            # (e.g. tool_use-only assistant turns, tool_result-only user turns)
+            if not args.verbose:
+                content = data.get("message", {}).get("content", [])
+                if isinstance(content, list):
+                    has_text = any(
+                        c.get("type") == "text" and c.get("text", "").strip()
+                        for c in content
+                    )
+                    if not has_text:
+                        continue
+
+            messages.append((data, msg))
 
     # Handle --last-turn: show everything since the last user message.
     # Claude's work involves multiple assistant turns with tool use in between,
