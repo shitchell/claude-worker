@@ -134,7 +134,6 @@ def _print_worker_status(name: str) -> None:
     """Print a single-worker status line (same format as `list`)."""
     line = _format_worker_line(name)
     if line:
-        print(f"{'NAME':<20} {'PID':<8} {'STATUS':<10} {'SESSION'}")
         print(line)
 
 
@@ -565,8 +564,31 @@ def _format_worker_line(name: str) -> str | None:
         except OSError:
             pass
 
+    # Extract CWD from the init message in the log
+    cwd = "-"
+    log_file = runtime / "log"
+    if log_file.exists():
+        try:
+            with open(log_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        if (
+                            data.get("type") == "system"
+                            and data.get("subtype") == "init"
+                        ):
+                            cwd = data.get("cwd", "-")
+                            break
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            pass
+
     status = get_worker_status(runtime)
-    return f"{name:<20} {pid:<8} {status:<10} {session}"
+    return f"  {name}\n    pid: {pid}  status: {status}  cwd: {cwd}\n    session: {session}"
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -575,7 +597,6 @@ def cmd_list(args: argparse.Namespace) -> None:
     if not base.exists():
         return
 
-    print(f"{'NAME':<20} {'PID':<8} {'STATUS':<10} {'SESSION'}")
     for entry in sorted(base.iterdir()):
         if not entry.is_dir():
             continue
