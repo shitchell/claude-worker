@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-worker"
-version = "0.1.0"
+version = "0.1.2"
 description = "Launch and communicate with Claude Code subprocess workers via named FIFOs"
 requires-python = ">=3.11"
 dependencies = [
-    "claugs",
+    "claugs>=0.5.0",
 ]
 
 [project.scripts]
