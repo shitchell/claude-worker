@@ -104,6 +104,108 @@ def get_worker_status(runtime: Path) -> str:
     return "working"
 
 
+# -- Shared helpers --
+
+
+def _print_worker_status(name: str) -> None:
+    """Print a single-worker status line (same format as `list`)."""
+    line = _format_worker_line(name)
+    if line:
+        print(f"{'NAME':<20} {'PID':<8} {'STATUS':<10} {'SESSION'}")
+        print(line)
+
+
+def _wait_for_turn(name: str, timeout: float | None = None) -> int:
+    """Block until claude finishes its turn. Returns exit code (0=ready, 1=dead, 2=timeout).
+
+    Prints the triggering message JSON to stdout on success.
+    """
+    runtime = get_runtime_dir(name)
+    log_file = runtime / "log"
+    pid_file = runtime / "pid"
+
+    if not log_file.exists():
+        deadline = time.monotonic() + (timeout or 300)
+        while not log_file.exists():
+            if time.monotonic() > deadline:
+                print("Error: timeout waiting for log file", file=sys.stderr)
+                return 2
+            time.sleep(0.1)
+
+    deadline = None
+    if timeout:
+        deadline = time.monotonic() + timeout
+
+    def _manager_alive() -> bool:
+        try:
+            pid = int(pid_file.read_text().strip())
+            return pid_alive(pid)
+        except (ValueError, OSError):
+            return False
+
+    # Scan existing log to determine current state.
+    # Track: after the most recent user message, has a turn boundary appeared?
+    turn_end_after_last_user = None
+    with open(log_file) as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                data = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            msg_type = data.get("type")
+            if msg_type == "user":
+                turn_end_after_last_user = None  # reset on new user msg
+            elif msg_type == "result":
+                turn_end_after_last_user = data
+            elif msg_type == "assistant":
+                sr = data.get("message", {}).get("stop_reason")
+                if sr == "end_turn":
+                    turn_end_after_last_user = data
+
+    if turn_end_after_last_user is not None:
+        return 0
+
+    if not _manager_alive():
+        print("Error: worker process died", file=sys.stderr)
+        return 1
+
+    with open(log_file) as f:
+        f.seek(0, 2)  # seek to end
+        while True:
+            if deadline and time.monotonic() > deadline:
+                print("Error: timeout", file=sys.stderr)
+                return 2
+
+            line = f.readline()
+            if not line:
+                if not _manager_alive():
+                    print("Error: worker process died", file=sys.stderr)
+                    return 1
+                time.sleep(0.1)
+                continue
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = data.get("type")
+
+            if msg_type == "result":
+                return 0
+
+            if msg_type == "assistant":
+                sr = data.get("message", {}).get("stop_reason")
+                if sr == "end_turn":
+                    return 0
+
+
 # -- Subcommand handlers --
 
 
@@ -129,35 +231,24 @@ def cmd_start(args: argparse.Namespace) -> None:
     # Fork to background
     pid = os.fork()
     if pid > 0:
-        # Parent — wait for session init if we're sending a prompt,
-        # otherwise just wait for the PID file and return immediately
-        session_file = runtime / "session"
+        # Parent — wait for manager to be ready, then optionally wait for turn
         pid_file = runtime / "pid"
 
-        # Always wait for PID file (manager is running)
+        # Wait for PID file (manager is running)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if pid_file.exists():
                 break
             time.sleep(0.1)
 
-        # If we have an initial prompt, wait for session init (init arrives
-        # after first user message in stream-json mode)
-        if initial_message:
-            deadline = time.monotonic() + 30
-            while time.monotonic() < deadline:
-                if session_file.exists() and session_file.read_text().strip():
-                    break
-                time.sleep(0.1)
+        # If we sent a prompt, wait for the turn to complete (unless --background)
+        if initial_message and not args.background:
+            rc = _wait_for_turn(name)
+            _print_worker_status(name)
+            sys.exit(rc)
 
-        session_id = ""
-        if session_file.exists():
-            session_id = session_file.read_text().strip()
-
-        print(f"{name}")
-        print(f"  dir:     {runtime}")
-        if session_id:
-            print(f"  session: {session_id}")
+        # --background or no prompt: print status and return
+        _print_worker_status(name)
         return
 
     # Child — detach and become manager
@@ -206,6 +297,13 @@ def cmd_send(args: argparse.Namespace) -> None:
     with open(in_fifo, "w") as f:
         f.write(msg + "\n")
         f.flush()
+
+    if not args.background:
+        rc = _wait_for_turn(args.name)
+        _print_worker_status(args.name)
+        sys.exit(rc)
+    else:
+        _print_worker_status(args.name)
 
 
 def cmd_read(args: argparse.Namespace) -> None:
@@ -380,108 +478,38 @@ def _read_follow(log_file, config, formatter, since_uuid, since_ts, args):
 
 
 def cmd_wait_for_turn(args: argparse.Namespace) -> None:
-    """Block until claude finishes its turn or the session ends.
+    """Block until claude finishes its turn or the session ends."""
+    resolve_worker(args.name)  # validate worker exists
+    rc = _wait_for_turn(args.name, timeout=args.timeout)
+    sys.exit(rc)
 
-    Exit codes:
-        0 — turn complete, worker is ready for more input
-        1 — worker process died (no more turns possible)
-        2 — timeout
-    """
-    runtime = resolve_worker(args.name)
-    log_file = runtime / "log"
+
+def _format_worker_line(name: str) -> str | None:
+    """Format a single worker status line. Returns None if not a valid worker dir."""
+    runtime = get_runtime_dir(name)
+    if not runtime.exists():
+        return None
+
     pid_file = runtime / "pid"
+    session_file = runtime / "session"
 
-    if not log_file.exists():
-        # Wait for log to appear
-        deadline = time.monotonic() + (args.timeout or 300)
-        while not log_file.exists():
-            if time.monotonic() > deadline:
-                print("Error: timeout waiting for log file", file=sys.stderr)
-                sys.exit(2)
-            time.sleep(0.1)
-
-    deadline = None
-    if args.timeout:
-        deadline = time.monotonic() + args.timeout
-
-    def _manager_alive() -> bool:
+    pid = "-"
+    if pid_file.exists():
         try:
-            pid = int(pid_file.read_text().strip())
-            return pid_alive(pid)
-        except (ValueError, OSError):
-            return False
+            pid = pid_file.read_text().strip()
+        except OSError:
+            pass
 
-    # Scan existing log to determine current state.
-    # Track: after the most recent user message, has a turn boundary appeared?
-    # A "result" that precedes the last user message doesn't count.
-    seen_user = False
-    turn_end_after_last_user = None
-    with open(log_file) as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                data = json.loads(stripped)
-            except json.JSONDecodeError:
-                continue
-            msg_type = data.get("type")
-            if msg_type == "user":
-                seen_user = True
-                turn_end_after_last_user = None  # reset on new user msg
-            elif msg_type == "result":
-                turn_end_after_last_user = data
-            elif msg_type == "assistant":
-                sr = data.get("message", {}).get("stop_reason")
-                if sr == "end_turn":
-                    turn_end_after_last_user = data
+    session = "-"
+    if session_file.exists():
+        try:
+            sid = session_file.read_text().strip()
+            session = sid[:12] + "..." if len(sid) > 12 else sid
+        except OSError:
+            pass
 
-    if turn_end_after_last_user is not None:
-        # Turn already completed after the last user message
-        print(json.dumps(turn_end_after_last_user))
-        sys.exit(0)
-
-    if not _manager_alive():
-        print("Error: worker process died", file=sys.stderr)
-        sys.exit(1)
-
-    with open(log_file) as f:
-        f.seek(0, 2)  # seek to end
-        while True:
-            if deadline and time.monotonic() > deadline:
-                print("Error: timeout", file=sys.stderr)
-                sys.exit(2)
-
-            line = f.readline()
-            if not line:
-                # No new data — check if process is still alive
-                if not _manager_alive():
-                    print("Error: worker process died", file=sys.stderr)
-                    sys.exit(1)
-                time.sleep(0.1)
-                continue
-            line = line.strip()
-            if not line:
-                continue
-
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            msg_type = data.get("type")
-
-            # In -p stream-json mode, `result` means turn complete.
-            # The process stays alive for more input.
-            if msg_type == "result":
-                print(json.dumps(data))
-                sys.exit(0)
-
-            if msg_type == "assistant":
-                sr = data.get("message", {}).get("stop_reason")
-                if sr == "end_turn":
-                    print(json.dumps(data))
-                    sys.exit(0)
+    status = get_worker_status(runtime)
+    return f"{name:<20} {pid:<8} {status:<10} {session}"
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -490,33 +518,13 @@ def cmd_list(args: argparse.Namespace) -> None:
     if not base.exists():
         return
 
-    # Header
     print(f"{'NAME':<20} {'PID':<8} {'STATUS':<10} {'SESSION'}")
-
     for entry in sorted(base.iterdir()):
         if not entry.is_dir():
             continue
-        name = entry.name
-        pid_file = entry / "pid"
-        session_file = entry / "session"
-
-        pid = "-"
-        if pid_file.exists():
-            try:
-                pid = pid_file.read_text().strip()
-            except OSError:
-                pass
-
-        session = "-"
-        if session_file.exists():
-            try:
-                sid = session_file.read_text().strip()
-                session = sid[:12] + "..." if len(sid) > 12 else sid
-            except OSError:
-                pass
-
-        status = get_worker_status(entry)
-        print(f"{name:<20} {pid:<8} {status:<10} {session}")
+        line = _format_worker_line(entry.name)
+        if line:
+            print(line)
 
 
 def cmd_stop(args: argparse.Namespace) -> None:
@@ -555,20 +563,20 @@ def cmd_stop(args: argparse.Namespace) -> None:
 
 EXAMPLES = """\
 examples:
-  # Start a worker with a system prompt
+  # Start a worker — blocks until claude responds, then prints status
   claude-worker start --name researcher --prompt "You are a research assistant"
 
-  # Send a message and wait for the response
+  # Read the response
+  claude-worker read researcher --last-turn
+
+  # Send a message — blocks until claude responds
   claude-worker send researcher "summarize the architecture of this repo"
-  claude-worker wait-for-turn researcher
-
-  # Read the latest response
   claude-worker read researcher --last-turn
 
-  # Continue the conversation
-  claude-worker send researcher "now focus on the database layer"
+  # Fire-and-forget with --background
+  claude-worker send researcher "do something long" --background
+  # ... do other work ...
   claude-worker wait-for-turn researcher
-  claude-worker read researcher --last-turn
 
   # Follow output in real-time
   claude-worker read researcher --follow
@@ -587,10 +595,8 @@ examples:
   # Pipe a message via stdin
   cat question.txt | claude-worker send researcher
 
-  # Script: send, wait, and capture the result JSON
-  claude-worker send myworker "do the thing"
-  result=$(claude-worker wait-for-turn myworker)
-  echo "$result" | jq .result
+  # Start without blocking
+  claude-worker start --name bg-worker --prompt "you are a helper" --background
 """
 
 
@@ -610,6 +616,11 @@ def main():
     p_start.add_argument("--prompt-file", help="File to send as initial prompt content")
     p_start.add_argument("--prompt", help="String to send as initial prompt")
     p_start.add_argument(
+        "--background",
+        action="store_true",
+        help="Return immediately without waiting for claude's response",
+    )
+    p_start.add_argument(
         "claude_args",
         nargs="*",
         metavar="CLAUDE_ARGS",
@@ -621,6 +632,11 @@ def main():
     p_send.add_argument("name", help="Worker name")
     p_send.add_argument(
         "message", nargs="*", help="Message text (reads stdin if omitted)"
+    )
+    p_send.add_argument(
+        "--background",
+        action="store_true",
+        help="Return immediately without waiting for claude's response",
     )
 
     # -- read --
