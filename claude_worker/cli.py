@@ -635,6 +635,10 @@ examples:
 
   # Start without blocking
   claude-worker start --name bg-worker --prompt "you are a helper" --background
+
+  # Use a custom agent (from ~/.claude/agents/)
+  claude-worker start --name pm --agent project-manager \\
+    --prompt "plan the auth module implementation"
 """
 
 
