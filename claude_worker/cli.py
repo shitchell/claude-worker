@@ -427,7 +427,7 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
             if data.get("type") == "user":
                 last_user = i
         if last_user >= 0:
-            messages = messages[last_user + 1:]
+            messages = messages[last_user + 1 :]
 
     for data, msg in messages:
         uuid = data.get("uuid", "")[:8]
