@@ -74,9 +74,12 @@ def run_manager(
 
     # Build claude command
     cmd = [
-        "claude", "-p",
-        "--input-format", "stream-json",
-        "--output-format", "stream-json",
+        "claude",
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
         "--replay-user-messages",
         "--dangerously-skip-permissions",
         *claude_args,
@@ -158,10 +161,12 @@ def run_manager(
 
     # Send initial prompt if provided
     if initial_message and proc.stdin:
-        msg = json.dumps({
-            "type": "user",
-            "message": {"role": "user", "content": initial_message},
-        })
+        msg = json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": initial_message},
+            }
+        )
         proc.stdin.write((msg + "\n").encode())
         proc.stdin.flush()
 

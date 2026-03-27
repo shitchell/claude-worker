@@ -22,6 +22,7 @@ from claude_worker.manager import (
 def generate_name() -> str:
     """Generate a short random worker name."""
     import secrets
+
     return f"worker-{secrets.token_hex(2)}"
 
 
@@ -195,10 +196,12 @@ def cmd_send(args: argparse.Namespace) -> None:
         print("Error: empty message", file=sys.stderr)
         sys.exit(1)
 
-    msg = json.dumps({
-        "type": "user",
-        "message": {"role": "user", "content": content},
-    })
+    msg = json.dumps(
+        {
+            "type": "user",
+            "message": {"role": "user", "content": content},
+        }
+    )
 
     with open(in_fifo, "w") as f:
         f.write(msg + "\n")
@@ -313,6 +316,7 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
             # Format timestamp compactly
             try:
                 from datetime import datetime as dt
+
                 parsed = dt.fromisoformat(ts.replace("Z", "+00:00"))
                 ts = parsed.strftime("%H:%M:%S")
             except ValueError:
@@ -359,6 +363,7 @@ def _read_follow(log_file, config, formatter, since_uuid, since_ts, args):
                     if ts:
                         try:
                             from datetime import datetime as dt
+
                             parsed = dt.fromisoformat(ts.replace("Z", "+00:00"))
                             ts = parsed.strftime("%H:%M:%S")
                         except ValueError:
@@ -562,24 +567,32 @@ def main():
     p_start.add_argument("--prompt-file", help="File to send as initial prompt content")
     p_start.add_argument("--prompt", help="String to send as initial prompt")
     p_start.add_argument(
-        "claude_args", nargs="*", metavar="CLAUDE_ARGS",
+        "claude_args",
+        nargs="*",
+        metavar="CLAUDE_ARGS",
         help="Additional args passed to claude (use -- before these)",
     )
 
     # -- send --
     p_send = sub.add_parser("send", help="Send a message to a worker")
     p_send.add_argument("name", help="Worker name")
-    p_send.add_argument("message", nargs="*", help="Message text (reads stdin if omitted)")
+    p_send.add_argument(
+        "message", nargs="*", help="Message text (reads stdin if omitted)"
+    )
 
     # -- read --
     p_read = sub.add_parser("read", help="Read worker output")
     p_read.add_argument("name", help="Worker name")
     p_read.add_argument("--follow", "-f", action="store_true", help="Tail the log")
     p_read.add_argument("--since", help="Show messages after this UUID or timestamp")
-    p_read.add_argument("--last-turn", action="store_true", help="Show only the last assistant turn")
+    p_read.add_argument(
+        "--last-turn", action="store_true", help="Show only the last assistant turn"
+    )
 
     # -- wait-for-turn --
-    p_wait = sub.add_parser("wait-for-turn", help="Block until claude is ready for input")
+    p_wait = sub.add_parser(
+        "wait-for-turn", help="Block until claude is ready for input"
+    )
     p_wait.add_argument("name", help="Worker name")
     p_wait.add_argument("--timeout", type=float, help="Timeout in seconds")
 
@@ -589,7 +602,9 @@ def main():
     # -- stop --
     p_stop = sub.add_parser("stop", help="Stop a worker")
     p_stop.add_argument("name", help="Worker name")
-    p_stop.add_argument("--force", action="store_true", help="Send SIGKILL instead of SIGTERM")
+    p_stop.add_argument(
+        "--force", action="store_true", help="Send SIGKILL instead of SIGTERM"
+    )
 
     args = parser.parse_args()
 
