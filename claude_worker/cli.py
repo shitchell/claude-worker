@@ -542,7 +542,7 @@ def _format_worker_line(name: str) -> str | None:
     if session_file.exists():
         try:
             sid = session_file.read_text().strip()
-            session = sid[:12] + "..." if len(sid) > 12 else sid
+            session = sid
         except OSError:
             pass
 
