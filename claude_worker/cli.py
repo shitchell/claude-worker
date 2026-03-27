@@ -223,6 +223,9 @@ def cmd_start(args: argparse.Namespace) -> None:
             sys.exit(1)
         claude_args = ["--resume", session_id] + claude_args
 
+    if args.agent:
+        claude_args = ["--agent", args.agent] + claude_args
+
     # Build initial message from prompt-file and/or prompt
     parts = []
     if args.prompt_file:
@@ -637,6 +640,7 @@ def main():
     p_start.add_argument("--cwd", help="Working directory for claude")
     p_start.add_argument("--prompt-file", help="File to send as initial prompt content")
     p_start.add_argument("--prompt", help="String to send as initial prompt")
+    p_start.add_argument("--agent", help="Claude agent ID (from ~/.claude/agents/)")
     p_start.add_argument(
         "--resume",
         action="store_true",
