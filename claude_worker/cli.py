@@ -108,6 +108,28 @@ def get_worker_status(runtime: Path) -> str:
 # -- Shared helpers --
 
 
+def _format_msg_prefix(data: dict) -> str:
+    """Format a [HH:MM:SS uuid] prefix from a JSONL message dict."""
+    from datetime import datetime, timezone
+
+    uuid = data.get("uuid", "")[:8]
+    ts = ""
+    ts_raw = data.get("timestamp", "")
+    if ts_raw:
+        try:
+            parsed = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+            # Convert to local timezone
+            local = parsed.astimezone()
+            ts = local.strftime("%H:%M:%S")
+        except ValueError:
+            pass
+    if ts and uuid:
+        return f"[{ts} {uuid}] "
+    if uuid:
+        return f"[{uuid}] "
+    return ""
+
+
 def _print_worker_status(name: str) -> None:
     """Print a single-worker status line (same format as `list`)."""
     line = _format_worker_line(name)
@@ -345,12 +367,14 @@ def cmd_read(args: argparse.Namespace) -> None:
         "last-prompt",
         "system",
         "result",
+        "timestamps",  # we render our own prefix with uuid + local time
+        "metadata",  # we render uuid in our prefix
     }
     if not args.verbose:
-        hidden |= {"thinking", "tools", "tool-result", "metadata"}
+        hidden |= {"thinking", "tools", "tool-result"}
 
     filters = FilterConfig(hidden=hidden)
-    config = RenderConfig(filters=filters, timestamp_format="%H:%M:%S")
+    config = RenderConfig(filters=filters)
 
     # Handle --since
     since_ts = None
@@ -370,7 +394,19 @@ def cmd_read(args: argparse.Namespace) -> None:
                 print(f"Error: cannot parse --since value: {val}", file=sys.stderr)
                 sys.exit(1)
 
-    formatter = ANSIFormatter()
+    # Use markdown when running inside Claude Code (CLAUDECODE env var) —
+    # supervisor claudes parse markdown better than ANSI or plain text.
+    # ANSI colors for human terminals. Override with --color/--no-color.
+    from claude_logs import MarkdownFormatter, PlainFormatter
+
+    if args.color:
+        formatter = ANSIFormatter()
+    elif args.no_color:
+        formatter = PlainFormatter()
+    elif os.environ.get("CLAUDECODE"):
+        formatter = MarkdownFormatter()
+    else:
+        formatter = ANSIFormatter()
 
     if args.follow:
         _read_follow(log_file, config, formatter, since_uuid, since_ts, args)
@@ -433,23 +469,10 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
             messages = messages[last_user + 1 :]
 
     for data, msg in messages:
-        uuid = data.get("uuid", "")[:8]
-        ts = data.get("timestamp", "")
-        if ts:
-            # Format timestamp compactly
-            try:
-                from datetime import datetime as dt
-
-                parsed = dt.fromisoformat(ts.replace("Z", "+00:00"))
-                ts = parsed.strftime("%H:%M:%S")
-            except ValueError:
-                pass
-        prefix = f"[{ts} {uuid}] " if uuid else ""
-
         blocks = msg.render(config)
         output = formatter.format(blocks)
         if output.strip():
-            # Prepend timestamp+uuid to first line
+            prefix = _format_msg_prefix(data)
             lines = output.split("\n")
             lines[0] = prefix + lines[0]
             print("\n".join(lines))
@@ -481,20 +504,10 @@ def _read_follow(log_file, config, formatter, since_uuid, since_ts, args):
                     continue
                 msg = parse_message(data)
                 if should_show_message(msg, data, config):
-                    uuid = data.get("uuid", "")[:8]
-                    ts = data.get("timestamp", "")
-                    if ts:
-                        try:
-                            from datetime import datetime as dt
-
-                            parsed = dt.fromisoformat(ts.replace("Z", "+00:00"))
-                            ts = parsed.strftime("%H:%M:%S")
-                        except ValueError:
-                            pass
-                    prefix = f"[{ts} {uuid}] " if uuid else ""
                     blocks = msg.render(config)
                     output = formatter.format(blocks)
                     if output.strip():
+                        prefix = _format_msg_prefix(data)
                         lines = output.split("\n")
                         lines[0] = prefix + lines[0]
                         print("\n".join(lines), flush=True)
@@ -685,6 +698,16 @@ def main():
         "-v",
         action="store_true",
         help="Include tool calls, tool results, and thinking blocks",
+    )
+    p_read.add_argument(
+        "--color",
+        action="store_true",
+        help="Force ANSI color output",
+    )
+    p_read.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Force plain text output (default when CLAUDECODE is set)",
     )
 
     # -- wait-for-turn --
