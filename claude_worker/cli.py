@@ -486,6 +486,7 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
         if last_user >= 0:
             messages = messages[last_user + 1 :]
 
+    last_uuid = None
     for data, msg in messages:
         blocks = msg.render(config)
         output = formatter.format(blocks)
@@ -494,6 +495,14 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
             lines = output.split("\n")
             lines[0] = prefix + lines[0]
             print("\n".join(lines))
+            uuid = data.get("uuid", "")
+            if uuid:
+                last_uuid = uuid
+
+    if last_uuid:
+        print(
+            f"\nTo see only new messages: claude-worker read {args.name} --since {last_uuid[:8]}"
+        )
 
 
 def _read_follow(log_file, config, formatter, since_uuid, since_ts, args):
