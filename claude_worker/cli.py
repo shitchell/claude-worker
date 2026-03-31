@@ -706,7 +706,7 @@ def main():
     p_start.add_argument("--cwd", help="Working directory for claude")
     p_start.add_argument("--prompt-file", help="File to send as initial prompt content")
     p_start.add_argument("--prompt", help="String to send as initial prompt")
-    p_start.add_argument("--agent", help="Claude agent ID (from ~/.claude/agents/)")
+    p_start.add_argument("--agent", help="Agent for the current session. Overrides the 'agent' setting.")
     p_start.add_argument(
         "--resume",
         action="store_true",
