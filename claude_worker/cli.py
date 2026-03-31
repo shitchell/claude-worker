@@ -15,8 +15,9 @@ from claude_worker.manager import (
     create_runtime_dir,
     get_base_dir,
     get_runtime_dir,
-    get_saved_session,
+    get_saved_worker,
     run_manager,
+    save_worker,
 )
 
 
@@ -45,28 +46,33 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
-def get_worker_status(runtime: Path) -> str:
+def get_worker_status(runtime: Path) -> tuple[str, float | None]:
     """Determine worker status from PID and log state.
 
     In -p stream-json mode, each turn emits a `result` message but the process
     stays alive waiting for more input. A claude session never truly "completes" —
     it either idles (waiting), works, or its process dies.
+
+    Returns (status, log_mtime) where log_mtime is the log file's modification
+    time as a Unix timestamp, useful for computing idle duration.
     """
     pid_file = runtime / "pid"
     log_file = runtime / "log"
 
     # Check PID
     if not pid_file.exists():
-        return "dead"
+        return "dead", None
     try:
         pid = int(pid_file.read_text().strip())
     except (ValueError, OSError):
-        return "dead"
+        return "dead", None
     alive = pid_alive(pid)
 
     # Check last meaningful message in log
     if not log_file.exists():
-        return "starting" if alive else "dead"
+        return ("starting" if alive else "dead"), None
+
+    log_mtime = log_file.stat().st_mtime
 
     last_type = None
     last_stop_reason = None
@@ -96,16 +102,35 @@ def get_worker_status(runtime: Path) -> str:
         pass
 
     if not alive:
-        return "dead"
+        return "dead", log_mtime
     # result with process alive = turn complete, waiting for next input
     if last_type == "result":
-        return "waiting"
+        return "waiting", log_mtime
     if last_stop_reason == "end_turn":
-        return "waiting"
-    return "working"
+        return "waiting", log_mtime
+    return "working", log_mtime
 
 
 # -- Shared helpers --
+
+
+def _format_duration_since(mtime: float) -> str:
+    """Format a human-readable duration from a Unix timestamp to now."""
+    secs = int(time.time() - mtime)
+    if secs < 0:
+        return ""
+    if secs < 60:
+        return f"{secs}s"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins}m"
+    hours = mins // 60
+    remaining_mins = mins % 60
+    if hours < 24:
+        return f"{hours}h{remaining_mins}m" if remaining_mins else f"{hours}h"
+    days = hours // 24
+    remaining_hours = hours % 24
+    return f"{days}d{remaining_hours}h" if remaining_hours else f"{days}d"
 
 
 def _format_msg_prefix(data: dict) -> str:
@@ -235,17 +260,32 @@ def cmd_start(args: argparse.Namespace) -> None:
     """Start a new claude worker."""
     name = args.name or generate_name()
 
-    # Handle --resume: look up saved session ID and pass to claude
+    # Handle --resume: restore saved startup vars (cwd, claude_args)
     claude_args = list(args.claude_args or [])
     if args.resume:
-        session_id = get_saved_session(name)
-        if not session_id:
+        saved = get_saved_worker(name)
+        if not saved or not saved.get("session_id"):
             print(f"Error: no saved session for worker '{name}'", file=sys.stderr)
             sys.exit(1)
-        claude_args = ["--resume", session_id] + claude_args
+        # Restore saved cwd unless explicitly overridden
+        if not args.cwd and saved.get("cwd"):
+            args.cwd = saved["cwd"]
+        # Restore saved claude_args (which already includes --agent, etc.)
+        # and append any new args the user provided on this invocation
+        extra = claude_args
+        claude_args = ["--resume", saved["session_id"]] + (saved.get("claude_args") or []) + extra
+    else:
+        # Build claude_args with --agent etc. (order matters: agent first)
+        if args.agent:
+            claude_args = ["--agent", args.agent] + claude_args
 
-    if args.agent:
-        claude_args = ["--agent", args.agent] + claude_args
+    # Save startup vars for future --resume (claude_args without --resume prefix)
+    saved_args = claude_args if not args.resume else claude_args[2:]  # strip --resume <sid>
+    save_worker(
+        name,
+        cwd=args.cwd or os.getcwd(),
+        claude_args=saved_args,
+    )
 
     # Build initial message from prompt-file and/or prompt
     parts = []
@@ -573,31 +613,23 @@ def _format_worker_line(name: str) -> str | None:
         except OSError:
             pass
 
-    # Extract CWD from the init message in the log
+    # Read CWD from saved worker metadata
     cwd = "-"
-    log_file = runtime / "log"
-    if log_file.exists():
-        try:
-            with open(log_file) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                        if (
-                            data.get("type") == "system"
-                            and data.get("subtype") == "init"
-                        ):
-                            cwd = data.get("cwd", "-")
-                            break
-                    except json.JSONDecodeError:
-                        continue
-        except OSError:
-            pass
+    saved = get_saved_worker(name)
+    if saved and saved.get("cwd"):
+        home = os.path.expanduser("~")
+        if saved["cwd"].startswith(home):
+            cwd = "~" + saved["cwd"][len(home):]
+        else:
+            cwd = saved["cwd"]
 
-    status = get_worker_status(runtime)
-    return f"  {name}\n    pid: {pid}  status: {status}  cwd: {cwd}\n    session: {session}"
+    status, log_mtime = get_worker_status(runtime)
+    idle_str = ""
+    if log_mtime is not None and status in ("waiting", "dead"):
+        idle_str = _format_duration_since(log_mtime)
+        if idle_str:
+            idle_str = f"  idle: {idle_str}"
+    return f"  {name}\n    pid: {pid}  status: {status}{idle_str}  cwd: {cwd}\n    session: {session}"
 
 
 def cmd_list(args: argparse.Namespace) -> None:

@@ -49,8 +49,11 @@ def get_sessions_file() -> Path:
     return get_base_dir() / ".sessions.json"
 
 
-def save_session(name: str, session_id: str) -> None:
-    """Persist a name→session_id mapping."""
+def save_worker(name: str, **kwargs) -> None:
+    """Persist worker metadata (session_id, cwd, agent, claude_args, etc.).
+
+    Merges kwargs into any existing entry for this worker name.
+    """
     path = get_sessions_file()
     sessions = {}
     if path.exists():
@@ -58,18 +61,35 @@ def save_session(name: str, session_id: str) -> None:
             sessions = json.loads(path.read_text())
         except (json.JSONDecodeError, OSError):
             pass
-    sessions[name] = session_id
+    # Migrate legacy string entries (old format: name → session_id)
+    existing = sessions.get(name)
+    if isinstance(existing, str):
+        existing = {"session_id": existing}
+    elif not isinstance(existing, dict):
+        existing = {}
+    existing.update(kwargs)
+    sessions[name] = existing
     path.write_text(json.dumps(sessions, indent=2))
 
 
-def get_saved_session(name: str) -> str | None:
-    """Look up a saved session ID by worker name."""
+def get_saved_worker(name: str) -> dict | None:
+    """Look up saved worker metadata by name.
+
+    Returns a dict with keys like session_id, cwd, agent, claude_args.
+    Returns None if no entry exists.
+    """
     path = get_sessions_file()
     if not path.exists():
         return None
     try:
         sessions = json.loads(path.read_text())
-        return sessions.get(name)
+        entry = sessions.get(name)
+        if entry is None:
+            return None
+        # Migrate legacy string entries
+        if isinstance(entry, str):
+            return {"session_id": entry}
+        return entry
     except (json.JSONDecodeError, OSError):
         return None
 
@@ -97,6 +117,7 @@ def run_manager(
 
     # Write manager PID
     pid_file.write_text(str(os.getpid()))
+    resolved_cwd = cwd or os.getcwd()
 
     # Build environment — unset ANTHROPIC_API_KEY to force subscription auth
     env = os.environ.copy()
@@ -122,7 +143,7 @@ def run_manager(
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         env=env,
-        cwd=cwd or os.getcwd(),
+        cwd=resolved_cwd,
     )
 
     # Signal handling — forward SIGTERM to claude, then exit
@@ -155,7 +176,7 @@ def run_manager(
                         ):
                             sid = data.get("session_id", "")
                             session_file.write_text(sid)
-                            save_session(name, sid)
+                            save_worker(name, session_id=sid)
                             session_captured.set()
                     except (json.JSONDecodeError, KeyError):
                         pass
