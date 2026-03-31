@@ -273,14 +273,18 @@ def cmd_start(args: argparse.Namespace) -> None:
         # Restore saved claude_args (which already includes --agent, etc.)
         # and append any new args the user provided on this invocation
         extra = claude_args
-        claude_args = ["--resume", saved["session_id"]] + (saved.get("claude_args") or []) + extra
+        claude_args = (
+            ["--resume", saved["session_id"]] + (saved.get("claude_args") or []) + extra
+        )
     else:
         # Build claude_args with --agent etc. (order matters: agent first)
         if args.agent:
             claude_args = ["--agent", args.agent] + claude_args
 
     # Save startup vars for future --resume (claude_args without --resume prefix)
-    saved_args = claude_args if not args.resume else claude_args[2:]  # strip --resume <sid>
+    saved_args = (
+        claude_args if not args.resume else claude_args[2:]
+    )  # strip --resume <sid>
     save_worker(
         name,
         cwd=args.cwd or os.getcwd(),
@@ -619,7 +623,7 @@ def _format_worker_line(name: str) -> str | None:
     if saved and saved.get("cwd"):
         home = os.path.expanduser("~")
         if saved["cwd"].startswith(home):
-            cwd = "~" + saved["cwd"][len(home):]
+            cwd = "~" + saved["cwd"][len(home) :]
         else:
             cwd = saved["cwd"]
 
@@ -738,7 +742,9 @@ def main():
     p_start.add_argument("--cwd", help="Working directory for claude")
     p_start.add_argument("--prompt-file", help="File to send as initial prompt content")
     p_start.add_argument("--prompt", help="String to send as initial prompt")
-    p_start.add_argument("--agent", help="Agent for the current session. Overrides the 'agent' setting.")
+    p_start.add_argument(
+        "--agent", help="Agent for the current session. Overrides the 'agent' setting."
+    )
     p_start.add_argument(
         "--resume",
         action="store_true",
