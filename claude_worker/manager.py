@@ -55,6 +55,7 @@ def save_worker(name: str, **kwargs) -> None:
     Merges kwargs into any existing entry for this worker name.
     """
     path = get_sessions_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
     sessions = {}
     if path.exists():
         try:
