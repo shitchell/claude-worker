@@ -962,10 +962,13 @@ def cmd_send(args: argparse.Namespace) -> None:
         # the prior turn's `result` message matches before claude processes
         # the new input.
         if marker_uuid:
+            # Short-form UUID for readability. `_uuid_matches` is
+            # case-insensitive prefix-based, so the 8-char prefix is
+            # sufficient as a marker in practice.
             print(
                 f"\nTo wait for THIS turn's response: "
                 f"claude-worker wait-for-turn {args.name} "
-                f"--after-uuid {marker_uuid}"
+                f"--after-uuid {marker_uuid[:UUID_SHORT_LENGTH]}"
             )
         return
 
