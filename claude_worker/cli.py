@@ -252,23 +252,26 @@ def _wait_for_ready_state(
 
 
 def _generate_queue_id() -> str:
-    """Generate a short hex correlation ID for queued messages."""
-    import secrets
+    """Generate a correlation ID for queued messages.
 
-    return secrets.token_hex(QUEUE_ID_BYTES)
+    Uses epoch milliseconds — deterministic without increment state,
+    visually distinct from UUIDs, and works across multiple orchestrators.
+    Sub-millisecond collisions are acceptable for the current use case.
+    """
+    return str(int(time.time() * 1000))
 
 
 def _wait_for_queue_response(
     name: str, queue_id: str, timeout: float = QUEUE_WAIT_TIMEOUT_SECONDS
 ) -> int:
-    """Tail the log waiting for an assistant message containing [QUEUE-{id}].
+    """Tail the log waiting for an assistant message containing [queue:{id}].
 
     Returns 0 if the correlation tag is found, 1 if the worker dies, 2 on timeout.
     """
     runtime = get_runtime_dir(name)
     log_file = runtime / "log"
     pid_file = runtime / "pid"
-    tag = f"[QUEUE-{queue_id}]"
+    tag = f"[{QUEUE_TAG_PREFIX}{queue_id}]"
 
     def _manager_alive() -> bool:
         try:
@@ -636,7 +639,7 @@ def cmd_send(args: argparse.Namespace) -> None:
         queue_id = _generate_queue_id()
         content = (
             content
-            + f"\n\n[Please include [QUEUE-{queue_id}] literally in your response so the sender can identify it.]"
+            + f"\n\n[Please include [{QUEUE_TAG_PREFIX}{queue_id}] literally in your response so the sender can identify it.]"
         )
 
     msg = json.dumps(
