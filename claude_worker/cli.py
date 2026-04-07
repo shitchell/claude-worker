@@ -251,6 +251,84 @@ def _wait_for_ready_state(
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
+def _worker_is_pm(name: str) -> bool:
+    """Return True if the named worker is marked as a PM worker in metadata."""
+    saved = get_saved_worker(name)
+    return bool(saved and saved.get("pm"))
+
+
+def _env_chat_id() -> str | None:
+    """Return the chat ID from the environment, or None.
+
+    A chat ID is inferred from CLAUDE_SESSION_UUID *only* when CLAUDECODE=1
+    is also set, which indicates we're running inside a Claude Code session
+    (the Bash tool sets CLAUDECODE automatically, and our install-hook
+    populates CLAUDE_SESSION_UUID via the SessionStart hook).
+    """
+    if os.environ.get("CLAUDECODE") != "1":
+        return None
+    uuid = os.environ.get("CLAUDE_SESSION_UUID", "").strip()
+    return uuid or None
+
+
+def _resolve_chat_id(
+    worker_name: str,
+    explicit_chat: str | None,
+    all_chats: bool,
+) -> str | None:
+    """Determine the effective chat ID for a send/read operation.
+
+    Returns the chat ID string, or None for no chat routing. Priority:
+      1. ``all_chats=True`` → None (explicit opt-out of filtering)
+      2. ``explicit_chat`` → use as-is IF the target is a PM worker
+         (for non-PM targets: print a stderr warning and return None)
+      3. Env-based auto-detection → only applies to PM workers
+      4. Otherwise → None
+
+    Prints a warning on stderr if ``--chat`` was passed but the target
+    worker is not a PM — per user spec, non-PM targets pass through
+    unchanged in that case.
+    """
+    if all_chats:
+        return None
+
+    is_pm = _worker_is_pm(worker_name)
+
+    if explicit_chat:
+        if not is_pm:
+            print(
+                f"Warning: --chat is only applicable to PM workers, "
+                f"and '{worker_name}' is not a PM. Passing message through "
+                f"unchanged.",
+                file=sys.stderr,
+            )
+            return None
+        return explicit_chat
+
+    # Auto-detection: PM workers only
+    if is_pm:
+        return _env_chat_id()
+
+    return None
+
+
+def _message_contains_chat_tag(data: dict, chat_id: str) -> bool:
+    """Return True if the message's text content contains the chat tag.
+
+    Used by ``read`` chat filtering. Checks both user messages (string
+    content) and assistant messages (list of content blocks with text).
+    """
+    tag = f"[{CHAT_TAG_PREFIX}{chat_id}]"
+    content = data.get("message", {}).get("content", "")
+    if isinstance(content, str):
+        return tag in content
+    if isinstance(content, list):
+        for block in content:
+            if block.get("type") == "text" and tag in block.get("text", ""):
+                return True
+    return False
+
+
 def _generate_queue_id() -> str:
     """Generate a correlation ID for queued messages.
 
@@ -665,6 +743,13 @@ def cmd_send(args: argparse.Namespace) -> None:
     #      reaches claude (race condition).
     marker_uuid = _get_last_uuid(log_file)
 
+    # Chat routing: if a chat ID is effective (explicit --chat or env
+    # auto-detection on a PM worker), prefix the message body with the
+    # tag so the PM can identify which consumer it's responding to.
+    chat_id = _resolve_chat_id(args.name, args.chat, args.all_chats)
+    if chat_id is not None:
+        content = f"[{CHAT_TAG_PREFIX}{chat_id}] {content}"
+
     # If --queue, append a correlation instruction so we can detect the
     # specific response that corresponds to THIS send.
     queue_id: str | None = None
@@ -769,6 +854,15 @@ def cmd_read(args: argparse.Namespace) -> tuple[str | None, str | None]:
                 print(f"Error: cannot parse --since value: {val}", file=sys.stderr)
                 sys.exit(1)
 
+    # Resolve effective chat ID from --chat, --all-chats, or env-based
+    # auto-detection (PM workers only). Stash on args so _read_static
+    # can consult it without a separate parameter.
+    args.chat_id = _resolve_chat_id(
+        args.name,
+        getattr(args, "chat", None),
+        getattr(args, "all_chats", False),
+    )
+
     # Use markdown when running inside Claude Code (CLAUDECODE env var) —
     # supervisor claudes parse markdown better than ANSI or plain text.
     # ANSI colors for human terminals. Override with --color/--no-color.
@@ -824,6 +918,12 @@ def _show_worker_response(
         color=False,
         no_color=False,
         no_hint=True,
+        # Chat filtering is handled by the --last-turn / --since window
+        # boundary (the caller just sent the message, so last-turn locates
+        # it). Disable per-message chat filtering to avoid dropping the
+        # caller's own response when chat_id was also embedded.
+        chat=None,
+        all_chats=True,
     )
     first_uuid, last_uuid = cmd_read(namespace)
     if first_uuid and last_uuid:
@@ -962,6 +1062,15 @@ def _read_static(
                 and data.get("type") == "user"
             ):
                 messages = []
+
+            # Chat routing filter: keep only messages containing [chat:<id>].
+            # args.chat_id is set by cmd_read after resolving --chat / env.
+            # Applied AFTER --last-turn's reset so last-turn can still find
+            # the turn boundary correctly, but BEFORE display filtering so
+            # we don't waste work on messages we'll drop anyway.
+            chat_id = getattr(args, "chat_id", None)
+            if chat_id and not _message_contains_chat_tag(data, chat_id):
+                continue
 
             msg = parse_message(data)
             if not should_show_message(msg, data, config):
@@ -1480,6 +1589,19 @@ def main():
         help="After the turn completes, print everything new since the send "
         "(equivalent to `read --since <marker>`)",
     )
+    p_send_chat = p_send.add_mutually_exclusive_group()
+    p_send_chat.add_argument(
+        "--chat",
+        metavar="ID",
+        help="Prepend [chat:<id>] to the message (PM workers only). "
+        "Auto-detected from CLAUDE_SESSION_UUID when running under "
+        "CLAUDECODE=1 against a PM worker.",
+    )
+    p_send_chat.add_argument(
+        "--all-chats",
+        action="store_true",
+        help="Bypass any automatic chat tagging (no-op for non-PM workers)",
+    )
 
     # -- read --
     p_read = sub.add_parser("read", help="Read worker output")
@@ -1525,6 +1647,19 @@ def main():
         "--no-color",
         action="store_true",
         help="Force plain text output (default when CLAUDECODE is set)",
+    )
+    p_read_chat = p_read.add_mutually_exclusive_group()
+    p_read_chat.add_argument(
+        "--chat",
+        metavar="ID",
+        help="Filter to messages containing [chat:<id>] (PM workers only). "
+        "Auto-detected from CLAUDE_SESSION_UUID when running under "
+        "CLAUDECODE=1 against a PM worker.",
+    )
+    p_read_chat.add_argument(
+        "--all-chats",
+        action="store_true",
+        help="Show all chats — bypass automatic chat filtering",
     )
 
     # -- wait-for-turn --
