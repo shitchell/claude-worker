@@ -460,6 +460,9 @@ def cmd_start(args: argparse.Namespace) -> None:
 
     # Handle --resume: restore saved startup vars (cwd, claude_args)
     claude_args = list(args.claude_args or [])
+    # Determine whether this worker is a PM worker. For new workers, the
+    # --pm flag drives this. For resumes, we check the saved metadata.
+    pm_mode = args.pm
     if args.resume:
         saved = get_saved_worker(name)
         if not saved or not saved.get("session_id"):
@@ -472,12 +475,33 @@ def cmd_start(args: argparse.Namespace) -> None:
         # and append any new args the user provided on this invocation
         extra = claude_args
         claude_args = (
-            ["--resume", saved["session_id"]] + (saved.get("claude_args") or []) + extra
+            ["--resume", saved["session_id"]]
+            + (saved.get("claude_args") or [])
+            + extra
         )
+        # Resumed workers inherit PM mode from saved metadata
+        if saved.get("pm"):
+            pm_mode = True
     else:
         # Build claude_args with --agent etc. (order matters: agent first)
         if args.agent:
             claude_args = ["--agent", args.agent] + claude_args
+
+    # --pm mode: inject --append-system-prompt-file pointing at the runtime
+    # dir's identity.md. The runtime dir path is deterministic from `name`
+    # so we can reference it before creating the dir; we write the identity
+    # file after create_runtime_dir but before the fork, so the manager
+    # subprocess always finds it when spawning claude.
+    identity_path: Path | None = None
+    if pm_mode and not args.resume:
+        # For a fresh PM worker, add the identity arg. For resume, the
+        # saved claude_args already contain it.
+        identity_path = get_runtime_dir(name) / "identity.md"
+        claude_args = ["--append-system-prompt-file", str(identity_path)] + claude_args
+    elif pm_mode and args.resume:
+        # On resume, recompute the identity path so we can rewrite the file
+        # (the previous runtime dir was cleaned up on stop)
+        identity_path = get_runtime_dir(name) / "identity.md"
 
     # Save startup vars for future --resume (claude_args without --resume prefix)
     saved_args = (
@@ -487,14 +511,19 @@ def cmd_start(args: argparse.Namespace) -> None:
         name,
         cwd=args.cwd or os.getcwd(),
         claude_args=saved_args,
+        pm=pm_mode,
     )
 
-    # Build initial message from prompt-file and/or prompt
+    # Build initial message from prompt-file and/or prompt.
+    # For PM workers with no user-provided prompt, inject a canonical
+    # internalization message so the PM runs its startup recovery logic.
     parts = []
     if args.prompt_file:
         parts.append(Path(args.prompt_file).read_text())
     if args.prompt:
         parts.append(args.prompt)
+    if not parts and pm_mode:
+        parts.append(PM_INTERNALIZE_MESSAGE)
     initial_message = "\n\n".join(parts) if parts else None
 
     # Create runtime directory
@@ -503,6 +532,12 @@ def cmd_start(args: argparse.Namespace) -> None:
     except FileExistsError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # Write the PM identity file into the runtime dir. Must happen BEFORE
+    # the fork so the manager subprocess sees it when spawning claude.
+    if identity_path is not None:
+        identity_content = _load_bundled_resource("identities", PM_IDENTITY_RESOURCE)
+        identity_path.write_text(identity_content)
 
     # --show-response and --show-full-response are mutually exclusive
     if args.show_response and args.show_full_response:
@@ -1092,9 +1127,10 @@ def _format_worker_line(name: str) -> str | None:
         except OSError:
             pass
 
-    # Read CWD from saved worker metadata
+    # Read CWD + PM flag from saved worker metadata
     cwd = "-"
     saved = get_saved_worker(name)
+    is_pm = bool(saved and saved.get("pm"))
     if saved and saved.get("cwd"):
         home = os.path.expanduser("~")
         if saved["cwd"].startswith(home):
@@ -1115,8 +1151,9 @@ def _format_worker_line(name: str) -> str | None:
     preview = _get_last_assistant_preview(log_file, LS_PREVIEW_MAX_CHARS)
     preview_line = f"\n    last: {preview}" if preview else ""
 
+    pm_tag = " [PM]" if is_pm else ""
     return (
-        f"  {name}\n"
+        f"  {name}{pm_tag}\n"
         f"    pid: {pid}  status: {status}{idle_str}  cwd: {cwd}\n"
         f"    session: {session}"
         f"{preview_line}"
@@ -1401,6 +1438,13 @@ def main():
         "--show-full-response",
         action="store_true",
         help="After the initial turn completes, print everything from the log",
+    )
+    p_start.add_argument(
+        "--pm",
+        action="store_true",
+        help="Launch as a Project Manager worker — loads the PM identity "
+        "via --append-system-prompt-file and enables chat-tag routing for "
+        "multi-consumer coordination",
     )
     p_start.add_argument(
         "claude_args",
