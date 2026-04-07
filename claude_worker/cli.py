@@ -29,6 +29,7 @@ UUID_SHORT_LENGTH: int = 8
 
 # Queue correlation
 QUEUE_ID_BYTES: int = 4
+QUEUE_WAIT_TIMEOUT_SECONDS: float = 600.0
 
 from claude_worker.manager import (
     cleanup_runtime_dir,
@@ -206,10 +207,98 @@ def _print_worker_status(name: str) -> None:
         print(line)
 
 
-def _wait_for_turn(name: str, timeout: float | None = None) -> int:
+def _wait_for_ready_state(
+    name: str, timeout: float = WORKER_READY_TIMEOUT_SECONDS
+) -> tuple[str, float | None]:
+    """Block while worker is `starting`, return when it reaches a terminal state.
+
+    Terminal states for this helper: `waiting`, `working`, `dead`.
+    The `starting` state is transient and means "no log output yet."
+
+    Returns the final (status, log_mtime) tuple. Raises TimeoutError if the
+    worker stays in `starting` longer than `timeout` seconds.
+    """
+    runtime = get_runtime_dir(name)
+    deadline = time.monotonic() + timeout
+    while True:
+        status, log_mtime = get_worker_status(runtime)
+        if status != "starting":
+            return status, log_mtime
+        if time.monotonic() > deadline:
+            raise TimeoutError(
+                f"Worker '{name}' stayed in 'starting' for {timeout}s"
+            )
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+
+def _generate_queue_id() -> str:
+    """Generate a short hex correlation ID for queued messages."""
+    import secrets
+
+    return secrets.token_hex(QUEUE_ID_BYTES)
+
+
+def _wait_for_queue_response(
+    name: str, queue_id: str, timeout: float = QUEUE_WAIT_TIMEOUT_SECONDS
+) -> int:
+    """Tail the log waiting for an assistant message containing [QUEUE-{id}].
+
+    Returns 0 if the correlation tag is found, 1 if the worker dies, 2 on timeout.
+    """
+    runtime = get_runtime_dir(name)
+    log_file = runtime / "log"
+    pid_file = runtime / "pid"
+    tag = f"[QUEUE-{queue_id}]"
+
+    def _manager_alive() -> bool:
+        try:
+            pid = int(pid_file.read_text().strip())
+            return pid_alive(pid)
+        except (ValueError, OSError):
+            return False
+
+    if not log_file.exists():
+        log_deadline = time.monotonic() + timeout
+        while not log_file.exists():
+            if time.monotonic() > log_deadline:
+                print("Error: timeout waiting for log file", file=sys.stderr)
+                return 2
+            time.sleep(POLL_INTERVAL_SECONDS)
+
+    deadline = time.monotonic() + timeout
+
+    # Scan existing log first — the response may have already arrived.
+    with open(log_file) as f:
+        for line in f:
+            if tag in line:
+                return 0
+        # Tail from current position (end of existing content)
+        while True:
+            if time.monotonic() > deadline:
+                print(f"Error: timeout waiting for {tag}", file=sys.stderr)
+                return 2
+            line = f.readline()
+            if not line:
+                if not _manager_alive():
+                    print("Error: worker process died", file=sys.stderr)
+                    return 1
+                time.sleep(POLL_INTERVAL_SECONDS)
+                continue
+            if tag in line:
+                return 0
+
+
+def _wait_for_turn(
+    name: str,
+    timeout: float | None = None,
+    after_uuid: str | None = None,
+) -> int:
     """Block until claude finishes its turn. Returns exit code (0=ready, 1=dead, 2=timeout).
 
-    Prints the triggering message JSON to stdout on success.
+    If ``after_uuid`` is provided, only log entries appearing *after* that
+    UUID are considered. This lets callers who just wrote to the FIFO avoid
+    a race where the scan finds the PREVIOUS turn's `result` message before
+    the new user message has been forwarded to claude.
     """
     runtime = get_runtime_dir(name)
     log_file = runtime / "log"
@@ -236,7 +325,9 @@ def _wait_for_turn(name: str, timeout: float | None = None) -> int:
 
     # Scan existing log to determine current state.
     # Track: after the most recent user message, has a turn boundary appeared?
+    # When after_uuid is set, ignore entries up to and including that UUID.
     turn_end_after_last_user = None
+    passed_marker = after_uuid is None
     with open(log_file) as f:
         for line in f:
             stripped = line.strip()
@@ -245,6 +336,11 @@ def _wait_for_turn(name: str, timeout: float | None = None) -> int:
             try:
                 data = json.loads(stripped)
             except json.JSONDecodeError:
+                continue
+            if not passed_marker:
+                msg_uuid = data.get("uuid", "")
+                if after_uuid and _uuid_matches(msg_uuid, after_uuid):
+                    passed_marker = True
                 continue
             msg_type = data.get("type")
             if msg_type == "user":
@@ -350,6 +446,14 @@ def cmd_start(args: argparse.Namespace) -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # --show-response and --show-full-response are mutually exclusive
+    if args.show_response and args.show_full_response:
+        print(
+            "Error: --show-response and --show-full-response are mutually exclusive",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # Fork to background
     pid = os.fork()
     if pid > 0:
@@ -366,6 +470,14 @@ def cmd_start(args: argparse.Namespace) -> None:
         # If we sent a prompt, wait for the turn to complete (unless --background)
         if initial_message and not args.background:
             rc = _wait_for_turn(name)
+            # --show-response / --show-full-response: print the response
+            # before the status line so status appears at the bottom.
+            # There was no "before" marker for start (fresh worker), so
+            # --show-full-response means "show everything from the start."
+            if rc == 0 and args.show_response:
+                _show_worker_response(name, last_turn=True)
+            elif rc == 0 and args.show_full_response:
+                _show_worker_response(name)
             _print_worker_status(name)
             sys.exit(rc)
 
@@ -395,9 +507,30 @@ def cmd_start(args: argparse.Namespace) -> None:
 
 
 def cmd_send(args: argparse.Namespace) -> None:
-    """Send a message to a worker."""
+    """Send a message to a worker.
+
+    Default behavior: check worker status first and reject if busy. Use
+    ``--queue`` to bypass the busy check and track a specific response via a
+    correlation ID embedded in the message.
+    """
     runtime = resolve_worker(args.name)
     in_fifo = runtime / "in"
+    log_file = runtime / "log"
+
+    # --queue + --background is incoherent: the whole point of queue is
+    # correlation tracking, which requires waiting for the tagged response.
+    if args.queue and args.background:
+        print(
+            "Error: --queue and --background are mutually exclusive", file=sys.stderr
+        )
+        sys.exit(1)
+
+    if args.show_response and args.show_full_response:
+        print(
+            "Error: --show-response and --show-full-response are mutually exclusive",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Get message from arg or stdin
     if args.message:
@@ -408,6 +541,50 @@ def cmd_send(args: argparse.Namespace) -> None:
     if not content.strip():
         print("Error: empty message", file=sys.stderr)
         sys.exit(1)
+
+    # Status gate: refuse to send to a busy worker unless --queue was passed.
+    # `starting` is transient — wait for it to clear. `dead` is fatal.
+    if not args.queue:
+        try:
+            status, _ = _wait_for_ready_state(args.name)
+        except TimeoutError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if status == "dead":
+            print(
+                f"Error: worker '{args.name}' is dead. "
+                f"Use `claude-worker start --resume --name {args.name}` to restart.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if status == "working":
+            print(
+                f"Error: worker '{args.name}' is busy. "
+                f"Use `--queue` to send anyway with correlation tracking.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # status == "waiting" → proceed
+
+    # Remember the last UUID BEFORE writing to the FIFO. This marker serves
+    # two purposes:
+    #   1. `--show-full-response` uses it as a `--since` marker to render
+    #      everything new since the send.
+    #   2. `_wait_for_turn` uses it to ignore the prior turn's `result`
+    #      message — otherwise the scan phase would find the OLD turn
+    #      boundary and return immediately before the new user message
+    #      reaches claude (race condition).
+    marker_uuid = _get_last_uuid(log_file)
+
+    # If --queue, append a correlation instruction so we can detect the
+    # specific response that corresponds to THIS send.
+    queue_id: str | None = None
+    if args.queue:
+        queue_id = _generate_queue_id()
+        content = (
+            content
+            + f"\n\n[Please include [QUEUE-{queue_id}] literally in your response so the sender can identify it.]"
+        )
 
     msg = json.dumps(
         {
@@ -420,16 +597,33 @@ def cmd_send(args: argparse.Namespace) -> None:
         f.write(msg + "\n")
         f.flush()
 
-    if not args.background:
-        rc = _wait_for_turn(args.name)
+    if args.background:
         _print_worker_status(args.name)
-        sys.exit(rc)
+        return
+
+    if queue_id is not None:
+        rc = _wait_for_queue_response(args.name, queue_id)
     else:
-        _print_worker_status(args.name)
+        rc = _wait_for_turn(args.name, after_uuid=marker_uuid)
+
+    # Print response BEFORE the status line so the status appears at the
+    # bottom (last line the user sees) — matching the style of cmd_start.
+    if rc == 0 and args.show_response:
+        _show_worker_response(args.name, last_turn=True)
+    elif rc == 0 and args.show_full_response:
+        _show_worker_response(args.name, since_uuid=marker_uuid)
+
+    _print_worker_status(args.name)
+    sys.exit(rc)
 
 
-def cmd_read(args: argparse.Namespace) -> None:
-    """Read worker output, formatted via claude_logs."""
+def cmd_read(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    """Read worker output, formatted via claude_logs.
+
+    Returns (first_uuid, last_uuid) for the messages that were actually
+    rendered, which programmatic callers (like --show-response) use to
+    display a range hint. The normal CLI invocation ignores the return value.
+    """
     runtime = resolve_worker(args.name)
     log_file = runtime / "log"
 
@@ -440,9 +634,9 @@ def cmd_read(args: argparse.Namespace) -> None:
     from claude_logs import (
         ANSIFormatter,
         FilterConfig,
+        MarkdownFormatter,
+        PlainFormatter,
         RenderConfig,
-        parse_message,
-        should_show_message,
     )
     from claude_logs.dateparse import parse_datetime
 
@@ -489,8 +683,6 @@ def cmd_read(args: argparse.Namespace) -> None:
     # Use markdown when running inside Claude Code (CLAUDECODE env var) —
     # supervisor claudes parse markdown better than ANSI or plain text.
     # ANSI colors for human terminals. Override with --color/--no-color.
-    from claude_logs import MarkdownFormatter, PlainFormatter
-
     if args.color:
         formatter = ANSIFormatter()
     elif args.no_color:
@@ -502,8 +694,8 @@ def cmd_read(args: argparse.Namespace) -> None:
 
     if args.follow:
         _read_follow(log_file, config, formatter, since_uuid, since_ts, args)
-    else:
-        _read_static(log_file, config, formatter, since_uuid, since_ts, args)
+        return None, None
+    return _read_static(log_file, config, formatter, since_uuid, since_ts, args)
 
 
 def _uuid_matches(msg_uuid: str, target: str) -> bool:
@@ -511,14 +703,94 @@ def _uuid_matches(msg_uuid: str, target: str) -> bool:
     return msg_uuid.lower().startswith(target.lower())
 
 
-def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
-    """Read log file statically."""
+def _show_worker_response(
+    name: str,
+    last_turn: bool = False,
+    since_uuid: str | None = None,
+) -> None:
+    """Print a worker's response by invoking cmd_read programmatically.
+
+    Used by `send --show-response` / `start --show-response` and their
+    `--show-full-response` variants. Mutually exclusive flags at the caller
+    decide which window to show:
+
+    - ``last_turn=True``: equivalent to `read --last-turn` — just the
+      assistant's turn after the user's last message.
+    - ``since_uuid=X``: equivalent to `read --since X` — everything newer
+      than the given marker UUID, including the echoed user message.
+
+    After rendering, prints a hint with the first/last UUIDs of the shown
+    window so the caller can re-query that exact range.
+    """
+    namespace = argparse.Namespace(
+        name=name,
+        follow=False,
+        since=since_uuid,
+        until=None,
+        last_turn=last_turn,
+        n=None,
+        count=False,
+        summary=False,
+        verbose=False,
+        color=False,
+        no_color=False,
+        no_hint=True,
+    )
+    first_uuid, last_uuid = cmd_read(namespace)
+    if first_uuid and last_uuid:
+        print(
+            f"\nTo see this window again or expand: "
+            f"claude-worker read {name} "
+            f"--since {first_uuid[:UUID_SHORT_LENGTH]} "
+            f"--until {last_uuid[:UUID_SHORT_LENGTH]}"
+        )
+
+
+def _get_last_uuid(log_file: Path) -> str | None:
+    """Return the UUID of the most recent message in the log, or None.
+
+    Used as a marker before sending so the caller can later use --since
+    to show everything that arrived after this point.
+    """
+    if not log_file.exists():
+        return None
+    last_uuid: str | None = None
+    try:
+        with open(log_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                uuid = data.get("uuid", "")
+                if uuid:
+                    last_uuid = uuid
+    except OSError:
+        pass
+    return last_uuid
+
+
+def _read_static(
+    log_file, config, formatter, since_uuid, since_ts, args
+) -> tuple[str | None, str | None]:
+    """Read log file statically.
+
+    Returns (first_uuid, last_uuid) for the messages actually printed, so
+    callers (like --show-response) can display a range hint. Returns
+    (None, None) if nothing was printed.
+    """
     from claude_logs import parse_message, should_show_message
     from datetime import datetime, timezone
 
     found_since = since_uuid is None and since_ts is None
     messages = []
     total_scanned = 0
+    # Remember the --since marker message so we can show its content if the
+    # result set is empty ("No new messages since [abc12345]: ...")
+    since_marker_data: dict | None = None
 
     with open(log_file) as f:
         for line in f:
@@ -538,6 +810,7 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
                     msg_uuid = data.get("uuid", "")
                     if _uuid_matches(msg_uuid, since_uuid):
                         found_since = True
+                        since_marker_data = data
                         continue  # skip the since message itself
                 if since_ts:
                     ts_str = data.get("timestamp", "")
@@ -558,6 +831,18 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
                 msg_uuid = data.get("uuid", "")
                 if _uuid_matches(msg_uuid, args.until):
                     break
+
+            # Handle --last-turn: reset the message list every time we hit a
+            # raw user message. This must run BEFORE display filtering because
+            # claude_logs classifies replayed user messages as non-"user-input"
+            # and drops them — so we cannot rely on the filtered list to
+            # locate turn boundaries.
+            if (
+                hasattr(args, "last_turn")
+                and args.last_turn
+                and data.get("type") == "user"
+            ):
+                messages = []
 
             msg = parse_message(data)
             if not should_show_message(msg, data, config):
@@ -584,39 +869,45 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
             f"Warning: --since '{target}' not found in log ({total_scanned} messages scanned)",
             file=sys.stderr,
         )
-        return
-
-    # Handle --last-turn: show everything since the last user message.
-    # Claude's work involves multiple assistant turns with tool use in between,
-    # so "last turn" means "everything since the user last spoke".
-    if hasattr(args, "last_turn") and args.last_turn:
-        last_user = -1
-        for i, (data, msg) in enumerate(messages):
-            if data.get("type") == "user":
-                last_user = i
-        if last_user >= 0:
-            messages = messages[last_user + 1 :]
+        return None, None
 
     # Handle -n: keep only the last N messages
     if hasattr(args, "n") and args.n is not None:
         messages = messages[-args.n :]
 
     if not messages and found_since and (since_uuid or since_ts):
-        print("No new messages after that point.", file=sys.stderr)
-        return
+        if since_marker_data is not None:
+            marker_uuid_short = since_marker_data.get("uuid", "")[:UUID_SHORT_LENGTH]
+            marker_preview = _extract_text_preview(
+                since_marker_data, SUMMARY_PREVIEW_MAX_CHARS
+            )
+            print(
+                f"No new messages since [{marker_uuid_short}]: {marker_preview}",
+                file=sys.stderr,
+            )
+        else:
+            print("No new messages after that point.", file=sys.stderr)
+        return None, None
 
     # Alternative output modes: --count and --summary
     if hasattr(args, "count") and args.count:
         print(len(messages))
-        return
+        return None, None
 
     if hasattr(args, "summary") and args.summary:
+        first_uuid: str | None = None
+        last_uuid: str | None = None
         for data, msg in messages:
             uuid_short = data.get("uuid", "")[:UUID_SHORT_LENGTH]
             role = data.get("type", "?")
             text = _extract_text_preview(data, SUMMARY_PREVIEW_MAX_CHARS)
             print(f"[{uuid_short}] {role}: {text}")
-        return
+            uuid = data.get("uuid", "")
+            if uuid:
+                if first_uuid is None:
+                    first_uuid = uuid
+                last_uuid = uuid
+        return first_uuid, last_uuid
 
     last_uuid = None
     first_uuid = None
@@ -634,10 +925,17 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
                     first_uuid = uuid
                 last_uuid = uuid
 
-    if last_uuid:
+    # The bottom-of-output "to see new messages" hint is only shown when
+    # called directly from `read` — programmatic callers (like --show-response)
+    # set args.no_hint and print their own hint using the returned UUIDs.
+    suppress_hint = getattr(args, "no_hint", False)
+    if last_uuid and not suppress_hint:
         print(
-            f"\nTo see only new messages: claude-worker read {args.name} --since {last_uuid[:UUID_SHORT_LENGTH]}"
+            f"\nTo see NEW messages after this point: "
+            f"claude-worker read {args.name} --since {last_uuid[:UUID_SHORT_LENGTH]}"
         )
+
+    return first_uuid, last_uuid
 
 
 def _read_follow(log_file, config, formatter, since_uuid, since_ts, args):
@@ -847,6 +1145,16 @@ def main():
         help="Return immediately without waiting for claude's response",
     )
     p_start.add_argument(
+        "--show-response",
+        action="store_true",
+        help="After the initial turn completes, print the assistant's response",
+    )
+    p_start.add_argument(
+        "--show-full-response",
+        action="store_true",
+        help="After the initial turn completes, print everything from the log",
+    )
+    p_start.add_argument(
         "claude_args",
         nargs="*",
         metavar="CLAUDE_ARGS",
@@ -863,6 +1171,24 @@ def main():
         "--background",
         action="store_true",
         help="Return immediately without waiting for claude's response",
+    )
+    p_send.add_argument(
+        "--queue",
+        action="store_true",
+        help="Send even if worker is busy; embed a correlation ID and wait "
+        "for the specific tagged response",
+    )
+    p_send.add_argument(
+        "--show-response",
+        action="store_true",
+        help="After the turn completes, print the assistant's response "
+        "(equivalent to `read --last-turn`)",
+    )
+    p_send.add_argument(
+        "--show-full-response",
+        action="store_true",
+        help="After the turn completes, print everything new since the send "
+        "(equivalent to `read --since <marker>`)",
     )
 
     # -- read --
