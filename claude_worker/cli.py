@@ -329,6 +329,91 @@ def _message_contains_chat_tag(data: dict, chat_id: str) -> bool:
     return False
 
 
+def _extract_chat_id_from_message(data: dict) -> str | None:
+    """Return the chat ID tag embedded in a message's text content, or None.
+
+    Looks for the first ``[chat:<id>]`` occurrence in the content. The ID
+    is whatever follows ``chat:`` up to the closing bracket.
+    """
+    import re
+
+    content = data.get("message", {}).get("content", "")
+    text = ""
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        for block in content:
+            if block.get("type") == "text":
+                text += block.get("text", "")
+    match = re.search(r"\[" + re.escape(CHAT_TAG_PREFIX) + r"([^\]]+)\]", text)
+    return match.group(1) if match else None
+
+
+def _missing_tag_log_path(worker_name: str) -> Path:
+    """Path to the per-worker missing-tag dedup log."""
+    return get_runtime_dir(worker_name) / MISSING_TAG_LOG_NAME
+
+
+def _load_missing_tag_log(path: Path) -> dict:
+    """Load the missing-tag dedup log as a dict keyed by message UUID.
+
+    Returns an empty dict if the file doesn't exist or can't be parsed.
+    """
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {}
+
+
+def _handle_missing_tag_reports(worker_name: str, reports: list[dict]) -> None:
+    """Append new missing-tag reports to the dedup log and warn on new entries.
+
+    A "report" is a dict with keys: uuid, chat_id, preview. The log is keyed
+    by UUID for O(1) dedup. Only new UUIDs trigger a warning.
+    """
+    if not reports:
+        return
+    from datetime import datetime, timezone
+
+    log_path = _missing_tag_log_path(worker_name)
+    existing = _load_missing_tag_log(log_path)
+
+    new_entries = []
+    for report in reports:
+        uuid = report["uuid"]
+        if uuid in existing:
+            continue
+        existing[uuid] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "chat_id": report["chat_id"],
+            "preview": report["preview"],
+        }
+        new_entries.append(report)
+
+    if not new_entries:
+        return
+
+    # Write the updated log
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(json.dumps(existing, indent=2) + "\n")
+
+    # Warn the user on stderr for each new entry
+    for report in new_entries:
+        uuid_short = report["uuid"][:UUID_SHORT_LENGTH]
+        chat_short = report["chat_id"][:UUID_SHORT_LENGTH]
+        print(
+            f"WARNING: PM response [{uuid_short}] for chat:{chat_short} "
+            f"is missing its [chat:] tag — consider raising with the human. "
+            f"Preview: {report['preview']}",
+            file=sys.stderr,
+        )
+
+
 def _generate_queue_id() -> str:
     """Generate a correlation ID for queued messages.
 
@@ -1011,6 +1096,15 @@ def _read_static(
     # result set is empty ("No new messages since [abc12345]: ...")
     since_marker_data: dict | None = None
 
+    # -- Missing chat tag monitoring state (PM workers only) --
+    # Tracks each turn's chat_id from the user message and the final
+    # assistant message so we can check tagging discipline on the result
+    # boundary. Only activated for PM workers.
+    monitor_pm_tags = _worker_is_pm(args.name)
+    current_turn_chat_id: str | None = None
+    last_assistant_in_turn: dict | None = None
+    missing_tag_reports: list[dict] = []
+
     with open(log_file) as f:
         for line in f:
             line = line.strip()
@@ -1051,6 +1145,36 @@ def _read_static(
                 if _uuid_matches(msg_uuid, args.until):
                     break
 
+            # -- PM tag monitoring: track turn boundaries BEFORE any display
+            # filter. Runs for all chats (not gated on the user's --chat
+            # filter) because a missing tag in ANY chat is worth surfacing.
+            msg_type_raw = data.get("type")
+            if monitor_pm_tags:
+                if msg_type_raw == "user":
+                    current_turn_chat_id = _extract_chat_id_from_message(data)
+                    last_assistant_in_turn = None
+                elif msg_type_raw == "assistant":
+                    last_assistant_in_turn = data
+                elif msg_type_raw == "result":
+                    if current_turn_chat_id and last_assistant_in_turn is not None:
+                        if not _message_contains_chat_tag(
+                            last_assistant_in_turn, current_turn_chat_id
+                        ):
+                            missing_uuid = last_assistant_in_turn.get("uuid", "")
+                            if missing_uuid:
+                                missing_tag_reports.append(
+                                    {
+                                        "uuid": missing_uuid,
+                                        "chat_id": current_turn_chat_id,
+                                        "preview": _extract_text_preview(
+                                            last_assistant_in_turn,
+                                            MISSING_TAG_PREVIEW_MAX_CHARS,
+                                        ),
+                                    }
+                                )
+                    current_turn_chat_id = None
+                    last_assistant_in_turn = None
+
             # Handle --last-turn: reset the message list every time we hit a
             # raw user message. This must run BEFORE display filtering because
             # claude_logs classifies replayed user messages as non-"user-input"
@@ -1089,6 +1213,12 @@ def _read_static(
                         continue
 
             messages.append((data, msg))
+
+    # Handle missing-tag reports collected during the scan (PM workers only).
+    # Runs before the --since-not-found early return because missing tags
+    # are worth surfacing regardless of user filter results.
+    if monitor_pm_tags and missing_tag_reports:
+        _handle_missing_tag_reports(args.name, missing_tag_reports)
 
     # Warn when --since UUID was not found in the log
     if (since_uuid or since_ts) and not found_since:
