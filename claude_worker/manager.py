@@ -203,7 +203,9 @@ def run_manager(
         try:
             while proc.poll() is None:
                 # Wait for data on the read fd
-                ready, _, _ = select.select([rd_fd], [], [], FIFO_SELECT_TIMEOUT_SECONDS)
+                ready, _, _ = select.select(
+                    [rd_fd], [], [], FIFO_SELECT_TIMEOUT_SECONDS
+                )
                 if ready:
                     data = os.read(rd_fd, FIFO_READ_BUFFER_BYTES)
                     if data and proc.stdin:

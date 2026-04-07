@@ -870,7 +870,9 @@ def main():
     p_read.add_argument("name", help="Worker name")
     p_read.add_argument("--follow", "-f", action="store_true", help="Tail the log")
     p_read.add_argument("--since", help="Show messages after this UUID or timestamp")
-    p_read.add_argument("--until", help="Stop showing messages at this UUID (exclusive)")
+    p_read.add_argument(
+        "--until", help="Stop showing messages at this UUID (exclusive)"
+    )
     p_read.add_argument(
         "--last-turn",
         action="store_true",
