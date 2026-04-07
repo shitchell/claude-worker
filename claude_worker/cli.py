@@ -475,9 +475,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         # and append any new args the user provided on this invocation
         extra = claude_args
         claude_args = (
-            ["--resume", saved["session_id"]]
-            + (saved.get("claude_args") or [])
-            + extra
+            ["--resume", saved["session_id"]] + (saved.get("claude_args") or []) + extra
         )
         # Resumed workers inherit PM mode from saved metadata
         if saved.get("pm"):
