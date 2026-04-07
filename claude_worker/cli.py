@@ -28,8 +28,30 @@ SUMMARY_PREVIEW_MAX_CHARS: int = 80
 UUID_SHORT_LENGTH: int = 8
 
 # Queue correlation
-QUEUE_ID_BYTES: int = 4
 QUEUE_WAIT_TIMEOUT_SECONDS: float = 600.0
+
+# Hook installation
+HOOK_SCRIPT_SOURCE_NAME: str = "session-uuid-env-injection.sh"
+HOOK_SCRIPT_INSTALL_PATH: Path = (
+    Path.home() / ".claude" / "hooks" / "session-uuid-env-injection.sh"
+)
+USER_SETTINGS_PATH: Path = Path.home() / ".claude" / "settings.json"
+PROJECT_SETTINGS_RELATIVE_PATH: Path = Path(".claude") / "settings.json"
+HOOK_EVENT_NAME: str = "SessionStart"
+
+# Chat routing / PM mode
+CHAT_TAG_PREFIX: str = "chat:"
+QUEUE_TAG_PREFIX: str = "queue:"
+PM_IDENTITY_RESOURCE: str = "pm.md"
+PM_INTERNALIZE_MESSAGE: str = (
+    "Initialize your PM state. Scan your own conversation history for any "
+    "prior [chat:*] messages to recover ongoing consumer state. If this is "
+    "a fresh worker, acknowledge readiness. Check for MEMORY.md and "
+    "PROJECT.md in the current directory for project context. "
+    "Report your initialization status."
+)
+MISSING_TAG_LOG_NAME: str = "missing-tags.json"
+MISSING_TAG_PREVIEW_MAX_CHARS: int = 100
 
 from claude_worker.manager import (
     cleanup_runtime_dir,
@@ -1146,6 +1168,158 @@ def cmd_stop(args: argparse.Namespace) -> None:
         print(f"Cleaned up {runtime}")
 
 
+def _load_bundled_resource(subdir: str, filename: str) -> str:
+    """Return the text contents of a resource bundled with the package.
+
+    Uses importlib.resources so it works whether the package is installed
+    from wheel, sdist, or in editable mode.
+    """
+    from importlib.resources import files
+
+    return (files("claude_worker") / subdir / filename).read_text()
+
+
+def _format_settings_json(settings: dict) -> str:
+    """Serialize settings dict the way Claude Code does: 2-space indent + newline."""
+    return json.dumps(settings, indent=2) + "\n"
+
+
+def _hook_already_installed(settings: dict, hook_command_fragment: str) -> bool:
+    """Check whether a SessionStart hook referencing the given command exists."""
+    session_start = settings.get("hooks", {}).get(HOOK_EVENT_NAME, [])
+    if not isinstance(session_start, list):
+        return False
+    for entry in session_start:
+        hooks = entry.get("hooks", []) if isinstance(entry, dict) else []
+        for hook in hooks:
+            if not isinstance(hook, dict):
+                continue
+            if hook.get("type") != "command":
+                continue
+            if hook_command_fragment in hook.get("command", ""):
+                return True
+    return False
+
+
+def _merge_session_start_hook(settings: dict, hook_command: str) -> dict:
+    """Return a new settings dict with the SessionStart hook appended.
+
+    Preserves any existing SessionStart entries; adds a new entry alongside.
+    """
+    merged = json.loads(json.dumps(settings))  # deep copy via round-trip
+    hooks = merged.setdefault("hooks", {})
+    session_start = hooks.setdefault(HOOK_EVENT_NAME, [])
+    if not isinstance(session_start, list):
+        session_start = []
+        hooks[HOOK_EVENT_NAME] = session_start
+    session_start.append(
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": hook_command,
+                }
+            ]
+        }
+    )
+    return merged
+
+
+def _render_settings_diff(before: str, after: str, path: Path) -> str:
+    """Return a unified diff between two settings.json serializations."""
+    import difflib
+
+    return "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"{path} (current)",
+            tofile=f"{path} (proposed)",
+            n=3,
+        )
+    )
+
+
+def cmd_install_hook(args: argparse.Namespace) -> None:
+    """Install the SessionStart hook that sets CLAUDE_SESSION_UUID.
+
+    Writes the hook script to ``~/.claude/hooks/session-uuid-env-injection.sh``
+    and merges a SessionStart hook entry into the target settings file.
+    Idempotent: detects an existing installation and skips unless --force.
+    """
+    # Resolve target settings path
+    if args.project:
+        settings_path = Path.cwd() / PROJECT_SETTINGS_RELATIVE_PATH
+    else:
+        settings_path = USER_SETTINGS_PATH
+
+    # 1. Write the hook script itself (always — it's outside settings.json)
+    HOOK_SCRIPT_INSTALL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    script_source = _load_bundled_resource("hooks", HOOK_SCRIPT_SOURCE_NAME)
+    script_already_current = (
+        HOOK_SCRIPT_INSTALL_PATH.exists()
+        and HOOK_SCRIPT_INSTALL_PATH.read_text() == script_source
+    )
+    if not script_already_current:
+        HOOK_SCRIPT_INSTALL_PATH.write_text(script_source)
+        HOOK_SCRIPT_INSTALL_PATH.chmod(0o755)
+        print(f"Wrote hook script: {HOOK_SCRIPT_INSTALL_PATH}")
+    else:
+        print(f"Hook script already up to date: {HOOK_SCRIPT_INSTALL_PATH}")
+
+    # 2. Load existing settings (or start fresh)
+    if settings_path.exists():
+        try:
+            current_settings = json.loads(settings_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            print(
+                f"Error: could not parse {settings_path}: {exc}", file=sys.stderr
+            )
+            sys.exit(1)
+        current_text = _format_settings_json(current_settings)
+    else:
+        current_settings = {}
+        current_text = "(file does not exist)\n"
+
+    # 3. Idempotency check — the hook command references the install path
+    hook_command = f"bash {HOOK_SCRIPT_INSTALL_PATH}"
+    if _hook_already_installed(current_settings, str(HOOK_SCRIPT_INSTALL_PATH)):
+        if not args.force:
+            print(
+                f"Hook already installed in {settings_path}. "
+                f"Use --force to add a duplicate entry.",
+                file=sys.stderr,
+            )
+            print(
+                f'\nTest with: claude -p "echo $CLAUDE_SESSION_UUID"',
+                file=sys.stderr,
+            )
+            return
+
+    # 4. Build the proposed settings and show diff
+    proposed_settings = _merge_session_start_hook(current_settings, hook_command)
+    proposed_text = _format_settings_json(proposed_settings)
+    diff = _render_settings_diff(current_text, proposed_text, settings_path)
+    print("\nProposed changes:")
+    print(diff if diff else "(no changes)")
+
+    # 5. Confirm unless --yes
+    if not args.yes:
+        try:
+            response = input("\nApply these changes? [y/N] ").strip().lower()
+        except EOFError:
+            response = ""
+        if response not in ("y", "yes"):
+            print("Aborted.", file=sys.stderr)
+            sys.exit(1)
+
+    # 6. Write the settings file
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(proposed_text)
+    print(f"Updated {settings_path}")
+    print(f'\nTest with: claude -p "echo $CLAUDE_SESSION_UUID"')
+
+
 EXAMPLES = """\
 examples:
   # Start a worker — blocks until claude responds, then prints status
@@ -1339,6 +1513,34 @@ def main():
         "--force", action="store_true", help="Send SIGKILL instead of SIGTERM"
     )
 
+    # -- install-hook --
+    p_hook = sub.add_parser(
+        "install-hook",
+        help="Install SessionStart hook that sets CLAUDE_SESSION_UUID",
+    )
+    hook_scope = p_hook.add_mutually_exclusive_group()
+    hook_scope.add_argument(
+        "--user",
+        action="store_true",
+        help="Install into ~/.claude/settings.json (default)",
+    )
+    hook_scope.add_argument(
+        "--project",
+        action="store_true",
+        help="Install into ./.claude/settings.json",
+    )
+    p_hook.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Skip confirmation prompt",
+    )
+    p_hook.add_argument(
+        "--force",
+        action="store_true",
+        help="Add hook entry even if one already exists",
+    )
+
     args = parser.parse_args()
 
     handlers = {
@@ -1349,5 +1551,6 @@ def main():
         "list": cmd_list,
         "ls": cmd_list,
         "stop": cmd_stop,
+        "install-hook": cmd_install_hook,
     }
     handlers[args.command](args)
