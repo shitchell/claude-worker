@@ -286,10 +286,27 @@ def _wait_for_queue_response(
                 return 0
 
 
+def _settle_is_stable(log_file: Path, settle: float) -> bool:
+    """Wait `settle` seconds, return True if no new messages appeared.
+
+    Returns True immediately when ``settle <= 0``. Used by ``_wait_for_turn``
+    to debounce the return when a worker briefly idles between internal
+    subagent dispatches — a turn boundary that "sticks" for the full settle
+    window is considered real, while one that flips back to activity is not.
+    """
+    if settle <= 0:
+        return True
+    uuid_before = _get_last_uuid(log_file)
+    time.sleep(settle)
+    uuid_after = _get_last_uuid(log_file)
+    return uuid_after == uuid_before
+
+
 def _wait_for_turn(
     name: str,
     timeout: float | None = None,
     after_uuid: str | None = None,
+    settle: float = 0.0,
 ) -> int:
     """Block until claude finishes its turn. Returns exit code (0=ready, 1=dead, 2=timeout).
 
@@ -297,6 +314,11 @@ def _wait_for_turn(
     UUID are considered. This lets callers who just wrote to the FIFO avoid
     a race where the scan finds the PREVIOUS turn's `result` message before
     the new user message has been forwarded to claude.
+
+    If ``settle > 0``, after detecting a turn boundary this function waits
+    ``settle`` seconds and confirms no new messages appeared before returning.
+    A brief idle flipping back to activity (e.g. a subagent dispatch) restarts
+    the wait. The settle duration counts against ``timeout``.
     """
     runtime = get_runtime_dir(name)
     log_file = runtime / "log"
@@ -350,8 +372,12 @@ def _wait_for_turn(
                 if sr == "end_turn":
                     turn_end_after_last_user = data
 
+    # Scan found an already-complete turn. Confirm it's stable before returning.
     if turn_end_after_last_user is not None:
-        return 0
+        if _settle_is_stable(log_file, settle):
+            return 0
+        # Fell through: new activity during settle — drop into tail loop to
+        # wait for the next turn boundary.
 
     if not _manager_alive():
         print("Error: worker process died", file=sys.stderr)
@@ -382,13 +408,22 @@ def _wait_for_turn(
 
             msg_type = data.get("type")
 
+            turn_ended = False
             if msg_type == "result":
-                return 0
-
-            if msg_type == "assistant":
+                turn_ended = True
+            elif msg_type == "assistant":
                 sr = data.get("message", {}).get("stop_reason")
                 if sr == "end_turn":
+                    turn_ended = True
+
+            if turn_ended:
+                if _settle_is_stable(log_file, settle):
                     return 0
+                # New activity during settle: keep tailing for the next
+                # turn boundary. Re-seek to end so we don't re-read the
+                # messages that arrived during the settle window.
+                f.seek(0, 2)
+                continue
 
 
 # -- Subcommand handlers --
@@ -974,7 +1009,7 @@ def _read_follow(log_file, config, formatter, since_uuid, since_ts, args):
 def cmd_wait_for_turn(args: argparse.Namespace) -> None:
     """Block until claude finishes its turn or the session ends."""
     resolve_worker(args.name)  # validate worker exists
-    rc = _wait_for_turn(args.name, timeout=args.timeout)
+    rc = _wait_for_turn(args.name, timeout=args.timeout, settle=args.settle)
     sys.exit(rc)
 
 
@@ -1239,6 +1274,18 @@ def main():
     )
     p_wait.add_argument("name", help="Worker name")
     p_wait.add_argument("--timeout", type=float, help="Timeout in seconds")
+    p_wait.add_argument(
+        "--settle",
+        type=float,
+        default=DEFAULT_SETTLE_SECONDS,
+        metavar="SECONDS",
+        help=(
+            f"After detecting a turn boundary, wait this many seconds and "
+            f"confirm no new messages appeared (default: {DEFAULT_SETTLE_SECONDS}). "
+            f"Prevents false positives when the worker briefly idles between "
+            f"internal subagent dispatches. Set to 0 to disable."
+        ),
+    )
 
     # -- list --
     sub.add_parser("list", aliases=["ls"], help="List all workers")
