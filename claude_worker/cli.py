@@ -225,9 +225,7 @@ def _wait_for_ready_state(
         if status != "starting":
             return status, log_mtime
         if time.monotonic() > deadline:
-            raise TimeoutError(
-                f"Worker '{name}' stayed in 'starting' for {timeout}s"
-            )
+            raise TimeoutError(f"Worker '{name}' stayed in 'starting' for {timeout}s")
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
@@ -520,9 +518,7 @@ def cmd_send(args: argparse.Namespace) -> None:
     # --queue + --background is incoherent: the whole point of queue is
     # correlation tracking, which requires waiting for the tagged response.
     if args.queue and args.background:
-        print(
-            "Error: --queue and --background are mutually exclusive", file=sys.stderr
-        )
+        print("Error: --queue and --background are mutually exclusive", file=sys.stderr)
         sys.exit(1)
 
     if args.show_response and args.show_full_response:
