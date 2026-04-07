@@ -804,6 +804,36 @@ def _get_last_uuid(log_file: Path) -> str | None:
     return last_uuid
 
 
+def _get_last_assistant_preview(log_file: Path, max_chars: int) -> str:
+    """Return a single-line preview of the most recent assistant text message.
+
+    Returns the empty string if the log does not exist or no assistant text
+    message is found. Used by `ls` to show "what's the worker doing" at a
+    glance.
+    """
+    if not log_file.exists():
+        return ""
+    last_preview = ""
+    try:
+        with open(log_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if data.get("type") != "assistant":
+                    continue
+                preview = _extract_text_preview(data, max_chars)
+                if preview:
+                    last_preview = preview
+    except OSError:
+        pass
+    return last_preview
+
+
 def _read_static(
     log_file, config, formatter, since_uuid, since_ts, args
 ) -> tuple[str | None, str | None]:
@@ -1053,7 +1083,19 @@ def _format_worker_line(name: str) -> str | None:
         idle_str = _format_duration_since(log_mtime)
         if idle_str:
             idle_str = f"  idle: {idle_str}"
-    return f"  {name}\n    pid: {pid}  status: {status}{idle_str}  cwd: {cwd}\n    session: {session}"
+
+    # "Last assistant text" preview — answers "what's the worker doing?"
+    # without requiring a separate `read` call.
+    log_file = runtime / "log"
+    preview = _get_last_assistant_preview(log_file, LS_PREVIEW_MAX_CHARS)
+    preview_line = f"\n    last: {preview}" if preview else ""
+
+    return (
+        f"  {name}\n"
+        f"    pid: {pid}  status: {status}{idle_str}  cwd: {cwd}\n"
+        f"    session: {session}"
+        f"{preview_line}"
+    )
 
 
 def cmd_list(args: argparse.Namespace) -> None:
