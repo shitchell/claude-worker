@@ -10,6 +10,26 @@ import sys
 import time
 from pathlib import Path
 
+# -- Named constants --
+
+# Timeouts (seconds)
+LOG_FILE_WAIT_TIMEOUT_SECONDS: float = 300.0
+MANAGER_READY_TIMEOUT_SECONDS: float = 10.0
+WORKER_READY_TIMEOUT_SECONDS: float = 30.0
+DEFAULT_SETTLE_SECONDS: float = 3.0
+
+# Polling intervals (seconds)
+POLL_INTERVAL_SECONDS: float = 0.1
+STOP_CLEANUP_DELAY_SECONDS: float = 0.5
+
+# Display
+LS_PREVIEW_MAX_CHARS: int = 80
+SUMMARY_PREVIEW_MAX_CHARS: int = 80
+UUID_SHORT_LENGTH: int = 8
+
+# Queue correlation
+QUEUE_ID_BYTES: int = 4
+
 from claude_worker.manager import (
     cleanup_runtime_dir,
     create_runtime_dir,
@@ -114,6 +134,30 @@ def get_worker_status(runtime: Path) -> tuple[str, float | None]:
 # -- Shared helpers --
 
 
+def _extract_text_preview(data: dict, max_chars: int) -> str:
+    """Extract the first line of text content from a JSONL message, truncated.
+
+    Works for both assistant and user messages by inspecting the content blocks.
+    Falls back to the raw content string if content is not a list.
+    """
+    content = data.get("message", {}).get("content", "")
+    text = ""
+    if isinstance(content, list):
+        for block in content:
+            if block.get("type") == "text" and block.get("text", "").strip():
+                text = block["text"].strip()
+                break
+    elif isinstance(content, str):
+        text = content.strip()
+
+    # Collapse to single line
+    text = " ".join(text.split())
+
+    if len(text) > max_chars:
+        return text[:max_chars] + "..."
+    return text
+
+
 def _format_duration_since(mtime: float) -> str:
     """Format a human-readable duration from a Unix timestamp to now."""
     secs = int(time.time() - mtime)
@@ -137,7 +181,7 @@ def _format_msg_prefix(data: dict) -> str:
     """Format a [HH:MM:SS uuid] prefix from a JSONL message dict."""
     from datetime import datetime, timezone
 
-    uuid = data.get("uuid", "")[:8]
+    uuid = data.get("uuid", "")[:UUID_SHORT_LENGTH]
     ts = ""
     ts_raw = data.get("timestamp", "")
     if ts_raw:
@@ -172,12 +216,12 @@ def _wait_for_turn(name: str, timeout: float | None = None) -> int:
     pid_file = runtime / "pid"
 
     if not log_file.exists():
-        deadline = time.monotonic() + (timeout or 300)
+        deadline = time.monotonic() + (timeout or LOG_FILE_WAIT_TIMEOUT_SECONDS)
         while not log_file.exists():
             if time.monotonic() > deadline:
                 print("Error: timeout waiting for log file", file=sys.stderr)
                 return 2
-            time.sleep(0.1)
+            time.sleep(POLL_INTERVAL_SECONDS)
 
     deadline = None
     if timeout:
@@ -231,7 +275,7 @@ def _wait_for_turn(name: str, timeout: float | None = None) -> int:
                 if not _manager_alive():
                     print("Error: worker process died", file=sys.stderr)
                     return 1
-                time.sleep(0.1)
+                time.sleep(POLL_INTERVAL_SECONDS)
                 continue
             line = line.strip()
             if not line:
@@ -313,11 +357,11 @@ def cmd_start(args: argparse.Namespace) -> None:
         pid_file = runtime / "pid"
 
         # Wait for PID file (manager is running)
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + MANAGER_READY_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             if pid_file.exists():
                 break
-            time.sleep(0.1)
+            time.sleep(POLL_INTERVAL_SECONDS)
 
         # If we sent a prompt, wait for the turn to complete (unless --background)
         if initial_message and not args.background:
@@ -462,6 +506,11 @@ def cmd_read(args: argparse.Namespace) -> None:
         _read_static(log_file, config, formatter, since_uuid, since_ts, args)
 
 
+def _uuid_matches(msg_uuid: str, target: str) -> bool:
+    """Case-insensitive UUID prefix match."""
+    return msg_uuid.lower().startswith(target.lower())
+
+
 def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
     """Read log file statically."""
     from claude_logs import parse_message, should_show_message
@@ -469,6 +518,7 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
 
     found_since = since_uuid is None and since_ts is None
     messages = []
+    total_scanned = 0
 
     with open(log_file) as f:
         for line in f:
@@ -480,11 +530,13 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
             except json.JSONDecodeError:
                 continue
 
+            total_scanned += 1
+
             # Handle --since filtering
             if not found_since:
                 if since_uuid:
                     msg_uuid = data.get("uuid", "")
-                    if msg_uuid.startswith(since_uuid) or msg_uuid == since_uuid:
+                    if _uuid_matches(msg_uuid, since_uuid):
                         found_since = True
                         continue  # skip the since message itself
                 if since_ts:
@@ -500,6 +552,12 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
                             pass
                 if not found_since:
                     continue
+
+            # Handle --until filtering
+            if hasattr(args, "until") and args.until:
+                msg_uuid = data.get("uuid", "")
+                if _uuid_matches(msg_uuid, args.until):
+                    break
 
             msg = parse_message(data)
             if not should_show_message(msg, data, config):
@@ -519,10 +577,19 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
 
             messages.append((data, msg))
 
+    # Warn when --since UUID was not found in the log
+    if (since_uuid or since_ts) and not found_since:
+        target = since_uuid or str(since_ts)
+        print(
+            f"Warning: --since '{target}' not found in log ({total_scanned} messages scanned)",
+            file=sys.stderr,
+        )
+        return
+
     # Handle --last-turn: show everything since the last user message.
     # Claude's work involves multiple assistant turns with tool use in between,
     # so "last turn" means "everything since the user last spoke".
-    if args.last_turn:
+    if hasattr(args, "last_turn") and args.last_turn:
         last_user = -1
         for i, (data, msg) in enumerate(messages):
             if data.get("type") == "user":
@@ -530,7 +597,29 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
         if last_user >= 0:
             messages = messages[last_user + 1 :]
 
+    # Handle -n: keep only the last N messages
+    if hasattr(args, "n") and args.n is not None:
+        messages = messages[-args.n :]
+
+    if not messages and found_since and (since_uuid or since_ts):
+        print("No new messages after that point.", file=sys.stderr)
+        return
+
+    # Alternative output modes: --count and --summary
+    if hasattr(args, "count") and args.count:
+        print(len(messages))
+        return
+
+    if hasattr(args, "summary") and args.summary:
+        for data, msg in messages:
+            uuid_short = data.get("uuid", "")[:UUID_SHORT_LENGTH]
+            role = data.get("type", "?")
+            text = _extract_text_preview(data, SUMMARY_PREVIEW_MAX_CHARS)
+            print(f"[{uuid_short}] {role}: {text}")
+        return
+
     last_uuid = None
+    first_uuid = None
     for data, msg in messages:
         blocks = msg.render(config)
         output = formatter.format(blocks)
@@ -541,11 +630,13 @@ def _read_static(log_file, config, formatter, since_uuid, since_ts, args):
             print("\n".join(lines))
             uuid = data.get("uuid", "")
             if uuid:
+                if first_uuid is None:
+                    first_uuid = uuid
                 last_uuid = uuid
 
     if last_uuid:
         print(
-            f"\nTo see only new messages: claude-worker read {args.name} --since {last_uuid[:8]}"
+            f"\nTo see only new messages: claude-worker read {args.name} --since {last_uuid[:UUID_SHORT_LENGTH]}"
         )
 
 
@@ -564,7 +655,7 @@ def _read_follow(log_file, config, formatter, since_uuid, since_ts, args):
             while True:
                 line = f.readline()
                 if not line:
-                    _time.sleep(0.1)
+                    _time.sleep(POLL_INTERVAL_SECONDS)
                     continue
                 line = line.strip()
                 if not line:
@@ -678,7 +769,7 @@ def cmd_stop(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # Wait briefly for cleanup, then force-clean if needed
-    time.sleep(0.5)
+    time.sleep(STOP_CLEANUP_DELAY_SECONDS)
     if runtime.exists():
         cleanup_runtime_dir(args.name)
         print(f"Cleaned up {runtime}")
@@ -779,10 +870,27 @@ def main():
     p_read.add_argument("name", help="Worker name")
     p_read.add_argument("--follow", "-f", action="store_true", help="Tail the log")
     p_read.add_argument("--since", help="Show messages after this UUID or timestamp")
+    p_read.add_argument("--until", help="Stop showing messages at this UUID (exclusive)")
     p_read.add_argument(
         "--last-turn",
         action="store_true",
         help="Show everything since the last user message",
+    )
+    p_read.add_argument(
+        "-n",
+        type=int,
+        metavar="N",
+        help="Show only the last N messages",
+    )
+    p_read.add_argument(
+        "--count",
+        action="store_true",
+        help="Print the number of messages instead of content",
+    )
+    p_read.add_argument(
+        "--summary",
+        action="store_true",
+        help="Show one-line summary per message: [uuid] ROLE: preview",
     )
     p_read.add_argument(
         "--verbose",

@@ -14,6 +14,12 @@ import sys
 import threading
 from pathlib import Path
 
+# -- Named constants --
+FIFO_SELECT_TIMEOUT_SECONDS: float = 1.0
+FIFO_READ_BUFFER_BYTES: int = 65536
+SIGTERM_WAIT_TIMEOUT_SECONDS: float = 10.0
+LOG_THREAD_JOIN_TIMEOUT_SECONDS: float = 5.0
+
 
 def get_base_dir() -> Path:
     """Return /tmp/claude-workers/{UID}/."""
@@ -150,7 +156,7 @@ def run_manager(
     # Signal handling — forward SIGTERM to claude, then exit
     def handle_term(signum, frame):
         proc.terminate()
-        proc.wait(timeout=10)
+        proc.wait(timeout=SIGTERM_WAIT_TIMEOUT_SECONDS)
         cleanup_runtime_dir(name)
         sys.exit(0)
 
@@ -197,9 +203,9 @@ def run_manager(
         try:
             while proc.poll() is None:
                 # Wait for data on the read fd
-                ready, _, _ = select.select([rd_fd], [], [], 1.0)
+                ready, _, _ = select.select([rd_fd], [], [], FIFO_SELECT_TIMEOUT_SECONDS)
                 if ready:
-                    data = os.read(rd_fd, 65536)
+                    data = os.read(rd_fd, FIFO_READ_BUFFER_BYTES)
                     if data and proc.stdin:
                         proc.stdin.write(data)
                         proc.stdin.flush()
@@ -225,5 +231,5 @@ def run_manager(
 
     # Wait for claude to exit
     proc.wait()
-    log_thread.join(timeout=5)
+    log_thread.join(timeout=LOG_THREAD_JOIN_TIMEOUT_SECONDS)
     cleanup_runtime_dir(name)
