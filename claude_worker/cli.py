@@ -266,15 +266,26 @@ def _worker_is_pm(name: str) -> bool:
     return bool(saved and saved.get("pm"))
 
 
+def _running_inside_claudecode() -> bool:
+    """Return True if we're running inside a Claude Code session.
+
+    Requires ``CLAUDECODE == "1"`` exactly. Claude Code's Bash tool sets
+    this env var automatically for every command it runs. Values like
+    ``"0"``, ``"true"``, or an empty string do NOT count — only the
+    canonical ``"1"``. Used by chat-routing auto-detection and by
+    read-output formatter selection.
+    """
+    return os.environ.get("CLAUDECODE") == "1"
+
+
 def _env_chat_id() -> str | None:
     """Return the chat ID from the environment, or None.
 
-    A chat ID is inferred from CLAUDE_SESSION_UUID *only* when CLAUDECODE=1
-    is also set, which indicates we're running inside a Claude Code session
-    (the Bash tool sets CLAUDECODE automatically, and our install-hook
-    populates CLAUDE_SESSION_UUID via the SessionStart hook).
+    A chat ID is inferred from CLAUDE_SESSION_UUID *only* when
+    _running_inside_claudecode() is True. CLAUDE_SESSION_UUID is populated
+    by the install-hook SessionStart hook.
     """
-    if os.environ.get("CLAUDECODE") != "1":
+    if not _running_inside_claudecode():
         return None
     uuid = os.environ.get("CLAUDE_SESSION_UUID", "").strip()
     return uuid or None
@@ -982,7 +993,7 @@ def cmd_read(args: argparse.Namespace) -> tuple[str | None, str | None]:
         else:
             try:
                 since_ts = parse_datetime(val)
-            except Exception:
+            except ValueError:
                 print(f"Error: cannot parse --since value: {val}", file=sys.stderr)
                 sys.exit(1)
 
@@ -995,14 +1006,14 @@ def cmd_read(args: argparse.Namespace) -> tuple[str | None, str | None]:
         getattr(args, "all_chats", False),
     )
 
-    # Use markdown when running inside Claude Code (CLAUDECODE env var) —
-    # supervisor claudes parse markdown better than ANSI or plain text.
-    # ANSI colors for human terminals. Override with --color/--no-color.
+    # Use markdown when running inside Claude Code — supervisor claudes
+    # parse markdown better than ANSI or plain text. ANSI colors for
+    # human terminals. Override with --color/--no-color.
     if args.color:
         formatter = ANSIFormatter()
     elif args.no_color:
         formatter = PlainFormatter()
-    elif os.environ.get("CLAUDECODE"):
+    elif _running_inside_claudecode():
         formatter = MarkdownFormatter()
     else:
         formatter = ANSIFormatter()
