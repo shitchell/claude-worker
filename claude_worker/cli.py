@@ -1272,9 +1272,7 @@ def cmd_install_hook(args: argparse.Namespace) -> None:
         try:
             current_settings = json.loads(settings_path.read_text())
         except (json.JSONDecodeError, OSError) as exc:
-            print(
-                f"Error: could not parse {settings_path}: {exc}", file=sys.stderr
-            )
+            print(f"Error: could not parse {settings_path}: {exc}", file=sys.stderr)
             sys.exit(1)
         current_text = _format_settings_json(current_settings)
     else:
