@@ -662,6 +662,17 @@ def _wait_for_turn(
 
 def cmd_start(args: argparse.Namespace) -> None:
     """Start a new claude worker."""
+    # --resume requires an explicit --name. Without it, the old code
+    # would silently generate a random name, then fail with "no saved
+    # session for worker 'worker-ab12'" — referring to a name the user
+    # never provided. Fail cleanly instead.
+    if args.resume and not args.name:
+        print(
+            "Error: --resume requires --name (the name of the worker to resume)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     name = args.name or generate_name()
 
     # Handle --resume: restore saved startup vars (cwd, claude_args)
