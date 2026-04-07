@@ -27,6 +27,11 @@ LS_PREVIEW_MAX_CHARS: int = 80
 SUMMARY_PREVIEW_MAX_CHARS: int = 80
 UUID_SHORT_LENGTH: int = 8
 
+# Reverse log iteration — chunk size for reading JSONL files backwards.
+# 8 KiB is the typical stdio buffer and large enough to contain an
+# average full-turn message in one read.
+LOG_REVERSE_CHUNK_SIZE: int = 8192
+
 # Queue correlation
 QUEUE_WAIT_TIMEOUT_SECONDS: float = 600.0
 
@@ -118,32 +123,31 @@ def get_worker_status(runtime: Path) -> tuple[str, float | None]:
 
     log_mtime = log_file.stat().st_mtime
 
-    last_type = None
-    last_stop_reason = None
-    try:
-        with open(log_file) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                msg_type = data.get("type")
-                if msg_type == "result":
-                    last_type = "result"
-                elif msg_type == "assistant":
-                    msg = data.get("message", {})
-                    sr = msg.get("stop_reason")
-                    if sr:
-                        last_stop_reason = sr
-                        last_type = "assistant"
-                elif msg_type == "user":
-                    last_stop_reason = None
-                    last_type = "user"
-    except OSError:
-        pass
+    # Walk the log backwards and stop at the first user/assistant/result.
+    # Previously this scanned the entire log forward to find the "last"
+    # meaningful message — O(log_size) per ls/status call. The reverse
+    # iterator yields from newest to oldest and we short-circuit at the
+    # first match, so the cost is O(1) amortized. Streaming assistant
+    # messages with stop_reason=None are skipped (matches the forward
+    # scan's semantics: only truthy stop_reasons were tracked).
+    last_type: str | None = None
+    last_stop_reason: str | None = None
+    for data in _iter_log_reverse(log_file):
+        msg_type = data.get("type")
+        if msg_type == "result":
+            last_type = "result"
+            break
+        if msg_type == "user":
+            last_type = "user"
+            last_stop_reason = None
+            break
+        if msg_type == "assistant":
+            sr = data.get("message", {}).get("stop_reason")
+            if sr:
+                last_type = "assistant"
+                last_stop_reason = sr
+                break
+            # Streaming chunk with stop_reason=None — skip, keep walking back.
 
     if not alive:
         return "dead", log_mtime
@@ -590,34 +594,42 @@ def _wait_for_turn(
         except (ValueError, OSError):
             return False
 
-    # Scan existing log to determine current state.
-    # Track: after the most recent user message, has a turn boundary appeared?
-    # When after_uuid is set, ignore entries up to and including that UUID.
+    # Walk the log backwards looking for the current turn state.
+    # Question: "is there a turn-end message AFTER the most recent
+    # user message (and, if after_uuid is set, AFTER the marker)?"
+    # Reverse-walking lets us answer in O(1) amortized instead of
+    # O(log_size) per wait-for-turn call.
+    #
+    # Decision rules while walking newest → oldest:
+    # - Hit after_uuid marker: stop. Everything before the marker is
+    #   out of scope; whatever we found above it wins.
+    # - Hit a `result` or `assistant` with stop_reason=end_turn: that's
+    #   our turn-end (it's newer than any user message we haven't seen
+    #   yet going backwards). Record it and stop.
+    # - Hit a `user` message: the turn is in progress — no turn-end
+    #   exists newer than this user message. Stop without recording.
     turn_end_after_last_user = None
-    passed_marker = after_uuid is None
-    with open(log_file) as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                data = json.loads(stripped)
-            except json.JSONDecodeError:
-                continue
-            if not passed_marker:
-                msg_uuid = data.get("uuid", "")
-                if after_uuid and _uuid_matches(msg_uuid, after_uuid):
-                    passed_marker = True
-                continue
-            msg_type = data.get("type")
-            if msg_type == "user":
-                turn_end_after_last_user = None  # reset on new user msg
-            elif msg_type == "result":
+    for data in _iter_log_reverse(log_file):
+        if after_uuid:
+            msg_uuid = data.get("uuid", "")
+            if _uuid_matches(msg_uuid, after_uuid):
+                break  # reached the marker; everything before is stale
+        msg_type = data.get("type")
+        if msg_type == "result":
+            turn_end_after_last_user = data
+            break
+        if msg_type == "assistant":
+            sr = data.get("message", {}).get("stop_reason")
+            if sr == "end_turn":
                 turn_end_after_last_user = data
-            elif msg_type == "assistant":
-                sr = data.get("message", {}).get("stop_reason")
-                if sr == "end_turn":
-                    turn_end_after_last_user = data
+                break
+            # Streaming chunk with non-end_turn stop_reason: not a turn
+            # boundary, keep walking back.
+            continue
+        if msg_type == "user":
+            # Reached a user message before any turn-end — turn is
+            # still in progress.
+            break
 
     # Scan found an already-complete turn. Confirm it's stable before returning.
     if turn_end_after_last_user is not None:
@@ -1178,31 +1190,80 @@ def _show_worker_response(
         )
 
 
+def _iter_log_reverse(log_file: Path, chunk_size: int = LOG_REVERSE_CHUNK_SIZE):
+    """Yield parsed JSONL entries from a log file, newest to oldest.
+
+    Reads the file from EOF backwards in chunks of ``chunk_size`` bytes.
+    Buffers incomplete lines across chunk boundaries so a line split by
+    a chunk boundary is correctly reassembled before parsing.
+
+    Yields dicts. Silently skips empty lines and lines that fail JSON
+    parsing. Yields nothing if the file doesn't exist or is empty.
+
+    This is the hot path for "what's the last thing in the log?" queries
+    (last uuid, last assistant preview, worker status). The old forward
+    scan was O(log_size) per call; this is O(chunk_size) amortized for
+    callers that stop after the first few matches.
+
+    The generator owns the file handle and closes it when exhausted or
+    when the caller calls ``.close()`` explicitly. Lazy — stopping the
+    iteration after the first yield only reads enough chunks to deliver
+    that yield.
+    """
+    if not log_file.exists():
+        return
+    try:
+        f = open(log_file, "rb")
+    except OSError:
+        return
+    try:
+        f.seek(0, 2)  # SEEK_END
+        remaining = f.tell()
+        buffer = b""
+        while remaining > 0:
+            read_size = min(chunk_size, remaining)
+            remaining -= read_size
+            f.seek(remaining)
+            chunk = f.read(read_size)
+            buffer = chunk + buffer
+            # Split on newlines. The FIRST fragment may be an incomplete
+            # line continuing from further back in the file — keep it
+            # in the buffer for the next iteration. Yield the rest in
+            # reverse order (newest first).
+            parts = buffer.split(b"\n")
+            buffer = parts[0]
+            complete_lines = parts[1:]
+            for line in reversed(complete_lines):
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        # Final buffer holds the very first line of the file (or the
+        # only line if the file had no newlines). Yield it last.
+        if buffer:
+            try:
+                yield json.loads(buffer)
+            except json.JSONDecodeError:
+                pass
+    finally:
+        f.close()
+
+
 def _get_last_uuid(log_file: Path) -> str | None:
     """Return the UUID of the most recent message in the log, or None.
 
     Used as a marker before sending so the caller can later use --since
-    to show everything that arrived after this point.
+    to show everything that arrived after this point. Uses
+    ``_iter_log_reverse`` so we only read the last chunk of the file
+    instead of scanning forward from byte 0.
     """
-    if not log_file.exists():
-        return None
-    last_uuid: str | None = None
-    try:
-        with open(log_file) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                uuid = data.get("uuid", "")
-                if uuid:
-                    last_uuid = uuid
-    except OSError:
-        pass
-    return last_uuid
+    for data in _iter_log_reverse(log_file):
+        uuid = data.get("uuid", "")
+        if uuid:
+            return uuid
+    return None
 
 
 def _get_last_assistant_preview(log_file: Path, max_chars: int) -> str:
@@ -1210,29 +1271,176 @@ def _get_last_assistant_preview(log_file: Path, max_chars: int) -> str:
 
     Returns the empty string if the log does not exist or no assistant text
     message is found. Used by `ls` to show "what's the worker doing" at a
-    glance.
+    glance. Uses ``_iter_log_reverse`` to short-circuit at the first match.
     """
-    if not log_file.exists():
-        return ""
-    last_preview = ""
-    try:
-        with open(log_file) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if data.get("type") != "assistant":
-                    continue
-                preview = _extract_text_preview(data, max_chars)
-                if preview:
-                    last_preview = preview
-    except OSError:
-        pass
-    return last_preview
+    for data in _iter_log_reverse(log_file):
+        if data.get("type") != "assistant":
+            continue
+        preview = _extract_text_preview(data, max_chars)
+        if preview:
+            return preview
+    return ""
+
+
+def _passes_display_filters(
+    data: dict, config, args, chat_id: str | None
+) -> "object | None":
+    """Apply the chat + claugs + non-verbose text filter chain.
+
+    Returns the parsed Message object if the entry should be displayed,
+    or None if it should be filtered out. Centralizes the logic so the
+    forward scan in _read_static and the reverse fast path both agree
+    on what counts as a displayable message.
+    """
+    from claude_logs import parse_message, should_show_message
+
+    if chat_id and not _message_contains_chat_tag(data, chat_id):
+        return None
+
+    msg = parse_message(data)
+    if not should_show_message(msg, data, config):
+        return None
+
+    if not getattr(args, "verbose", False):
+        content = data.get("message", {}).get("content", [])
+        if isinstance(content, list):
+            has_text = any(
+                c.get("type") == "text" and c.get("text", "").strip() for c in content
+            )
+            if not has_text:
+                return None
+    return msg
+
+
+def _read_static_fast_path(
+    log_file: Path, config, args, chat_id: str | None
+) -> list[tuple[int, dict, object]] | None:
+    """Reverse-iterate fast path for _read_static.
+
+    Applicable when the query only needs the tail of the log:
+    - no --since / --until (they imply forward position tracking)
+    - not a PM worker (PM monitoring needs the full forward scan to
+      track turn boundaries in order)
+    - either --last-turn or -n N is set (otherwise there's no end
+      condition for the reverse walk)
+    - chat filtering is handled natively (skip non-matching entries)
+
+    Returns a list of ``(raw_idx, data, msg)`` tuples matching the
+    shape _read_static builds, or None if the query doesn't qualify
+    for the fast path (caller should fall through to the forward scan).
+
+    The raw_idx values here count matched displayable messages
+    backwards from the end — they're only used for the --last-turn
+    window filter, which is already applied inside this helper, so
+    downstream consumers should not rely on their absolute values.
+    """
+    has_last_turn = getattr(args, "last_turn", False)
+    n_limit = getattr(args, "n", None)
+    if not (has_last_turn or n_limit is not None):
+        return None
+
+    collected_reverse: list[tuple[int, dict, object]] = []
+    seen_user = False
+    seen_asst = False
+    idx = 0
+    for data in _iter_log_reverse(log_file):
+        # Boundary detection for --last-turn runs on RAW classification
+        # (before display filtering) so --exclude-user doesn't break
+        # the walk-back — matches the forward scan's approach of using
+        # _is_user_input_raw / _has_assistant_text rather than the
+        # filtered message list.
+        if has_last_turn:
+            if _is_user_input_raw(data):
+                seen_user = True
+            elif _has_assistant_text(data):
+                seen_asst = True
+
+        msg = _passes_display_filters(data, config, args, chat_id)
+        if msg is not None:
+            # Fake raw_idx — not meaningful in reverse, but downstream
+            # code expects a 3-tuple shape.
+            collected_reverse.append((idx, data, msg))
+            idx += 1
+
+        # --last-turn termination: stop once we've seen both types in
+        # the RAW log (even if display-filtered out).
+        if has_last_turn and seen_user and seen_asst:
+            break
+
+        # -n N termination: stop once we've collected N displayable
+        # messages. --last-turn takes precedence if both are set.
+        if (
+            not has_last_turn
+            and n_limit is not None
+            and len(collected_reverse) >= n_limit
+        ):
+            break
+
+    return list(reversed(collected_reverse))
+
+
+def _render_read_output(
+    messages: list[tuple[int, dict, object]], formatter, config, args
+) -> tuple[str | None, str | None]:
+    """Render a prepared messages list according to args and return
+    (first_uuid, last_uuid) of what was emitted.
+
+    Handles the --count, --summary, and normal-render output modes plus
+    the bottom-of-output "to see new messages" hint. Called by both the
+    forward scan and the reverse fast path inside _read_static.
+    """
+    # Alternative output modes: --count and --summary
+    if hasattr(args, "count") and args.count:
+        print(len(messages))
+        return None, None
+
+    if hasattr(args, "summary") and args.summary:
+        first_uuid: str | None = None
+        last_uuid: str | None = None
+        for _raw_idx, data, _msg in messages:
+            uuid_short = data.get("uuid", "")[:UUID_SHORT_LENGTH]
+            role = data.get("type", "?")
+            text = _extract_text_preview(data, SUMMARY_PREVIEW_MAX_CHARS)
+            print(f"[{uuid_short}] {role}: {text}")
+            uuid = data.get("uuid", "")
+            if uuid:
+                if first_uuid is None:
+                    first_uuid = uuid
+                last_uuid = uuid
+        return first_uuid, last_uuid
+
+    last_uuid = None
+    first_uuid = None
+    for _raw_idx, data, msg in messages:
+        blocks = msg.render(config)
+        output = formatter.format(blocks)
+        if output.strip():
+            prefix = _format_msg_prefix(data)
+            lines = output.split("\n")
+            lines[0] = prefix + lines[0]
+            print("\n".join(lines))
+            uuid = data.get("uuid", "")
+            if uuid:
+                if first_uuid is None:
+                    first_uuid = uuid
+                last_uuid = uuid
+
+    # The bottom-of-output "to see new messages" hint is only shown when
+    # called directly from `read` — programmatic callers (like --show-response)
+    # set args.no_hint and print their own hint using the returned UUIDs.
+    # Preserve --exclude-user in the suggestion so re-running produces the
+    # same view the user is currently seeing.
+    suppress_hint = getattr(args, "no_hint", False)
+    if last_uuid and not suppress_hint:
+        exclude_user_flag = (
+            " --exclude-user" if getattr(args, "exclude_user", False) else ""
+        )
+        print(
+            f"\nTo see NEW messages after this point: "
+            f"claude-worker read {args.name} "
+            f"--since {last_uuid[:UUID_SHORT_LENGTH]}{exclude_user_flag}"
+        )
+    return first_uuid, last_uuid
 
 
 def _read_static(
@@ -1262,6 +1470,26 @@ def _read_static(
     # assistant message so we can check tagging discipline on the result
     # boundary. Only activated for PM workers.
     monitor_pm_tags = _worker_is_pm(args.name)
+
+    # -- Reverse-walk fast path (Imp-5) --
+    # When the query only needs the tail of the log (--last-turn or -n N)
+    # AND we don't need full-log forward state (no --since / --until, no
+    # PM tag monitoring), skip the O(log_size) forward scan and reverse-
+    # iterate only as far back as needed.
+    fast_path_eligible = (
+        not monitor_pm_tags
+        and since_uuid is None
+        and since_ts is None
+        and not (hasattr(args, "until") and args.until)
+    )
+    if fast_path_eligible:
+        chat_id_for_fast = getattr(args, "chat_id", None)
+        fast_messages = _read_static_fast_path(log_file, config, args, chat_id_for_fast)
+        if fast_messages is not None:
+            messages = fast_messages
+            # Jump past the forward scan and the post-scan filters that
+            # were already applied inside the fast path.
+            return _render_read_output(messages, formatter, config, args)
     current_turn_chat_id: str | None = None
     last_assistant_in_turn: dict | None = None
     missing_tag_reports: list[dict] = []
@@ -1423,59 +1651,7 @@ def _read_static(
             print("No new messages after that point.", file=sys.stderr)
         return None, None
 
-    # Alternative output modes: --count and --summary
-    if hasattr(args, "count") and args.count:
-        print(len(messages))
-        return None, None
-
-    if hasattr(args, "summary") and args.summary:
-        first_uuid: str | None = None
-        last_uuid: str | None = None
-        for _raw_idx, data, msg in messages:
-            uuid_short = data.get("uuid", "")[:UUID_SHORT_LENGTH]
-            role = data.get("type", "?")
-            text = _extract_text_preview(data, SUMMARY_PREVIEW_MAX_CHARS)
-            print(f"[{uuid_short}] {role}: {text}")
-            uuid = data.get("uuid", "")
-            if uuid:
-                if first_uuid is None:
-                    first_uuid = uuid
-                last_uuid = uuid
-        return first_uuid, last_uuid
-
-    last_uuid = None
-    first_uuid = None
-    for _raw_idx, data, msg in messages:
-        blocks = msg.render(config)
-        output = formatter.format(blocks)
-        if output.strip():
-            prefix = _format_msg_prefix(data)
-            lines = output.split("\n")
-            lines[0] = prefix + lines[0]
-            print("\n".join(lines))
-            uuid = data.get("uuid", "")
-            if uuid:
-                if first_uuid is None:
-                    first_uuid = uuid
-                last_uuid = uuid
-
-    # The bottom-of-output "to see new messages" hint is only shown when
-    # called directly from `read` — programmatic callers (like --show-response)
-    # set args.no_hint and print their own hint using the returned UUIDs.
-    # Preserve --exclude-user in the suggestion so re-running produces the
-    # same view the user is currently seeing.
-    suppress_hint = getattr(args, "no_hint", False)
-    if last_uuid and not suppress_hint:
-        exclude_user_flag = (
-            " --exclude-user" if getattr(args, "exclude_user", False) else ""
-        )
-        print(
-            f"\nTo see NEW messages after this point: "
-            f"claude-worker read {args.name} "
-            f"--since {last_uuid[:UUID_SHORT_LENGTH]}{exclude_user_flag}"
-        )
-
-    return first_uuid, last_uuid
+    return _render_read_output(messages, formatter, config, args)
 
 
 def _read_follow(log_file, config, formatter, since_uuid, since_ts, args):
