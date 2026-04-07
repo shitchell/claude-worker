@@ -435,11 +435,20 @@ def _generate_queue_id() -> str:
 
 
 def _wait_for_queue_response(
-    name: str, queue_id: str, timeout: float = QUEUE_WAIT_TIMEOUT_SECONDS
+    name: str,
+    queue_id: str,
+    timeout: float = QUEUE_WAIT_TIMEOUT_SECONDS,
+    after_uuid: str | None = None,
 ) -> int:
     """Tail the log waiting for an assistant message containing [queue:{id}].
 
     Returns 0 if the correlation tag is found, 1 if the worker dies, 2 on timeout.
+
+    If ``after_uuid`` is provided, only log entries appearing *after* that
+    UUID are considered. This avoids matching a stale [queue:<id>] string
+    from a previous cycle (or a sub-millisecond collision between two
+    recent queue IDs) — mirrors the race protection already in
+    ``_wait_for_turn``.
     """
     runtime = get_runtime_dir(name)
     log_file = runtime / "log"
@@ -464,11 +473,24 @@ def _wait_for_queue_response(
     deadline = time.monotonic() + timeout
 
     # Scan existing log first — the response may have already arrived.
+    # When after_uuid is set, ignore everything up to and including the
+    # marker line (matched on the parsed "uuid" JSON field, robust to
+    # whitespace differences in serialization style).
+    passed_marker = after_uuid is None
     with open(log_file) as f:
         for line in f:
+            if not passed_marker:
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if after_uuid and _uuid_matches(data.get("uuid", ""), after_uuid):
+                    passed_marker = True
+                continue
             if tag in line:
                 return 0
-        # Tail from current position (end of existing content)
+        # Tail from current position (end of existing content). Everything
+        # we tail now is by definition past the marker.
         while True:
             if time.monotonic() > deadline:
                 print(f"Error: timeout waiting for {tag}", file=sys.stderr)
@@ -881,7 +903,7 @@ def cmd_send(args: argparse.Namespace) -> None:
         return
 
     if queue_id is not None:
-        rc = _wait_for_queue_response(args.name, queue_id)
+        rc = _wait_for_queue_response(args.name, queue_id, after_uuid=marker_uuid)
     else:
         rc = _wait_for_turn(args.name, after_uuid=marker_uuid)
 
@@ -992,7 +1014,14 @@ def cmd_read(args: argparse.Namespace) -> tuple[str | None, str | None]:
 
 
 def _uuid_matches(msg_uuid: str, target: str) -> bool:
-    """Case-insensitive UUID prefix match."""
+    """Case-insensitive UUID prefix match.
+
+    Defensive against empty target: an empty string would otherwise be a
+    prefix of every UUID and match-all-lines. Returns False for empty
+    inputs on either side.
+    """
+    if not msg_uuid or not target:
+        return False
     return msg_uuid.lower().startswith(target.lower())
 
 
