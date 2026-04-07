@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -48,10 +49,16 @@ def fake_worker(tmp_path: Path, monkeypatch):
         entries: list[dict[str, Any]],
         name: str = "test-worker",
         pm: bool = False,
+        alive: bool = False,
     ) -> str:
         runtime = base_dir / name
         runtime.mkdir(parents=True, exist_ok=True)
         _write_jsonl(runtime / "log", entries)
+        if alive:
+            # Write a pid file pointing at the test process itself, so
+            # helpers that check PID liveness (_wait_for_turn, etc.) see
+            # the fake worker as alive.
+            (runtime / "pid").write_text(str(os.getpid()))
         if pm:
             # Write minimal .sessions.json so _worker_is_pm sees the flag
             sessions_path = base_dir / ".sessions.json"

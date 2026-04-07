@@ -858,6 +858,16 @@ def cmd_send(args: argparse.Namespace) -> None:
 
     if args.background:
         _print_worker_status(args.name)
+        # Print the pre-send marker UUID so callers can pass it to
+        # `wait-for-turn --after-uuid` and avoid the scan-phase race where
+        # the prior turn's `result` message matches before claude processes
+        # the new input.
+        if marker_uuid:
+            print(
+                f"\nTo wait for THIS turn's response: "
+                f"claude-worker wait-for-turn {args.name} "
+                f"--after-uuid {marker_uuid}"
+            )
         return
 
     if queue_id is not None:
@@ -1431,7 +1441,12 @@ def _read_follow(log_file, config, formatter, since_uuid, since_ts, args):
 def cmd_wait_for_turn(args: argparse.Namespace) -> None:
     """Block until claude finishes its turn or the session ends."""
     resolve_worker(args.name)  # validate worker exists
-    rc = _wait_for_turn(args.name, timeout=args.timeout, settle=args.settle)
+    rc = _wait_for_turn(
+        args.name,
+        timeout=args.timeout,
+        after_uuid=getattr(args, "after_uuid", None),
+        settle=args.settle,
+    )
     sys.exit(rc)
 
 
@@ -1901,6 +1916,17 @@ def main():
     )
     p_wait.add_argument("name", help="Worker name")
     p_wait.add_argument("--timeout", type=float, help="Timeout in seconds")
+    p_wait.add_argument(
+        "--after-uuid",
+        metavar="UUID",
+        help=(
+            "Only consider log entries appearing AFTER this UUID. Use this "
+            "with the canonical `send --background` + `wait-for-turn` "
+            "workflow: capture the last log UUID before sending, then pass "
+            "it here so wait-for-turn doesn't match the prior turn's "
+            "`result` message before the new input reaches claude."
+        ),
+    )
     p_wait.add_argument(
         "--settle",
         type=float,
