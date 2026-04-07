@@ -54,6 +54,7 @@ MISSING_TAG_LOG_NAME: str = "missing-tags.json"
 MISSING_TAG_PREVIEW_MAX_CHARS: int = 100
 
 from claude_worker.manager import (
+    _atomic_write_text,
     cleanup_runtime_dir,
     create_runtime_dir,
     get_base_dir,
@@ -398,9 +399,10 @@ def _handle_missing_tag_reports(worker_name: str, reports: list[dict]) -> None:
     if not new_entries:
         return
 
-    # Write the updated log
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text(json.dumps(existing, indent=2) + "\n")
+    # Write the updated log atomically so a concurrent read or a crash
+    # mid-write doesn't leave a partially-written JSON file that breaks
+    # the next invocation's dedup check.
+    _atomic_write_text(log_path, json.dumps(existing, indent=2) + "\n")
 
     # Warn the user on stderr for each new entry
     for report in new_entries:
@@ -1698,9 +1700,10 @@ def cmd_install_hook(args: argparse.Namespace) -> None:
             print("Aborted.", file=sys.stderr)
             sys.exit(1)
 
-    # 6. Write the settings file
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(proposed_text)
+    # 6. Write the settings file atomically — ~/.claude/settings.json is
+    # the user's Claude Code config and must not be corrupted by a partial
+    # write if the disk fills or a signal arrives mid-write.
+    _atomic_write_text(settings_path, proposed_text)
     print(f"Updated {settings_path}")
     print(f'\nTest with: claude -p "echo $CLAUDE_SESSION_UUID"')
 

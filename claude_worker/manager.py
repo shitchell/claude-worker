@@ -42,6 +42,32 @@ def create_runtime_dir(name: str) -> Path:
     return runtime
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Atomically write text to ``path`` via a sibling .tmp file + os.replace.
+
+    Guarantees that a crash (signal, disk full, power loss) between the
+    write and the rename leaves the original file untouched — either the
+    new content is fully in place, or the old content remains. Used for
+    user-critical files: ~/.claude/settings.json, .sessions.json,
+    missing-tags.json.
+
+    Creates the parent directory if it doesn't exist.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(path.name + ".tmp")
+    try:
+        tmp_path.write_text(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        # Best-effort cleanup of the tmp file; don't mask the original
+        # exception.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def cleanup_runtime_dir(name: str) -> None:
     """Remove runtime directory and all contents.
 
@@ -63,10 +89,11 @@ def get_sessions_file() -> Path:
 def save_worker(name: str, **kwargs) -> None:
     """Persist worker metadata (session_id, cwd, agent, claude_args, etc.).
 
-    Merges kwargs into any existing entry for this worker name.
+    Merges kwargs into any existing entry for this worker name. Writes
+    atomically via _atomic_write_text so a crash during the save doesn't
+    leave a truncated .sessions.json that breaks future --resume.
     """
     path = get_sessions_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
     sessions = {}
     if path.exists():
         try:
@@ -81,7 +108,7 @@ def save_worker(name: str, **kwargs) -> None:
         existing = {}
     existing.update(kwargs)
     sessions[name] = existing
-    path.write_text(json.dumps(sessions, indent=2))
+    _atomic_write_text(path, json.dumps(sessions, indent=2))
 
 
 def get_saved_worker(name: str) -> dict | None:
