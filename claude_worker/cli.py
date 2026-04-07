@@ -517,18 +517,34 @@ def _wait_for_queue_response(
                 return 0
 
 
-def _settle_is_stable(log_file: Path, settle: float) -> bool:
-    """Wait `settle` seconds, return True if no new messages appeared.
+def _settle_is_stable(
+    log_file: Path, settle: float, deadline: float | None = None
+) -> bool:
+    """Wait up to `settle` seconds, return True if no new messages appeared.
 
     Returns True immediately when ``settle <= 0``. Used by ``_wait_for_turn``
     to debounce the return when a worker briefly idles between internal
     subagent dispatches — a turn boundary that "sticks" for the full settle
     window is considered real, while one that flips back to activity is not.
+
+    When ``deadline`` (an absolute time.monotonic() value) is provided, the
+    sleep is capped at min(settle, remaining_time). If the deadline has
+    already passed, skip the sleep entirely and return False so the caller
+    can fall through to its own timeout check. This prevents `--settle 3
+    --timeout 5` from blowing past the user's total budget.
     """
     if settle <= 0:
         return True
+    effective_settle = settle
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # Already past the deadline — no point sleeping. The caller's
+            # next deadline check will catch this and return timeout.
+            return False
+        effective_settle = min(settle, remaining)
     uuid_before = _get_last_uuid(log_file)
-    time.sleep(settle)
+    time.sleep(effective_settle)
     uuid_after = _get_last_uuid(log_file)
     return uuid_after == uuid_before
 
@@ -605,7 +621,7 @@ def _wait_for_turn(
 
     # Scan found an already-complete turn. Confirm it's stable before returning.
     if turn_end_after_last_user is not None:
-        if _settle_is_stable(log_file, settle):
+        if _settle_is_stable(log_file, settle, deadline=deadline):
             return 0
         # Fell through: new activity during settle — drop into tail loop to
         # wait for the next turn boundary.
@@ -648,7 +664,7 @@ def _wait_for_turn(
                     turn_ended = True
 
             if turn_ended:
-                if _settle_is_stable(log_file, settle):
+                if _settle_is_stable(log_file, settle, deadline=deadline):
                     return 0
                 # New activity during settle: keep tailing for the next
                 # turn boundary. Re-seek to end so we don't re-read the
