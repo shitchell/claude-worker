@@ -57,6 +57,11 @@ PM_INTERNALIZE_MESSAGE: str = (
 )
 MISSING_TAG_LOG_NAME: str = "missing-tags.json"
 MISSING_TAG_PREVIEW_MAX_CHARS: int = 100
+# Cap on the missing-tag dedup log size. When exceeded, the oldest
+# entries are evicted (FIFO). 1000 is enough for a realistic day or
+# two of distinct misses without growing unbounded; eviction is a
+# no-op in normal operation where misses are rare.
+MISSING_TAG_LOG_MAX_ENTRIES: int = 1000
 
 from claude_worker.manager import (
     _atomic_write_text,
@@ -399,6 +404,11 @@ def _handle_missing_tag_reports(worker_name: str, reports: list[dict]) -> None:
 
     A "report" is a dict with keys: uuid, chat_id, preview. The log is keyed
     by UUID for O(1) dedup. Only new UUIDs trigger a warning.
+
+    The dedup log is capped at MISSING_TAG_LOG_MAX_ENTRIES entries; when the
+    cap is exceeded the OLDEST entries are evicted FIFO. Eviction relies
+    on Python 3.7+ dict insertion-order guarantees, which is why each new
+    entry is inserted at the end and old entries appear first.
     """
     if not reports:
         return
@@ -421,6 +431,13 @@ def _handle_missing_tag_reports(worker_name: str, reports: list[dict]) -> None:
 
     if not new_entries:
         return
+
+    # Enforce the size cap: drop the oldest entries (dict insertion order)
+    # until we're back under MISSING_TAG_LOG_MAX_ENTRIES. This is a no-op
+    # in normal operation — tagging misses are rare.
+    while len(existing) > MISSING_TAG_LOG_MAX_ENTRIES:
+        oldest_key = next(iter(existing))
+        del existing[oldest_key]
 
     # Write the updated log atomically so a concurrent read or a crash
     # mid-write doesn't leave a partially-written JSON file that breaks
