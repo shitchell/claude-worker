@@ -95,7 +95,9 @@ def make_user_message(text: str, uuid: str, session_id: str = "sess") -> dict[st
     }
 
 
-def make_assistant_message(text: str, uuid: str, session_id: str = "sess") -> dict[str, Any]:
+def make_assistant_message(
+    text: str, uuid: str, session_id: str = "sess"
+) -> dict[str, Any]:
     """Build an assistant text message entry."""
     return {
         "type": "assistant",

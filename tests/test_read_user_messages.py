@@ -55,9 +55,7 @@ def _build_read_args(
     )
 
 
-def _capture_read(
-    name: str, capsys: pytest.CaptureFixture, **kwargs
-) -> str:
+def _capture_read(name: str, capsys: pytest.CaptureFixture, **kwargs) -> str:
     """Invoke cmd_read with the given flags and return captured stdout."""
     from claude_worker.cli import cmd_read
 
