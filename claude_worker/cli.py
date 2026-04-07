@@ -910,14 +910,19 @@ def cmd_read(args: argparse.Namespace) -> tuple[str | None, str | None]:
         hidden |= {"progress", "file-history-snapshot", "last-prompt"}
         filters = FilterConfig(hidden=hidden)
     else:
-        # Default: conversational messages only — whitelist user-input (human-
-        # typed messages) and assistant, hiding tool results, system, etc.
+        # Default: conversational messages only — whitelist user (type) +
+        # user-input (subtype) + assistant, hiding tool results, system, etc.
+        # Both "user" and "user-input" are required: claugs checks type
+        # visibility first, so show_only must include "user" or ALL user
+        # messages are hidden regardless of subtype. The "user-input" subtype
+        # then narrows to real human input (excluding tool-result,
+        # subagent-result, system-meta, local-command).
         # Also hide tool/thinking content blocks from assistant messages.
         hidden |= {"thinking", "tools"}
-        filters = FilterConfig(
-            show_only={"user-input", "assistant", "queue-operation"},
-            hidden=hidden,
-        )
+        show_only = {"user", "user-input", "assistant", "queue-operation"}
+        if getattr(args, "exclude_user", False):
+            show_only -= {"user", "user-input"}
+        filters = FilterConfig(show_only=show_only, hidden=hidden)
 
     config = RenderConfig(filters=filters)
 
@@ -971,6 +976,63 @@ def _uuid_matches(msg_uuid: str, target: str) -> bool:
     return msg_uuid.lower().startswith(target.lower())
 
 
+def _is_user_input_raw(data: dict) -> bool:
+    """Lightweight classifier: is this raw JSONL entry a user-input message?
+
+    Mirrors claugs' ``UserMessage.get_subtype() == "user-input"`` without
+    instantiating a UserMessage. Used by ``--last-turn`` walk-back tracking
+    during the scan loop, where we need to identify turn boundaries on raw
+    data *before* display filtering (which may hide user messages via
+    ``--exclude-user`` but still needs them to locate the window).
+
+    A user-input message is:
+    - type == "user"
+    - has no toolUseResult (not a tool-result or subagent-result)
+    - isMeta is not set (not a system-injected meta message)
+    - content does not start with <command-name> / <local-command-stdout>
+    - content is not a list containing tool_result blocks
+    """
+    if data.get("type") != "user":
+        return False
+    if data.get("toolUseResult") is not None:
+        return False
+    if data.get("isMeta"):
+        return False
+    content = data.get("message", {}).get("content", "")
+    if isinstance(content, str):
+        return not (
+            content.startswith("<command-name>")
+            or content.startswith("<local-command-stdout>")
+        )
+    if isinstance(content, list):
+        # A list that contains any tool_result block is a tool-result message
+        return not any(
+            isinstance(block, dict) and block.get("type") == "tool_result"
+            for block in content
+        )
+    return False
+
+
+def _has_assistant_text(data: dict) -> bool:
+    """Return True if this raw entry is an assistant message with non-empty text.
+
+    Used alongside ``_is_user_input_raw`` for ``--last-turn`` walk-back
+    boundary detection. Assistant messages that only contain tool_use blocks
+    (no text) don't count as a conversational turn endpoint.
+    """
+    if data.get("type") != "assistant":
+        return False
+    content = data.get("message", {}).get("content", [])
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and block.get("text", "").strip()
+        for block in content
+    )
+
+
 def _show_worker_response(
     name: str,
     last_turn: bool = False,
@@ -1000,6 +1062,12 @@ def _show_worker_response(
         count=False,
         summary=False,
         verbose=False,
+        # The orchestrator just sent the message; echoing its own text back
+        # is noise. Force --exclude-user for show-response output. The
+        # --last-turn window still uses user-input messages for boundary
+        # detection (see _is_user_input_raw), so hiding them doesn't break
+        # the walk-back.
+        exclude_user=True,
         color=False,
         no_color=False,
         no_hint=True,
@@ -1012,11 +1080,14 @@ def _show_worker_response(
     )
     first_uuid, last_uuid = cmd_read(namespace)
     if first_uuid and last_uuid:
+        # Hint uses --exclude-user to match the view we just rendered, so
+        # re-running the suggested command produces the same output.
         print(
             f"\nTo see this window again or expand: "
             f"claude-worker read {name} "
             f"--since {first_uuid[:UUID_SHORT_LENGTH]} "
-            f"--until {last_uuid[:UUID_SHORT_LENGTH]}"
+            f"--until {last_uuid[:UUID_SHORT_LENGTH]} "
+            f"--exclude-user"
         )
 
 
@@ -1090,7 +1161,10 @@ def _read_static(
     from datetime import datetime, timezone
 
     found_since = since_uuid is None and since_ts is None
-    messages = []
+    # messages stores (raw_idx, data, msg) so --last-turn can filter by
+    # raw-scan position after computing the walk-back window. raw_idx is
+    # total_scanned at the time of append.
+    messages: list[tuple[int, dict, object]] = []
     total_scanned = 0
     # Remember the --since marker message so we can show its content if the
     # result set is empty ("No new messages since [abc12345]: ...")
@@ -1104,6 +1178,15 @@ def _read_static(
     current_turn_chat_id: str | None = None
     last_assistant_in_turn: dict | None = None
     missing_tag_reports: list[dict] = []
+
+    # -- --last-turn walk-back state --
+    # Tracks the raw-scan index of the most recent user-input and assistant
+    # messages. After the scan, the turn window starts at the EARLIER of the
+    # two (i.e. the message that completed the "one of each" pair going
+    # backwards from the end of the log). Runs on raw data before display
+    # filtering so --exclude-user doesn't break boundary detection.
+    last_user_raw_idx = -1
+    last_asst_raw_idx = -1
 
     with open(log_file) as f:
         for line in f:
@@ -1175,17 +1258,14 @@ def _read_static(
                     current_turn_chat_id = None
                     last_assistant_in_turn = None
 
-            # Handle --last-turn: reset the message list every time we hit a
-            # raw user message. This must run BEFORE display filtering because
-            # claude_logs classifies replayed user messages as non-"user-input"
-            # and drops them — so we cannot rely on the filtered list to
-            # locate turn boundaries.
-            if (
-                hasattr(args, "last_turn")
-                and args.last_turn
-                and data.get("type") == "user"
-            ):
-                messages = []
+            # Walk-back tracking for --last-turn. Runs on RAW data (before
+            # display filtering) so --exclude-user can still compute the
+            # correct window boundary via user-input messages.
+            if hasattr(args, "last_turn") and args.last_turn:
+                if _is_user_input_raw(data):
+                    last_user_raw_idx = total_scanned
+                elif _has_assistant_text(data):
+                    last_asst_raw_idx = total_scanned
 
             # Chat routing filter: keep only messages containing [chat:<id>].
             # args.chat_id is set by cmd_read after resolving --chat / env.
@@ -1212,7 +1292,7 @@ def _read_static(
                     if not has_text:
                         continue
 
-            messages.append((data, msg))
+            messages.append((total_scanned, data, msg))
 
     # Handle missing-tag reports collected during the scan (PM workers only).
     # Runs before the --since-not-found early return because missing tags
@@ -1228,6 +1308,15 @@ def _read_static(
             file=sys.stderr,
         )
         return None, None
+
+    # Handle --last-turn: filter messages to the walk-back window. Window
+    # starts at the EARLIER of (last user-input raw index, last assistant
+    # raw index) and runs to the end of the scan. Degrades gracefully if
+    # only one type is present — in that case show everything we collected.
+    if hasattr(args, "last_turn") and args.last_turn:
+        if last_user_raw_idx >= 0 and last_asst_raw_idx >= 0:
+            window_start = min(last_user_raw_idx, last_asst_raw_idx)
+            messages = [m for m in messages if m[0] >= window_start]
 
     # Handle -n: keep only the last N messages
     if hasattr(args, "n") and args.n is not None:
@@ -1255,7 +1344,7 @@ def _read_static(
     if hasattr(args, "summary") and args.summary:
         first_uuid: str | None = None
         last_uuid: str | None = None
-        for data, msg in messages:
+        for _raw_idx, data, msg in messages:
             uuid_short = data.get("uuid", "")[:UUID_SHORT_LENGTH]
             role = data.get("type", "?")
             text = _extract_text_preview(data, SUMMARY_PREVIEW_MAX_CHARS)
@@ -1269,7 +1358,7 @@ def _read_static(
 
     last_uuid = None
     first_uuid = None
-    for data, msg in messages:
+    for _raw_idx, data, msg in messages:
         blocks = msg.render(config)
         output = formatter.format(blocks)
         if output.strip():
@@ -1286,11 +1375,17 @@ def _read_static(
     # The bottom-of-output "to see new messages" hint is only shown when
     # called directly from `read` — programmatic callers (like --show-response)
     # set args.no_hint and print their own hint using the returned UUIDs.
+    # Preserve --exclude-user in the suggestion so re-running produces the
+    # same view the user is currently seeing.
     suppress_hint = getattr(args, "no_hint", False)
     if last_uuid and not suppress_hint:
+        exclude_user_flag = (
+            " --exclude-user" if getattr(args, "exclude_user", False) else ""
+        )
         print(
             f"\nTo see NEW messages after this point: "
-            f"claude-worker read {args.name} --since {last_uuid[:UUID_SHORT_LENGTH]}"
+            f"claude-worker read {args.name} "
+            f"--since {last_uuid[:UUID_SHORT_LENGTH]}{exclude_user_flag}"
         )
 
     return first_uuid, last_uuid
@@ -1744,7 +1839,15 @@ def main():
     p_read.add_argument(
         "--last-turn",
         action="store_true",
-        help="Show everything since the last user message",
+        help="Show the most recent conversational exchange: walks backwards "
+        "from the end of the log until at least one user-input AND one "
+        "assistant message have been seen, then shows everything from the "
+        "earlier of the two to the end",
+    )
+    p_read.add_argument(
+        "--exclude-user",
+        action="store_true",
+        help="Hide user-input messages from the display (default shows them)",
     )
     p_read.add_argument(
         "-n",

@@ -11,8 +11,17 @@ dependencies = [
     "claugs>=0.5.0",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
 [project.scripts]
 claude-worker = "claude_worker.cli:main"
 
 [tool.setuptools.package-data]
 claude_worker = ["hooks/*.sh", "identities/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
