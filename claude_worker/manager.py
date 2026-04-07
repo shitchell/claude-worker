@@ -111,6 +111,56 @@ def save_worker(name: str, **kwargs) -> None:
     _atomic_write_text(path, json.dumps(sessions, indent=2))
 
 
+def _manager_thread_panic(log_path: Path, thread_name: str, exc: BaseException) -> None:
+    """Handle a fatal exception inside a manager daemon thread.
+
+    Loud failure mode (per Round 3 design): a silently-dead thread leaves
+    the worker appearing alive in `ls` while being broken (no log pump, or
+    no FIFO pump). Instead:
+
+    1. Best-effort append a sentinel JSONL line so operators reading the
+       log see a clear error signal.
+    2. Send SIGTERM to the manager's own PID so the worker transitions to
+       `dead` in ls output, prompting investigation.
+
+    The SIGTERM step runs even if the sentinel write fails — the operator
+    signal is more important than the log entry.
+    """
+    import traceback
+
+    try:
+        sentinel = {
+            "type": "manager_error",
+            "thread": thread_name,
+            "error": f"{type(exc).__name__}: {exc}",
+            "traceback": traceback.format_exception(type(exc), exc, exc.__traceback__),
+        }
+        with open(log_path, "a") as log:
+            log.write(json.dumps(sentinel) + "\n")
+    except Exception:
+        # Sentinel write failed (disk full, permissions, etc.) — carry on
+        # to the SIGTERM step so the operator still sees the dead worker.
+        pass
+    try:
+        os.kill(os.getpid(), signal.SIGTERM)
+    except Exception:
+        # If we can't even signal ourselves, there's nothing more we can do.
+        pass
+
+
+def _run_manager_thread(body: "callable", log_path: Path, thread_name: str) -> None:
+    """Run a manager daemon thread body with panic handling.
+
+    Any uncaught exception from ``body`` is routed through
+    ``_manager_thread_panic``. Daemon threads otherwise silently die,
+    which the project's state-awareness principle explicitly forbids.
+    """
+    try:
+        body()
+    except Exception as exc:
+        _manager_thread_panic(log_path, thread_name, exc)
+
+
 def get_saved_worker(name: str) -> dict | None:
     """Look up saved worker metadata by name.
 
@@ -211,7 +261,7 @@ def run_manager(
     session_captured = threading.Event()
 
     # Thread: read claude stdout → log file
-    def stdout_to_log():
+    def stdout_to_log_body():
         with open(log_path, "w") as log:
             for raw_line in proc.stdout:
                 line = raw_line.decode("utf-8", errors="replace")
@@ -232,13 +282,17 @@ def run_manager(
                     except (json.JSONDecodeError, KeyError):
                         pass
 
-    log_thread = threading.Thread(target=stdout_to_log, daemon=True)
+    log_thread = threading.Thread(
+        target=_run_manager_thread,
+        args=(stdout_to_log_body, log_path, "stdout_to_log"),
+        daemon=True,
+    )
     log_thread.start()
 
     # Thread: read from `in` FIFO → claude stdin
     # Uses a dummy write fd to prevent EOF when writers close.
     # Start this immediately so external senders don't block.
-    def fifo_to_stdin():
+    def fifo_to_stdin_body():
         # Open read end non-blocking first
         rd_fd = os.open(str(in_fifo), os.O_RDONLY | os.O_NONBLOCK)
         # Open write end to keep FIFO alive (prevents EOF)
@@ -256,12 +310,18 @@ def run_manager(
                         proc.stdin.write(data)
                         proc.stdin.flush()
         except (OSError, BrokenPipeError):
+            # These are EXPECTED during normal shutdown (claude exits,
+            # FIFO closes). Not a panic condition.
             pass
         finally:
             os.close(rd_fd)
             os.close(wr_fd)
 
-    fifo_thread = threading.Thread(target=fifo_to_stdin, daemon=True)
+    fifo_thread = threading.Thread(
+        target=_run_manager_thread,
+        args=(fifo_to_stdin_body, log_path, "fifo_to_stdin"),
+        daemon=True,
+    )
     fifo_thread.start()
 
     # Send initial prompt if provided
