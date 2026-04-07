@@ -152,6 +152,14 @@ def get_worker_status(runtime: Path) -> tuple[str, float | None]:
         return "waiting", log_mtime
     if last_stop_reason == "end_turn":
         return "waiting", log_mtime
+    # No user/assistant/result seen yet — just startup noise (system/init,
+    # hooks, etc.). The worker is alive but idle, literally waiting for
+    # first input. Previously this fell through to "working" which made
+    # background-started workers look busy forever.
+    if last_type is None:
+        return "waiting", log_mtime
+    # Anything else (user with no trailing turn-end, assistant mid-tool_use)
+    # is actively in progress.
     return "working", log_mtime
 
 
