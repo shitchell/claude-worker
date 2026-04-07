@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -42,12 +43,16 @@ def create_runtime_dir(name: str) -> Path:
 
 
 def cleanup_runtime_dir(name: str) -> None:
-    """Remove runtime directory and all contents."""
+    """Remove runtime directory and all contents.
+
+    Idempotent: safe to call on a non-existent directory or concurrently
+    from multiple callers (the SIGTERM handler, natural manager exit, and
+    cmd_stop all race on this). Uses shutil.rmtree(ignore_errors=True)
+    instead of iterdir+unlink so subdirectories are handled and a
+    concurrent deletion between iterdir and unlink doesn't raise.
+    """
     runtime = get_runtime_dir(name)
-    if runtime.exists():
-        for f in runtime.iterdir():
-            f.unlink()
-        runtime.rmdir()
+    shutil.rmtree(runtime, ignore_errors=True)
 
 
 def get_sessions_file() -> Path:
@@ -153,12 +158,24 @@ def run_manager(
         cwd=resolved_cwd,
     )
 
-    # Signal handling — forward SIGTERM to claude, then exit
+    # Signal handling — forward SIGTERM to claude, then exit.
+    # Wrapped in try/except so a stuck claude (subprocess.TimeoutExpired)
+    # doesn't leave the manager tracebacked and the runtime dir uncleaned.
+    # On timeout, escalate to SIGKILL and clean up unconditionally.
     def handle_term(signum, frame):
-        proc.terminate()
-        proc.wait(timeout=SIGTERM_WAIT_TIMEOUT_SECONDS)
-        cleanup_runtime_dir(name)
-        sys.exit(0)
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=SIGTERM_WAIT_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=SIGTERM_WAIT_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    pass  # claude is truly stuck; cleanup anyway
+        finally:
+            cleanup_runtime_dir(name)
+            sys.exit(0)
 
     signal.signal(signal.SIGTERM, handle_term)
     signal.signal(signal.SIGINT, handle_term)
