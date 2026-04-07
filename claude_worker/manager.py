@@ -21,6 +21,18 @@ FIFO_READ_BUFFER_BYTES: int = 65536
 SIGTERM_WAIT_TIMEOUT_SECONDS: float = 10.0
 LOG_THREAD_JOIN_TIMEOUT_SECONDS: float = 5.0
 
+# Env var override for the claude binary path. Tests set this to point at
+# a stub-claude script that emits canned JSONL output; production leaves
+# it unset and defaults to the literal "claude" on PATH.
+CLAUDE_BIN_ENV_VAR: str = "CLAUDE_WORKER_CLAUDE_BIN"
+DEFAULT_CLAUDE_BIN: str = "claude"
+
+
+def _resolve_claude_bin() -> str:
+    """Return the claude binary path, honoring the CLAUDE_WORKER_CLAUDE_BIN
+    env var for test injection. Defaults to ``"claude"`` (PATH lookup)."""
+    return os.environ.get(CLAUDE_BIN_ENV_VAR) or DEFAULT_CLAUDE_BIN
+
 
 def get_base_dir() -> Path:
     """Return /tmp/claude-workers/{UID}/."""
@@ -191,12 +203,37 @@ def run_manager(
 ) -> None:
     """Run the manager process (called after fork).
 
+    Thin wrapper around ``_run_manager_forkless`` that installs signal
+    handlers. Production uses this via cmd_start's fork + setsid +
+    fd-redirect sequence. Tests drive ``_run_manager_forkless`` directly
+    with ``install_signals=False`` so SIGTERM/SIGINT don't escape into
+    the test runner, and so the helper can run in a thread instead of
+    a forked process.
+    """
+    _run_manager_forkless(name, cwd, claude_args, initial_message, install_signals=True)
+
+
+def _run_manager_forkless(
+    name: str,
+    cwd: str | None,
+    claude_args: list[str],
+    initial_message: str | None,
+    install_signals: bool = True,
+) -> None:
+    """Run the manager lifecycle WITHOUT the fork wrapper.
+
     This is the main loop that:
-    1. Launches claude with stream-json I/O
+    1. Launches claude with stream-json I/O (resolved via
+       CLAUDE_WORKER_CLAUDE_BIN for test stubbing)
     2. Bridges the `in` FIFO to claude's stdin
     3. Tees claude's stdout to the `log` file
     4. Captures session ID from the init message
     5. Sends initial prompt if provided
+    6. Waits for claude to exit, then cleans up
+
+    When ``install_signals=False`` (test mode), SIGTERM/SIGINT handlers
+    are NOT registered — the test runner's signal handling stays intact,
+    and shutdown is driven by the stub-claude subprocess exiting.
     """
     runtime = get_runtime_dir(name)
     in_fifo = runtime / "in"
@@ -212,9 +249,10 @@ def run_manager(
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)
 
-    # Build claude command
+    # Build claude command. Binary path is overridable via
+    # CLAUDE_WORKER_CLAUDE_BIN for test injection of a stub.
     cmd = [
-        "claude",
+        _resolve_claude_bin(),
         "-p",
         "--input-format",
         "stream-json",
@@ -235,6 +273,16 @@ def run_manager(
         cwd=resolved_cwd,
     )
 
+    # Write the claude subprocess pid to a sidecar file. This lets test
+    # harnesses (which run `_run_manager_forkless` in a thread, not a
+    # forked child) discover and signal the stub-claude process directly
+    # without walking /proc trees or depending on psutil. Production
+    # tooling ignores this file.
+    try:
+        (runtime / "claude-pid").write_text(str(proc.pid))
+    except OSError:
+        pass
+
     # Signal handling — forward SIGTERM to claude, then exit.
     # Wrapped in try/except so a stuck claude (subprocess.TimeoutExpired)
     # doesn't leave the manager tracebacked and the runtime dir uncleaned.
@@ -254,8 +302,9 @@ def run_manager(
             cleanup_runtime_dir(name)
             sys.exit(0)
 
-    signal.signal(signal.SIGTERM, handle_term)
-    signal.signal(signal.SIGINT, handle_term)
+    if install_signals:
+        signal.signal(signal.SIGTERM, handle_term)
+        signal.signal(signal.SIGINT, handle_term)
 
     # Session ID capture event
     session_captured = threading.Event()
