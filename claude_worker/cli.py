@@ -85,6 +85,18 @@ REPL_EXIT_COMMANDS: frozenset[str] = frozenset({"/exit", "/quit"})
 CONTEXT_WINDOW_1M: int = 1_000_000
 CONTEXT_WINDOW_DEFAULT: int = 200_000
 
+# Permission grant feature — see claude_worker/permission_grant.py for
+# the full mechanism. The grants file sits alongside log/pid/session in
+# the worker's runtime dir. The per-worker settings.json wires a
+# PreToolUse hook on Edit/Write/MultiEdit that consults the grants file.
+GRANTS_FILE_NAME: str = "grants.jsonl"
+PERMISSION_SETTINGS_FILE_NAME: str = "settings.json"
+GRANT_ID_LENGTH: int = 8
+PERMISSION_HOOK_TOOLS: tuple[str, ...] = ("Edit", "Write", "MultiEdit")
+# Substring that identifies a sensitive-file denial in a tool_result.
+# Used by `grant --last` to locate the most recent denied tool call.
+SENSITIVE_DENIAL_MARKER: str = "which is a sensitive file"
+
 from claude_worker.manager import (
     _atomic_write_text,
     cleanup_runtime_dir,
@@ -862,6 +874,19 @@ def cmd_start(args: argparse.Namespace) -> None:
     if identity_path is not None:
         identity_content = _load_bundled_resource("identities", PM_IDENTITY_RESOURCE)
         identity_path.write_text(identity_content)
+
+    # Write the per-worker settings.json that wires the PreToolUse
+    # permission-grant hook. Must happen BEFORE the fork so the manager
+    # subprocess finds the file when it builds the claude command.
+    # Gated by --no-permission-hook for tests and for users opting out.
+    permission_settings = _maybe_write_permission_settings(
+        name=name, enabled=not getattr(args, "no_permission_hook", False)
+    )
+    if permission_settings is not None:
+        # Append --settings to the claude args so claude merges this
+        # settings file with the user's existing settings. The flag is
+        # additive: user settings stay in effect, we just add the hook.
+        claude_args = claude_args + ["--settings", str(permission_settings)]
 
     # --show-response and --show-full-response are mutually exclusive
     if args.show_response and args.show_full_response:
@@ -2129,6 +2154,338 @@ def cmd_install_hook(args: argparse.Namespace) -> None:
     print(f'\nTest with: claude -p "echo $CLAUDE_SESSION_UUID"')
 
 
+# -- Permission grant --------------------------------------------------------
+#
+# See claude_worker/permission_grant.py for the hook side of the feature.
+# These helpers manage the grants.jsonl file and the per-worker settings
+# that wire the hook into claude at worker start.
+
+
+def _grants_file(name: str) -> Path:
+    """Path to the worker's grants.jsonl."""
+    return get_runtime_dir(name) / GRANTS_FILE_NAME
+
+
+def _permission_settings_file(name: str) -> Path:
+    """Path to the per-worker settings.json that hosts the permission hook."""
+    return get_runtime_dir(name) / PERMISSION_SETTINGS_FILE_NAME
+
+
+def _generate_grant_id() -> str:
+    """Short random grant identifier, e.g. ``grant-abc12345``.
+
+    Not cryptographic — grants are local to one worker's runtime dir
+    and the ID is just for human reference in `grants` listings and
+    the hook's deny-reason string.
+    """
+    import secrets
+
+    return f"grant-{secrets.token_hex(GRANT_ID_LENGTH // 2)}"
+
+
+def _now_iso() -> str:
+    """UTC ISO 8601 timestamp matching the hook module's format.
+
+    Kept local (instead of importing from permission_grant) so
+    cli.py doesn't pull in the hook module on every CLI invocation.
+    """
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _load_grants(grants_file: Path) -> list[dict]:
+    """Parse the worker's grants.jsonl into a list of grant dicts.
+
+    Mirrors the loader in ``permission_grant._load_grants``. The two
+    copies exist so the hook module has zero dependencies on cli.py —
+    the hook runs in a claude-subprocess context and should stay small.
+    """
+    if not grants_file.exists():
+        return []
+    grants: list[dict] = []
+    try:
+        raw = grants_file.read_text()
+    except OSError:
+        return []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            grants.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return grants
+
+
+def _append_grant(grants_file: Path, grant: dict) -> None:
+    """Append a new grant to grants.jsonl via a simple append open.
+
+    JSONL append of a small line is atomic at the OS level for writes
+    under PIPE_BUF (4KiB on Linux), and our grant records are well
+    under that. Rewrites (revoke, consume) go through
+    ``_atomic_write_text`` in `_rewrite_grants` instead.
+    """
+    grants_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(grants_file, "a") as f:
+        f.write(json.dumps(grant) + "\n")
+
+
+def _rewrite_grants(grants_file: Path, grants: list[dict]) -> None:
+    """Rewrite the grants file atomically via sibling-tmp + os.replace.
+
+    Used by ``revoke`` (and by the hook's consume-on-use path, which
+    has its own copy in permission_grant.py for the same reason
+    _load_grants is duplicated).
+    """
+    content = "\n".join(json.dumps(g) for g in grants)
+    if content:
+        content += "\n"
+    _atomic_write_text(grants_file, content)
+
+
+def _find_last_denial(log_file: Path) -> dict | None:
+    """Walk the worker's log backwards for the most recent sensitive-file
+    denial and return the triple needed to build a grant.
+
+    Returns a dict with keys ``tool_name``, ``file_path``, ``tool_use_id``,
+    or None if the log contains no sensitive-file denial.
+
+    The scan uses ``_iter_log_reverse`` so we only read the tail of
+    the file. We first find the tool_result with the denial marker,
+    then continue walking back for the paired ``tool_use`` assistant
+    message with the same tool_use_id (needed for the file_path and
+    tool_name). If the pair can't be resolved, we return None.
+    """
+    if not log_file.exists():
+        return None
+
+    target_tool_use_id: str | None = None
+    for data in _iter_log_reverse(log_file):
+        msg_type = data.get("type")
+        if target_tool_use_id is None:
+            # Phase 1: find the denial tool_result.
+            if msg_type != "user":
+                continue
+            content = data.get("message", {}).get("content", [])
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") != "tool_result":
+                    continue
+                if not part.get("is_error"):
+                    continue
+                body = part.get("content", "")
+                if isinstance(body, str) and SENSITIVE_DENIAL_MARKER in body:
+                    tid = part.get("tool_use_id")
+                    if tid:
+                        target_tool_use_id = tid
+                        break
+            if target_tool_use_id is None:
+                continue
+            # Fall through to phase 2 on the next iteration.
+            continue
+        # Phase 2: find the assistant tool_use with this tool_use_id.
+        if msg_type != "assistant":
+            continue
+        content = data.get("message", {}).get("content", [])
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") != "tool_use":
+                continue
+            if part.get("id") != target_tool_use_id:
+                continue
+            tool_input = part.get("input") or {}
+            return {
+                "tool_name": part.get("name", ""),
+                "file_path": tool_input.get("file_path", ""),
+                "tool_use_id": target_tool_use_id,
+            }
+    return None
+
+
+def cmd_grant(args: argparse.Namespace) -> None:
+    """Add a permission grant for a worker.
+
+    Grants live in ``<runtime>/grants.jsonl`` and are consulted by the
+    PreToolUse hook at tool-call time. See
+    ``claude_worker/permission_grant.py`` for the hook semantics.
+    """
+    runtime = resolve_worker(args.name)
+    grants_file = runtime / GRANTS_FILE_NAME
+
+    # Determine the match spec — exactly one of path/glob/tool_use_id/last
+    match: dict | None = None
+    source_tool_use_id: str | None = None
+    tools = args.tool or list(PERMISSION_HOOK_TOOLS)
+
+    if args.last:
+        log_file = runtime / "log"
+        denial = _find_last_denial(log_file)
+        if denial is None:
+            print(
+                f"Error: no recent sensitive-file denial found in worker "
+                f"'{args.name}' log. Use --path/--glob/--tool-use-id to "
+                f"grant explicitly.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        match = {"path": denial["file_path"]}
+        source_tool_use_id = denial["tool_use_id"]
+        # If the user didn't override --tool, scope the grant to the
+        # specific tool that was denied, so a grant for an Edit doesn't
+        # also auto-approve an unrelated Write that happens to target
+        # the same file.
+        if args.tool is None and denial["tool_name"]:
+            tools = [denial["tool_name"]]
+    elif args.path:
+        match = {"path": args.path}
+    elif args.glob:
+        match = {"glob": args.glob}
+    elif args.tool_use_id:
+        match = {"tool_use_id": args.tool_use_id}
+    else:
+        print(
+            "Error: exactly one of --path, --glob, --tool-use-id, or --last "
+            "is required.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    grant: dict = {
+        "id": _generate_grant_id(),
+        "match": match,
+        "tools": tools,
+        "persistent": bool(args.persistent),
+        "consumed": False,
+        "created_at": _now_iso(),
+    }
+    if args.reason:
+        grant["reason"] = args.reason
+    if source_tool_use_id is not None:
+        grant["source_tool_use_id"] = source_tool_use_id
+
+    _append_grant(grants_file, grant)
+
+    # Friendly summary
+    match_desc = next(iter(match.items()))
+    persistent_note = " (persistent)" if args.persistent else ""
+    print(
+        f"Granted {grant['id']} for worker '{args.name}'{persistent_note}: "
+        f"{match_desc[0]}={match_desc[1]} tools={','.join(tools)}"
+    )
+
+
+def cmd_grants(args: argparse.Namespace) -> None:
+    """List active (non-consumed) grants for a worker."""
+    runtime = resolve_worker(args.name)
+    grants_file = runtime / GRANTS_FILE_NAME
+    all_grants = _load_grants(grants_file)
+    active = [g for g in all_grants if not g.get("consumed")]
+    if not active:
+        print(f"No active grants for worker '{args.name}'.")
+        return
+    for g in active:
+        match = g.get("match", {})
+        match_desc = next(iter(match.items())) if match else ("?", "?")
+        tools = ",".join(g.get("tools") or [])
+        tag = "[persistent]" if g.get("persistent") else "[one-shot]"
+        reason = f" # {g['reason']}" if g.get("reason") else ""
+        print(
+            f"{g.get('id', '?')} {tag} {match_desc[0]}={match_desc[1]} "
+            f"tools={tools}{reason}"
+        )
+
+
+def cmd_revoke(args: argparse.Namespace) -> None:
+    """Revoke one or all grants for a worker.
+
+    With ``--all``, removes every grant (including consumed history).
+    With a GRANT_ID argument, removes that specific grant. Rewrites
+    the grants file atomically.
+    """
+    runtime = resolve_worker(args.name)
+    grants_file = runtime / GRANTS_FILE_NAME
+    grants = _load_grants(grants_file)
+    if getattr(args, "all", False):
+        _rewrite_grants(grants_file, [])
+        print(f"Revoked all grants for worker '{args.name}' ({len(grants)} removed).")
+        return
+    if not args.grant_id:
+        print(
+            "Error: specify a grant id, or pass --all to clear every grant.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    target_id = args.grant_id
+    remaining = [g for g in grants if g.get("id") != target_id]
+    if len(remaining) == len(grants):
+        print(
+            f"Error: grant '{target_id}' not found for worker '{args.name}'.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    _rewrite_grants(grants_file, remaining)
+    print(f"Revoked grant '{target_id}' for worker '{args.name}'.")
+
+
+def _build_permission_hook_settings(grants_path: Path, python_executable: str) -> dict:
+    """Build the settings dict that wires the PreToolUse permission hook.
+
+    This is pure data — no I/O — so tests can assert on the shape
+    without touching the filesystem. The command string references the
+    given Python executable (so the venv's Python is used even if the
+    claude-subprocess CWD would otherwise find a different claude_worker)
+    and the given grants file path.
+    """
+    matcher = "|".join(PERMISSION_HOOK_TOOLS)
+    command = (
+        f"{python_executable} -m claude_worker.permission_grant "
+        f"--grants-file {grants_path}"
+    )
+    return {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": matcher,
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": command,
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+
+
+def _maybe_write_permission_settings(name: str, enabled: bool) -> Path | None:
+    """Generate the per-worker settings.json for the permission hook.
+
+    Called by ``cmd_start`` just after ``create_runtime_dir`` and before
+    the fork, so the manager subprocess can pick up the file when it
+    spawns claude. Returns the settings.json path when written (so
+    cmd_start can pass ``--settings <path>`` to claude), or None when
+    disabled via ``--no-permission-hook``.
+    """
+    if not enabled:
+        return None
+    runtime = get_runtime_dir(name)
+    settings_path = runtime / PERMISSION_SETTINGS_FILE_NAME
+    grants_path = runtime / GRANTS_FILE_NAME
+    settings = _build_permission_hook_settings(
+        grants_path=grants_path,
+        python_executable=sys.executable,
+    )
+    _atomic_write_text(settings_path, json.dumps(settings, indent=2) + "\n")
+    return settings_path
+
+
 # -- REPL --------------------------------------------------------------------
 
 
@@ -2660,6 +3017,15 @@ def main():
         "multi-consumer coordination",
     )
     p_start.add_argument(
+        "--no-permission-hook",
+        action="store_true",
+        help="Disable the PreToolUse permission-grant hook. By default, "
+        "claude-worker wires a hook that lets `claude-worker grant` "
+        "pre-authorize Edit/Write/MultiEdit calls that would otherwise "
+        "hit the sensitive-file denial. Use this flag to opt out (e.g. "
+        "for tests or if the hook itself misbehaves).",
+    )
+    p_start.add_argument(
         "claude_args",
         nargs="*",
         metavar="CLAUDE_ARGS",
@@ -2871,6 +3237,83 @@ def main():
     )
     p_tokens.add_argument("name", help="Worker name")
 
+    # -- grant --
+    p_grant = sub.add_parser(
+        "grant",
+        help="Pre-authorize a sensitive-file Edit/Write/MultiEdit call for "
+        "a worker (bypasses Claude Code's sensitive-file denial)",
+    )
+    p_grant.add_argument("name", help="Worker name")
+    p_grant_match = p_grant.add_mutually_exclusive_group()
+    p_grant_match.add_argument(
+        "--path",
+        metavar="PATH",
+        help="Grant for this exact file path (matched after path resolution)",
+    )
+    p_grant_match.add_argument(
+        "--glob",
+        metavar="PATTERN",
+        help="Grant for any file_path matching this fnmatch pattern "
+        "(e.g. '/home/foo/.claude/skills/**/*.md')",
+    )
+    p_grant_match.add_argument(
+        "--tool-use-id",
+        metavar="ID",
+        help="Grant for the exact tool_use_id (as emitted in the log)",
+    )
+    p_grant_match.add_argument(
+        "--last",
+        action="store_true",
+        help="Grant the most recent sensitive-file denial in the worker's "
+        "log — the ergonomic default for 'I saw the worker hit a denial, "
+        "authorize exactly that edit'. Auto-scopes --tool to the denied "
+        "tool so a granted Edit doesn't silently authorize a Write.",
+    )
+    p_grant.add_argument(
+        "--tool",
+        action="append",
+        metavar="TOOL",
+        help="Restrict the grant to specific tools (Edit|Write|MultiEdit). "
+        "Repeatable. Default: all three.",
+    )
+    p_grant.add_argument(
+        "--persistent",
+        action="store_true",
+        help="Keep the grant active after its first use. Default is "
+        "one-shot (consumed on first match).",
+    )
+    p_grant.add_argument(
+        "--reason",
+        metavar="TEXT",
+        help="Optional audit note stored in the grant record",
+    )
+
+    # -- grants --
+    p_grants = sub.add_parser(
+        "grants",
+        help="List active permission grants for a worker",
+    )
+    p_grants.add_argument("name", help="Worker name")
+
+    # -- revoke --
+    p_revoke = sub.add_parser(
+        "revoke",
+        help="Revoke a permission grant (by id, or --all)",
+    )
+    p_revoke.add_argument("name", help="Worker name")
+    p_revoke.add_argument(
+        "grant_id",
+        nargs="?",
+        metavar="GRANT_ID",
+        help="Grant id to remove (omit when using --all)",
+    )
+    p_revoke.add_argument(
+        "--all",
+        dest="all",
+        action="store_true",
+        help="Remove every grant for this worker (active and consumed)",
+    )
+
     args = parser.parse_args()
 
     handlers = {
@@ -2884,5 +3327,8 @@ def main():
         "install-hook": cmd_install_hook,
         "repl": cmd_repl,
         "tokens": cmd_tokens,
+        "grant": cmd_grant,
+        "grants": cmd_grants,
+        "revoke": cmd_revoke,
     }
     handlers[args.command](args)
