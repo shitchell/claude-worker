@@ -54,9 +54,17 @@ class TestIdleWorkerStatus:
         status, _ = get_worker_status(runtime)
         assert status == "dead"
 
-    def test_completed_turn_returns_waiting(self, fake_worker):
-        """A completed turn (ending in result) is waiting for next input."""
-        from claude_worker.cli import get_worker_status
+    def test_completed_turn_returns_waiting_when_aged(self, fake_worker):
+        """A completed turn counts as waiting only if the log has been
+        quiet for at least STATUS_IDLE_THRESHOLD_SECONDS. We simulate
+        the quiet period by backdating the log file's mtime via
+        os.utime.
+        """
+        import os as _os
+        from claude_worker.cli import (
+            STATUS_IDLE_THRESHOLD_SECONDS,
+            get_worker_status,
+        )
         from claude_worker.manager import get_runtime_dir
 
         name = fake_worker(
@@ -69,8 +77,37 @@ class TestIdleWorkerStatus:
             alive=True,
         )
         runtime = get_runtime_dir(name)
+
+        # Age the log well past the threshold
+        log_path = runtime / "log"
+        old_time = log_path.stat().st_mtime - (STATUS_IDLE_THRESHOLD_SECONDS + 1.0)
+        _os.utime(log_path, (old_time, old_time))
+
         status, _ = get_worker_status(runtime)
         assert status == "waiting"
+
+    def test_completed_turn_returns_working_when_fresh(self, fake_worker):
+        """A completed turn with a FRESH log mtime is treated as working,
+        because a subagent dispatch could still be coming. Regression
+        test for the STATUS_IDLE_THRESHOLD_SECONDS behavior introduced
+        for REPL and `ls`."""
+        from claude_worker.cli import get_worker_status
+        from claude_worker.manager import get_runtime_dir
+
+        name = fake_worker(
+            [
+                make_system_init("sys-uuid-0001-0002-000300040005"),
+                make_user_message("q", "u1xx-0001-0002-0003-000400050006"),
+                make_assistant_message("a", "a1xx-0001-0002-0003-000400050006"),
+                make_result_message("r1xx-0001-0002-0003-000400050006"),
+            ],
+            alive=True,
+        )
+        # Log was just written by the fixture — mtime is within the
+        # threshold, so status should report working, not waiting.
+        runtime = get_runtime_dir(name)
+        status, _ = get_worker_status(runtime)
+        assert status == "working"
 
     def test_mid_turn_user_message_returns_working(self, fake_worker):
         """A user message without a trailing turn-end is actively being

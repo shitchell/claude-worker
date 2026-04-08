@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -17,6 +18,16 @@ LOG_FILE_WAIT_TIMEOUT_SECONDS: float = 300.0
 MANAGER_READY_TIMEOUT_SECONDS: float = 10.0
 WORKER_READY_TIMEOUT_SECONDS: float = 30.0
 DEFAULT_SETTLE_SECONDS: float = 3.0
+
+# How old a turn-end log entry must be before `get_worker_status` reports
+# `waiting` instead of `working`. Prevents false "idle" readings when a
+# worker has briefly paused between internal subagent dispatches — the
+# same class of false positive `wait-for-turn --settle` guards against,
+# but applied passively (via log mtime) instead of actively (via sleep +
+# re-check). This is the *display* threshold: `ls`, the REPL idle check,
+# and the status lines printed after send/start all see it. `_wait_for_turn`
+# itself still uses `--settle` for active debounce.
+STATUS_IDLE_THRESHOLD_SECONDS: float = 3.0
 
 # Polling intervals (seconds)
 POLL_INTERVAL_SECONDS: float = 0.1
@@ -63,6 +74,11 @@ MISSING_TAG_PREVIEW_MAX_CHARS: int = 100
 # no-op in normal operation where misses are rare.
 MISSING_TAG_LOG_MAX_ENTRIES: int = 1000
 
+# REPL
+REPL_IDLE_POLL_INTERVAL_SECONDS: float = 0.25
+REPL_INPUT_PROMPT: str = "you> "
+REPL_EXIT_COMMANDS: frozenset[str] = frozenset({"/exit", "/quit"})
+
 from claude_worker.manager import (
     _atomic_write_text,
     cleanup_runtime_dir,
@@ -106,6 +122,19 @@ def get_worker_status(runtime: Path) -> tuple[str, float | None]:
     In -p stream-json mode, each turn emits a `result` message but the process
     stays alive waiting for more input. A claude session never truly "completes" —
     it either idles (waiting), works, or its process dies.
+
+    A detected turn-end (`result` or `assistant stop_reason=end_turn`) only
+    counts as `waiting` if the log file hasn't been touched in the last
+    STATUS_IDLE_THRESHOLD_SECONDS — otherwise we might be in the middle of a
+    subagent dispatch gap that *looks* like turn-end but is actually still
+    live activity. The threshold is applied passively via log mtime (no
+    blocking sleep) so this remains a point-in-time read suitable for `ls`
+    and the REPL idle check.
+
+    This threshold is the *display* threshold. `_wait_for_turn` itself still
+    uses an active `--settle` window for the cases where the caller can
+    afford to wait (`wait-for-turn` CLI, but not `send` which wants to return
+    promptly).
 
     Returns (status, log_mtime) where log_mtime is the log file's modification
     time as a Unix timestamp, useful for computing idle duration.
@@ -156,11 +185,17 @@ def get_worker_status(runtime: Path) -> tuple[str, float | None]:
 
     if not alive:
         return "dead", log_mtime
-    # result with process alive = turn complete, waiting for next input
-    if last_type == "result":
-        return "waiting", log_mtime
-    if last_stop_reason == "end_turn":
-        return "waiting", log_mtime
+
+    # A detected turn-end is only "waiting" if the log has been quiet for
+    # at least STATUS_IDLE_THRESHOLD_SECONDS. Fresher turn-ends could be
+    # followed by a subagent dispatch any moment — treat as working.
+    turn_ended = last_type == "result" or last_stop_reason == "end_turn"
+    if turn_ended:
+        log_age = time.time() - log_mtime
+        if log_age >= STATUS_IDLE_THRESHOLD_SECONDS:
+            return "waiting", log_mtime
+        return "working", log_mtime
+
     # No user/assistant/result seen yet — just startup noise (system/init,
     # hooks, etc.). The worker is alive but idle, literally waiting for
     # first input. Previously this fell through to "working" which made
@@ -238,6 +273,29 @@ def _format_msg_prefix(data: dict) -> str:
     if uuid:
         return f"[{uuid}] "
     return ""
+
+
+def _render_one_message(data: dict, msg, config, formatter) -> str | None:
+    """Render a single parsed message to a prefixed, formatted string.
+
+    Returns the full rendered output (possibly multi-line) with the
+    ``[HH:MM:SS uuid]`` prefix applied to the first line, or ``None``
+    if the formatter produces no visible output (e.g., an assistant
+    message with only tool_use blocks and ``tools`` hidden).
+
+    Used by ``_read_static`` (forward scan and summary branches),
+    ``_read_follow`` (live tail), and ``cmd_repl`` (live stream during
+    the working phase). Extracted for DRY — Minor-5 from the Round 2
+    code review.
+    """
+    blocks = msg.render(config)
+    output = formatter.format(blocks)
+    if not output.strip():
+        return None
+    prefix = _format_msg_prefix(data)
+    lines = output.split("\n")
+    lines[0] = prefix + lines[0]
+    return "\n".join(lines)
 
 
 def _print_worker_status(name: str) -> None:
@@ -1432,18 +1490,15 @@ def _render_read_output(
     last_uuid = None
     first_uuid = None
     for _raw_idx, data, msg in messages:
-        blocks = msg.render(config)
-        output = formatter.format(blocks)
-        if output.strip():
-            prefix = _format_msg_prefix(data)
-            lines = output.split("\n")
-            lines[0] = prefix + lines[0]
-            print("\n".join(lines))
-            uuid = data.get("uuid", "")
-            if uuid:
-                if first_uuid is None:
-                    first_uuid = uuid
-                last_uuid = uuid
+        rendered = _render_one_message(data, msg, config, formatter)
+        if rendered is None:
+            continue
+        print(rendered)
+        uuid = data.get("uuid", "")
+        if uuid:
+            if first_uuid is None:
+                first_uuid = uuid
+            last_uuid = uuid
 
     # The bottom-of-output "to see new messages" hint is only shown when
     # called directly from `read` — programmatic callers (like --show-response)
@@ -1700,13 +1755,9 @@ def _read_follow(log_file, config, formatter, since_uuid, since_ts, args):
                     continue
                 msg = parse_message(data)
                 if should_show_message(msg, data, config):
-                    blocks = msg.render(config)
-                    output = formatter.format(blocks)
-                    if output.strip():
-                        prefix = _format_msg_prefix(data)
-                        lines = output.split("\n")
-                        lines[0] = prefix + lines[0]
-                        print("\n".join(lines), flush=True)
+                    rendered = _render_one_message(data, msg, config, formatter)
+                    if rendered is not None:
+                        print(rendered, flush=True)
         except KeyboardInterrupt:
             pass
 
@@ -1979,6 +2030,324 @@ def cmd_install_hook(args: argparse.Namespace) -> None:
     print(f'\nTest with: claude -p "echo $CLAUDE_SESSION_UUID"')
 
 
+# -- REPL --------------------------------------------------------------------
+
+
+def _compute_repl_chat_id() -> str:
+    """Build a deterministic chat ID for REPL sessions on PM workers.
+
+    PM workers need chat tags to route responses correctly, but the REPL
+    runs from a human terminal — not inside Claude Code — so the usual
+    CLAUDE_SESSION_UUID auto-detection path doesn't fire.
+
+    Fallback: derive a stable-ish ID from the REPL process's PID and
+    controlling TTY. Same shell window → same PID → same chat ID for
+    the lifetime of the REPL session. Different terminal windows get
+    different IDs.
+
+    Format: ``repl-<pid>-<tty_basename>`` (e.g. ``repl-12345-pts3``).
+    If the TTY isn't available (e.g. stdin is a pipe), falls back to
+    just ``repl-<pid>``.
+    """
+    pid = os.getpid()
+    tty_component = ""
+    try:
+        tty_name = os.ttyname(sys.stdin.fileno())
+        # Reduce "/dev/pts/3" → "pts3" for readability
+        tty_component = tty_name.replace("/dev/", "").replace("/", "")
+    except (OSError, ValueError, AttributeError):
+        pass
+    if tty_component:
+        return f"repl-{pid}-{tty_component}"
+    return f"repl-{pid}"
+
+
+def _flush_stdin() -> None:
+    """Discard any bytes the user typed while we weren't reading stdin.
+
+    Called just before showing the REPL prompt, so keystrokes made
+    while the worker was still processing (which would otherwise be
+    mixed into the next turn's input) are silently dropped. Uses
+    termios.tcflush when stdin is a TTY; no-op when stdin is a pipe
+    (e.g., under pytest or in a script) because there's nothing to
+    flush.
+    """
+    try:
+        import termios
+
+        if sys.stdin.isatty():
+            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except (ImportError, OSError, ValueError):
+        # Non-Unix, closed stdin, or some other oddity — nothing to do.
+        pass
+
+
+def _wait_for_worker_idle(
+    name: str,
+    poll_interval: float = REPL_IDLE_POLL_INTERVAL_SECONDS,
+) -> str:
+    """Block until the worker's status is `waiting` or `dead`.
+
+    Re-uses the same point-in-time ``get_worker_status`` check that
+    `ls` uses, which applies STATUS_IDLE_THRESHOLD_SECONDS via the log
+    mtime. Polls every ``poll_interval`` seconds.
+
+    Returns the final status string (``"waiting"`` or ``"dead"``).
+    Interrupted by KeyboardInterrupt, which propagates to the caller.
+    """
+    runtime = get_runtime_dir(name)
+    while True:
+        status, _ = get_worker_status(runtime)
+        if status in ("waiting", "dead"):
+            return status
+        time.sleep(poll_interval)
+
+
+def _repl_stream_new_messages(
+    log_file: Path,
+    config,
+    formatter,
+    start_position: int,
+    stop_event: threading.Event,
+) -> None:
+    """Tail the log from ``start_position`` and print new messages.
+
+    Runs until ``stop_event`` is set. Each new JSONL line is parsed,
+    filtered through the same display config ``read`` uses, and
+    printed via ``_render_one_message``.
+
+    Used by the REPL's working-phase display so the user sees assistant
+    text streaming in as claude responds. The stop_event is set by the
+    REPL loop when the worker transitions back to idle, so the stream
+    thread winds down cleanly.
+    """
+    from claude_logs import parse_message, should_show_message
+
+    with open(log_file) as f:
+        f.seek(start_position)
+        while not stop_event.is_set():
+            line = f.readline()
+            if not line:
+                time.sleep(POLL_INTERVAL_SECONDS)
+                continue
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                data = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            msg = parse_message(data)
+            if not should_show_message(msg, data, config):
+                continue
+            rendered = _render_one_message(data, msg, config, formatter)
+            if rendered is not None:
+                print(rendered, flush=True)
+
+
+def _repl_print_last_turn(name: str) -> None:
+    """Print the worker's last-turn context at REPL entry.
+
+    Equivalent to ``claude-worker read NAME --last-turn`` (including
+    user messages — this is for a human reading the screen, not an
+    orchestrator). Silent when the worker has no prior context.
+    """
+    namespace = argparse.Namespace(
+        name=name,
+        follow=False,
+        since=None,
+        until=None,
+        last_turn=True,
+        n=None,
+        count=False,
+        summary=False,
+        verbose=False,
+        exclude_user=False,  # human reader wants to see their own prior messages
+        color=False,
+        no_color=False,
+        chat=None,
+        all_chats=True,
+        no_hint=True,
+    )
+    try:
+        cmd_read(namespace)
+    except SystemExit:
+        # cmd_read exits 1 when the log doesn't exist yet (fresh worker).
+        # That's fine — the REPL should just continue with no context banner.
+        pass
+
+
+def cmd_repl(args: argparse.Namespace) -> None:
+    """Interactive human-facing REPL for a claude worker.
+
+    Turn-by-turn chat loop:
+        1. On entry, print the worker's last turn for context.
+        2. Wait for the worker to be idle (status == waiting).
+        3. Flush any stdin bytes the user typed during idle-wait.
+        4. Prompt the user for input.
+        5. Send the message. Note the pre-send log position.
+        6. Live-stream new log content until the worker is idle again.
+        7. Loop.
+
+    Ctrl-D on an empty prompt, Ctrl-C twice in a row, or typing
+    ``/exit`` or ``/quit`` exits the REPL. The worker stays alive —
+    exiting the REPL does NOT stop the worker.
+    """
+    runtime = resolve_worker(args.name)
+    log_file = runtime / "log"
+    in_fifo = runtime / "in"
+
+    # Resolve chat ID: explicit --chat > REPL auto ID on PM workers > None
+    is_pm = _worker_is_pm(args.name)
+    chat_id: str | None = None
+    if args.chat:
+        if is_pm:
+            chat_id = args.chat
+        else:
+            print(
+                f"Warning: --chat is only applicable to PM workers, "
+                f"and '{args.name}' is not a PM. Messages will pass "
+                f"through unchanged.",
+                file=sys.stderr,
+            )
+    elif is_pm:
+        chat_id = _compute_repl_chat_id()
+
+    # Build the display config once — every turn uses the same rendering
+    # settings (human mode: ANSI if a TTY, plain otherwise).
+    from claude_logs import (
+        ANSIFormatter,
+        FilterConfig,
+        PlainFormatter,
+        RenderConfig,
+    )
+
+    hidden = {"timestamps", "metadata", "thinking", "tools"}
+    show_only = {"user", "user-input", "assistant", "queue-operation"}
+    if chat_id:
+        # Filter the stream to the REPL's own chat tag so other
+        # consumers' messages don't leak into this window.
+        pass  # chat filtering happens in the stream loop via should_show_message + our own check
+    config = RenderConfig(filters=FilterConfig(show_only=show_only, hidden=hidden))
+    formatter: object
+    if sys.stdout.isatty():
+        formatter = ANSIFormatter()
+    else:
+        formatter = PlainFormatter()
+
+    # Print banner
+    banner_suffix = f" (PM chat: {chat_id})" if chat_id else ""
+    print(
+        f"=== claude-worker REPL: {args.name}{banner_suffix} ===\n"
+        f"Type your message at the prompt. /exit or Ctrl-D to quit.\n"
+        f"The worker stays running after you exit.\n"
+    )
+
+    # Entry context: last turn, if any
+    _repl_print_last_turn(args.name)
+
+    consecutive_sigint_count = 0
+
+    while True:
+        # --- Phase 1: wait until worker is idle ---
+        try:
+            status = _wait_for_worker_idle(args.name)
+        except KeyboardInterrupt:
+            print("\n(interrupted while waiting for worker — exiting REPL)")
+            return
+        if status == "dead":
+            print(f"\nWorker '{args.name}' has died. Exiting REPL.")
+            return
+
+        # --- Phase 2: flush stdin and prompt the user ---
+        _flush_stdin()
+        try:
+            user_input = input(REPL_INPUT_PROMPT)
+            consecutive_sigint_count = 0
+        except KeyboardInterrupt:
+            consecutive_sigint_count += 1
+            if consecutive_sigint_count >= 2:
+                print("\n(two Ctrl-C in a row — exiting REPL)")
+                return
+            print("\n(Ctrl-C — press again to exit, or type a message)")
+            continue
+        except EOFError:
+            # Ctrl-D on empty prompt
+            print()
+            return
+
+        stripped_input = user_input.strip()
+        if not stripped_input:
+            continue
+        if stripped_input in REPL_EXIT_COMMANDS:
+            return
+
+        # --- Phase 3: send the message ---
+        # Prepend chat tag if routing is active (mirrors cmd_send)
+        send_content = stripped_input
+        if chat_id:
+            send_content = f"[{CHAT_TAG_PREFIX}{chat_id}] {send_content}"
+
+        # Capture the log position BEFORE writing, so the stream thread
+        # only prints new content.
+        try:
+            start_position = log_file.stat().st_size
+        except OSError:
+            start_position = 0
+
+        payload = json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": send_content},
+            }
+        )
+        try:
+            with open(in_fifo, "w") as f:
+                f.write(payload + "\n")
+                f.flush()
+        except OSError as exc:
+            print(f"\nError writing to worker FIFO: {exc}", file=sys.stderr)
+            return
+
+        # --- Phase 4: live-stream new log content during the working phase ---
+        stop_event = threading.Event()
+
+        def stream_until_idle():
+            try:
+                _repl_stream_new_messages(
+                    log_file, config, formatter, start_position, stop_event
+                )
+            except Exception:  # pragma: no cover — defensive
+                pass
+
+        stream_thread = threading.Thread(target=stream_until_idle, daemon=True)
+        stream_thread.start()
+
+        # Wait for idle again. This is where the bulk of the turn happens.
+        try:
+            status = _wait_for_worker_idle(args.name)
+        except KeyboardInterrupt:
+            # User hit Ctrl-C during the working phase. Don't interrupt
+            # claude — just exit the REPL cleanly. The worker keeps
+            # processing in the background.
+            stop_event.set()
+            stream_thread.join(timeout=1.0)
+            print("\n(interrupted — worker is still processing in the background)")
+            return
+
+        # Give the stream thread a moment to flush any trailing messages
+        # that landed right at the turn boundary, then shut it down.
+        time.sleep(POLL_INTERVAL_SECONDS * 2)
+        stop_event.set()
+        stream_thread.join(timeout=1.0)
+
+        if status == "dead":
+            print(f"\nWorker '{args.name}' has died. Exiting REPL.")
+            return
+
+        print()  # blank line before next prompt for readability
+
+
 EXAMPLES = """\
 examples:
   # Start a worker — blocks until claude responds, then prints status
@@ -2001,6 +2370,9 @@ examples:
 
   # List all workers
   claude-worker list
+
+  # Chat with the worker interactively (turn-by-turn human REPL)
+  claude-worker repl researcher
 
   # Stop and clean up
   claude-worker stop researcher
@@ -2252,6 +2624,20 @@ def main():
         help="Add hook entry even if one already exists",
     )
 
+    # -- repl --
+    p_repl = sub.add_parser(
+        "repl",
+        help="Interactive turn-by-turn chat with a running worker",
+    )
+    p_repl.add_argument("name", help="Worker name")
+    p_repl.add_argument(
+        "--chat",
+        metavar="ID",
+        help="Override the auto-generated chat ID for PM workers. By "
+        "default the REPL uses 'repl-<pid>-<tty>' as the chat tag on "
+        "PM workers; pass --chat to use a specific identity instead.",
+    )
+
     args = parser.parse_args()
 
     handlers = {
@@ -2263,5 +2649,6 @@ def main():
         "ls": cmd_list,
         "stop": cmd_stop,
         "install-hook": cmd_install_hook,
+        "repl": cmd_repl,
     }
     handlers[args.command](args)

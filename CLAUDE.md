@@ -82,8 +82,9 @@ no pid file         → dead
 pid not alive       → dead
 no log yet + alive  → starting
 most recent is:
-  result                               → waiting
-  assistant stop_reason=end_turn       → waiting
+  result + log mtime ≥ STATUS_IDLE_THRESHOLD → waiting
+  result + log mtime < STATUS_IDLE_THRESHOLD → working (debounce)
+  assistant stop_reason=end_turn (mtime check as above)
   assistant stop_reason=None           → keep walking back
   user (no trailing turn-end)          → working
   nothing meaningful (only system/init)→ waiting (idle worker)
@@ -93,6 +94,18 @@ The "nothing meaningful → waiting" case is important. A worker started
 with `--background` and no prompt is literally idle, not working.
 Previously (pre-Round 3) it fell through to `working` and stayed there
 forever — a real bug worth remembering.
+
+The `STATUS_IDLE_THRESHOLD_SECONDS` debounce is the *display* threshold
+shared by `ls`, the REPL idle check, and the status lines printed after
+`send`/`start`. It prevents false-idle readings when a worker has just
+finished a turn but a subagent dispatch could be coming any moment. The
+check is passive (log mtime), not active (no blocking sleep), so it
+remains a point-in-time read suitable for the hot path.
+
+`_wait_for_turn` (the active waiter used by the `wait-for-turn` CLI)
+still uses the separate `--settle` window for active debounce. Don't
+confuse the two: `STATUS_IDLE_THRESHOLD_SECONDS` is the display
+threshold; `--settle` is the active wait threshold.
 
 ### User messages are filtered by type AND subtype
 

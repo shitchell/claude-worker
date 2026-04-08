@@ -52,6 +52,9 @@ claude-worker send researcher "now focus on the database layer" --show-response
 # List all workers
 claude-worker list         # or: claude-worker ls
 
+# Or chat interactively (turn-by-turn human REPL)
+claude-worker repl researcher
+
 # Stop a worker and clean up its runtime directory
 claude-worker stop researcher
 ```
@@ -247,6 +250,49 @@ claude-worker stop [--force] NAME
 
 Stop a worker. Sends SIGTERM by default; SIGKILL with `--force`. The manager's
 signal handler cleans up the runtime directory before exiting.
+
+### `repl`
+
+```
+claude-worker repl [--chat ID] NAME
+```
+
+Interactive turn-by-turn chat with a running worker. Built for humans
+sitting at a terminal — not for orchestrators (use `send` for those).
+
+The loop:
+
+1. On entry, prints the worker's last conversational turn (if any) so
+   you have context for what just happened.
+2. Waits for the worker to be idle (`status == waiting`, using the same
+   passive `STATUS_IDLE_THRESHOLD_SECONDS` check that `ls` uses).
+3. Flushes any keystrokes you typed during the working phase, then
+   shows a `you> ` prompt.
+4. Sends your message and live-streams the worker's response as it
+   arrives in the log file.
+5. Loops back to step 2.
+
+Exit:
+- `Ctrl-D` on an empty prompt
+- `Ctrl-C` twice in a row
+- Type `/exit` or `/quit`
+
+The worker stays alive after you exit the REPL — you can re-attach
+later or use `send`/`read` against the same worker.
+
+**PM workers**: the REPL auto-derives a stable chat ID from
+`repl-<pid>-<tty>` so multi-consumer routing works without you having
+to set `CLAUDE_SESSION_UUID` manually. Override with `--chat ID` if you
+want a specific chat identity (e.g., to resume an existing PM
+conversation across REPL sessions).
+
+```bash
+# Attach to an existing worker
+claude-worker repl researcher
+
+# PM worker with a specific chat identity
+claude-worker repl pm-myproject --chat dev-debugging-session
+```
 
 ### `install-hook`
 
