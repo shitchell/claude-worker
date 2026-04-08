@@ -144,6 +144,54 @@ class TestReplBasicFlow:
         assert "stub response to:" not in captured.out
         handle.stop()
 
+    def test_slow_stub_response_still_renders(
+        self, running_worker, monkeypatch, capsys
+    ):
+        """Regression test: when the stub takes longer to respond than the
+        post-send grace period, the REPL must still wait for the actual
+        turn to complete and render the response.
+
+        Before the fix, the REPL used a status-mtime check after sending,
+        which returned `waiting` IMMEDIATELY because the mtime was still
+        from the prior turn-end (which had already aged past the
+        threshold). The stream thread got stopped before claude even
+        started responding. The fix: use _wait_for_turn(after_uuid=marker)
+        which actually waits for a new turn-end after the marker.
+
+        Setting CLAUDE_STUB_DELAY_MS=400 makes this test fail reliably
+        on the broken code (response appears 400ms after FIFO write but
+        the REPL bails after ~200ms grace).
+        """
+        from claude_worker import cli as cw_cli
+
+        handle = running_worker(
+            name="repl-slow-stub",
+            initial_message="prime",
+            stub_delay_ms=400,
+        )
+        # Wait for the FULL prime turn (including the result message)
+        # to land. Without this, the post-prime result could land
+        # mid-test and confuse the marker check.
+        assert handle.wait_for_log('"type": "result"', timeout=5.0)
+
+        old_time = handle.log_path.stat().st_mtime - 5.0
+        os.utime(handle.log_path, (old_time, old_time))
+
+        monkeypatch.setattr("builtins.input", _scripted_inputs("slow turn please"))
+        monkeypatch.setattr(cw_cli, "STATUS_IDLE_THRESHOLD_SECONDS", 0.2)
+
+        cw_cli.cmd_repl(_build_repl_args(handle.name))
+
+        captured = capsys.readouterr()
+        # The slow stub response MUST land in the captured output. If
+        # the REPL races and stops the stream thread before the response
+        # arrives, this assertion fails.
+        assert "stub response to: slow turn please" in captured.out, (
+            f"REPL failed to render slow stub response.\n"
+            f"Captured stdout:\n{captured.out}"
+        )
+        handle.stop()
+
     def test_exit_command_quits(self, running_worker, monkeypatch, capsys):
         """Typing /exit at the prompt exits the loop."""
         from claude_worker import cli as cw_cli

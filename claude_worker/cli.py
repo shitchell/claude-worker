@@ -2288,12 +2288,21 @@ def cmd_repl(args: argparse.Namespace) -> None:
         if chat_id:
             send_content = f"[{CHAT_TAG_PREFIX}{chat_id}] {send_content}"
 
-        # Capture the log position BEFORE writing, so the stream thread
-        # only prints new content.
+        # Capture the log position AND the most recent UUID BEFORE writing.
+        # The position lets the stream thread tail only new content; the
+        # marker UUID lets _wait_for_turn skip past the prior turn's
+        # `result` message and actually wait for the NEW turn's result.
+        # Without the marker, the post-send wait would consult
+        # get_worker_status which is mtime-based — and right after the
+        # FIFO write the log mtime is still from the prior turn (which
+        # has aged past STATUS_IDLE_THRESHOLD_SECONDS, so status reports
+        # `waiting`), causing the wait to return immediately before
+        # claude has even started responding.
         try:
             start_position = log_file.stat().st_size
         except OSError:
             start_position = 0
+        marker_uuid = _get_last_uuid(log_file)
 
         payload = json.dumps(
             {
@@ -2323,9 +2332,12 @@ def cmd_repl(args: argparse.Namespace) -> None:
         stream_thread = threading.Thread(target=stream_until_idle, daemon=True)
         stream_thread.start()
 
-        # Wait for idle again. This is where the bulk of the turn happens.
+        # Wait for the new turn to complete. Uses _wait_for_turn with the
+        # pre-send marker — same race protection cmd_send already uses for
+        # its own post-write wait. _wait_for_turn returns 0 on success,
+        # 1 if the worker died, 2 on timeout (we don't set one).
         try:
-            status = _wait_for_worker_idle(args.name)
+            rc = _wait_for_turn(args.name, after_uuid=marker_uuid)
         except KeyboardInterrupt:
             # User hit Ctrl-C during the working phase. Don't interrupt
             # claude — just exit the REPL cleanly. The worker keeps
@@ -2341,7 +2353,7 @@ def cmd_repl(args: argparse.Namespace) -> None:
         stop_event.set()
         stream_thread.join(timeout=1.0)
 
-        if status == "dead":
+        if rc == 1:
             print(f"\nWorker '{args.name}' has died. Exiting REPL.")
             return
 
