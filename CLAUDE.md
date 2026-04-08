@@ -166,6 +166,28 @@ thread, not a forked process. This has two implications:
 Don't remove the `install_signals` parameter or change its default
 without updating every end-to-end test.
 
+### Token stats live in claugs, not here
+
+`claude-worker tokens` / `ls` / `read --context` / the REPL banner all
+call through to `claude_logs.compute_context_window_usage()` and
+`compute_token_stats()` from the `claugs` PyPI package. The discovery
+(which usage fields exist, how to dedupe streaming chunks) lives there.
+Don't reimplement token accounting in claude-worker — if a field is
+missing or wrong, fix it in claugs first and bump the version floor
+in `pyproject.toml`. Current floor: `claugs>=0.6.7`.
+
+The worker's own `/tmp/claude-workers/<uid>/<name>/log` contains the
+same `usage` blocks Claude Code writes to its session log, so we pass
+the runtime log directly to `compute_context_window_usage` without
+deriving Claude Code project slugs or cross-referencing paths.
+
+Context window size detection (`_detect_context_window_size`) reads
+the `model` field from the `system/init` message: anything ending in
+`[1m]` is 1M tokens, everything else defaults to 200K. Fallback when
+the init is missing is 1M — optimistic default means under-reported
+percentage (safer than over-reporting and making the user think they
+have more headroom than they do).
+
 ## Directory map
 
 ```

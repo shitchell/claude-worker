@@ -3,3 +3,10 @@ __pycache__/
 dist/
 build/
 *.pyc
+
+# Project Manager worker state (runtime audit trail, per-environment).
+# Any project that hosts a PM worker via `claude-worker start --pm --cwd .`
+# ends up with this directory. Contents are logs of chats and actions
+# the PM observed — environment-specific, potentially sensitive, and
+# not something that should travel in git.
+.claude-worker-pm/

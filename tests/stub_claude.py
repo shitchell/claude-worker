@@ -118,7 +118,27 @@ def _load_script() -> dict | None:
 
 
 def _build_assistant_message(session_id: str, text: str) -> dict:
-    """Build an assistant message matching claude's schema."""
+    """Build an assistant message matching claude's schema.
+
+    Includes a realistic ``usage`` block so tests exercising token-stats
+    helpers (``compute_context_window_usage``, ``compute_token_stats``,
+    and claude-worker's ls/tokens/read--context wire-ins) see non-zero
+    data. Token values are overridable via env vars:
+
+    - CLAUDE_STUB_INPUT_TOKENS
+    - CLAUDE_STUB_OUTPUT_TOKENS
+    - CLAUDE_STUB_CACHE_CREATION_TOKENS
+    - CLAUDE_STUB_CACHE_READ_TOKENS
+
+    Defaults are small (1 / len(text) / 100 / 1000) so the stub's
+    totals stay readable but non-trivial.
+    """
+    input_tokens = int(os.environ.get("CLAUDE_STUB_INPUT_TOKENS", "1"))
+    output_tokens = int(
+        os.environ.get("CLAUDE_STUB_OUTPUT_TOKENS", str(max(len(text), 1)))
+    )
+    cache_creation = int(os.environ.get("CLAUDE_STUB_CACHE_CREATION_TOKENS", "100"))
+    cache_read = int(os.environ.get("CLAUDE_STUB_CACHE_READ_TOKENS", "1000"))
     return {
         "type": "assistant",
         "message": {
@@ -127,6 +147,12 @@ def _build_assistant_message(session_id: str, text: str) -> dict:
             "id": f"msg_{uuid.uuid4().hex[:10]}",
             "content": [{"type": "text", "text": text}],
             "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_creation_input_tokens": cache_creation,
+                "cache_read_input_tokens": cache_read,
+            },
         },
         "session_id": session_id,
         "uuid": str(uuid.uuid4()),

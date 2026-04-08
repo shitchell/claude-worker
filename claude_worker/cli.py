@@ -79,6 +79,12 @@ REPL_IDLE_POLL_INTERVAL_SECONDS: float = 0.25
 REPL_INPUT_PROMPT: str = "you> "
 REPL_EXIT_COMMANDS: frozenset[str] = frozenset({"/exit", "/quit"})
 
+# Context window size detection. Claude Code models with the `[1m]`
+# suffix (e.g., `claude-opus-4-6[1m]`) use a 1M context window; all
+# others default to the standard 200K. See _detect_context_window_size.
+CONTEXT_WINDOW_1M: int = 1_000_000
+CONTEXT_WINDOW_DEFAULT: int = 200_000
+
 from claude_worker.manager import (
     _atomic_write_text,
     cleanup_runtime_dir,
@@ -1060,6 +1066,17 @@ def cmd_read(args: argparse.Namespace) -> tuple[str | None, str | None]:
         print("No log output yet.", file=sys.stderr)
         sys.exit(1)
 
+    # Short-circuit for --context: just print the context-window label
+    # and exit. This is an alternative output mode, not a filter, so it
+    # skips the rest of the read pipeline.
+    if getattr(args, "context", False):
+        label = _format_context_window_label(log_file)
+        if label is None:
+            print("—")
+        else:
+            print(label)
+        return None, None
+
     from claude_logs import (
         ANSIFormatter,
         FilterConfig,
@@ -1358,6 +1375,81 @@ def _get_last_assistant_preview(log_file: Path, max_chars: int) -> str:
         if preview:
             return preview
     return ""
+
+
+def _detect_context_window_size(log_file: Path) -> int:
+    """Read the log's system/init message to determine context window size.
+
+    Claude Code model identifiers encode the context window in a suffix:
+    ``claude-opus-4-6[1m]`` → 1,000,000 tokens;
+    ``claude-opus-4-6`` (no suffix) → 200,000 tokens (default).
+
+    The ``system/init`` message is always written first by claude, so a
+    short forward scan reaches it in O(1) for real logs. Falls back to
+    CONTEXT_WINDOW_1M on any error — 1M is the more common ceiling for
+    long-running workers, and guessing too-high underestimates the
+    percentage (which is a safer failure mode than over-reporting).
+    """
+    try:
+        with open(log_file) as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    data = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if data.get("type") == "system" and data.get("subtype") == "init":
+                    model = data.get("model", "")
+                    if "[1m]" in model:
+                        return CONTEXT_WINDOW_1M
+                    return CONTEXT_WINDOW_DEFAULT
+    except OSError:
+        pass
+    return CONTEXT_WINDOW_1M
+
+
+def _format_token_count_short(n: int) -> str:
+    """Format a token count for display. Examples:
+    763716 → "764k", 1234567 → "1.2M", 1000000 → "1M", 42 → "42".
+    """
+    if n >= 1_000_000:
+        # Drop trailing ".0" for round millions (1M not 1.0M).
+        m = n / 1_000_000
+        if m == int(m):
+            return f"{int(m)}M"
+        return f"{m:.1f}M"
+    if n >= 1_000:
+        return f"{n // 1_000}k"
+    return str(n)
+
+
+def _format_context_window_label(log_file: Path) -> str | None:
+    """Return a compact context-window label for display, or None.
+
+    Examples: ``"77% (764k/1M)"``, ``"2% (4k/200k)"``. Returns ``None``
+    when the log doesn't exist, isn't readable, or has no assistant
+    messages with usage data yet (e.g., fresh worker before its first
+    turn completes).
+    """
+    if not log_file.exists():
+        return None
+    try:
+        from claude_logs import compute_context_window_usage
+    except ImportError:
+        return None
+    try:
+        cw = compute_context_window_usage(log_file)
+    except OSError:
+        return None
+    if cw is None:
+        return None
+    window = _detect_context_window_size(log_file)
+    pct = cw.total / window
+    total_display = _format_token_count_short(cw.total)
+    window_display = _format_token_count_short(window)
+    return f"{pct:.0%} ({total_display}/{window_display})"
 
 
 def _passes_display_filters(
@@ -1822,12 +1914,19 @@ def _format_worker_line(name: str) -> str | None:
     preview = _get_last_assistant_preview(log_file, LS_PREVIEW_MAX_CHARS)
     preview_line = f"\n    last: {preview}" if preview else ""
 
+    # Context window usage from the most recent assistant turn. Silent
+    # when the worker hasn't produced a turn yet or claugs isn't
+    # available; otherwise shows "N% (Nk/1M)" next to the preview.
+    context_label = _format_context_window_label(log_file)
+    context_line = f"\n    context: {context_label}" if context_label else ""
+
     pm_tag = " [PM]" if is_pm else ""
     return (
         f"  {name}{pm_tag}\n"
         f"    pid: {pid}  status: {status}{idle_str}  cwd: {cwd}\n"
         f"    session: {session}"
         f"{preview_line}"
+        f"{context_line}"
     )
 
 
@@ -2177,6 +2276,101 @@ def _repl_print_last_turn(name: str) -> None:
         pass
 
 
+def cmd_tokens(args: argparse.Namespace) -> None:
+    """Print token stats for a worker's session.
+
+    Shows two views:
+    1. **Context window** — the current in-flight input footprint, as
+       reported by the most recent assistant turn's ``usage`` block.
+       This matches what Claude Code's UI status line displays.
+    2. **Session totals** — cumulative tokens across every API call
+       since the session started, deduped by ``message.id`` to avoid
+       the streaming-chunk double-count.
+
+    Output format is designed to be both human-readable and cheap to
+    parse with grep/awk. Example::
+
+        $ claude-worker tokens cw-dev
+        Worker: cw-dev
+        Session: 86c9ce5a-8223-4164-a794-48a3b89a4901
+
+        Context window:        79% (791k/1M)
+          input:                   1
+          cache_creation:        243
+          cache_read:          788,443
+          output:                  72
+          source_line:            2271
+
+        Session totals (deduped by message.id):
+          input_tokens:             3,659
+          output_tokens:          472,855
+          cache_creation:       3,538,286
+          cache_read:         334,867,411
+          total_tokens:       338,882,211
+          unique_api_calls:           773
+          messages_considered:      1,235
+    """
+    runtime = resolve_worker(args.name)
+    log_file = runtime / "log"
+
+    if not log_file.exists():
+        print(f"Worker '{args.name}' has no log output yet.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        from claude_logs import compute_context_window_usage, compute_token_stats
+    except ImportError as exc:
+        print(
+            f"Error: claugs (claude_logs) is required for `tokens`: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Session ID for the banner
+    session_file = runtime / "session"
+    session_id = ""
+    if session_file.exists():
+        try:
+            session_id = session_file.read_text().strip()
+        except OSError:
+            pass
+
+    print(f"Worker: {args.name}")
+    if session_id:
+        print(f"Session: {session_id}")
+    print()
+
+    # Context window
+    cw = compute_context_window_usage(log_file)
+    if cw is None:
+        print("Context window:        (no assistant turns yet)")
+    else:
+        label = _format_context_window_label(log_file) or "—"
+        print(f"Context window:        {label}")
+        print(f"  input:               {cw.input_tokens:>12,}")
+        print(f"  cache_creation:      {cw.cache_creation_input_tokens:>12,}")
+        print(f"  cache_read:          {cw.cache_read_input_tokens:>12,}")
+        print(f"  output:              {cw.output_tokens:>12,}")
+        print(f"  source_line:         {cw.source_line:>12,}")
+    print()
+
+    # Session totals
+    stats = compute_token_stats(log_file)
+    print("Session totals (deduped by message.id):")
+    print(f"  input_tokens:        {stats.input_tokens:>12,}")
+    print(f"  output_tokens:       {stats.output_tokens:>12,}")
+    print(f"  cache_creation:      {stats.cache_creation_input_tokens:>12,}")
+    print(f"  cache_read:          {stats.cache_read_input_tokens:>12,}")
+    print(f"  total_tokens:        {stats.total_tokens:>12,}")
+    print(f"  unique_api_calls:    {stats.unique_api_calls:>12,}")
+    print(f"  messages_considered: {stats.messages_considered:>12,}")
+    if stats.unknown_token_fields:
+        print()
+        print("Unknown token fields (not yet classified):")
+        for field, value in stats.unknown_token_fields.items():
+            print(f"  {field}: {value:,}")
+
+
 def cmd_repl(args: argparse.Namespace) -> None:
     """Interactive human-facing REPL for a claude worker.
 
@@ -2235,8 +2429,16 @@ def cmd_repl(args: argparse.Namespace) -> None:
     else:
         formatter = PlainFormatter()
 
-    # Print banner
-    banner_suffix = f" (PM chat: {chat_id})" if chat_id else ""
+    # Print banner with context window usage (if available)
+    banner_suffix_parts = []
+    if chat_id:
+        banner_suffix_parts.append(f"PM chat: {chat_id}")
+    context_label = _format_context_window_label(log_file)
+    if context_label:
+        banner_suffix_parts.append(f"context: {context_label}")
+    banner_suffix = (
+        f" ({' | '.join(banner_suffix_parts)})" if banner_suffix_parts else ""
+    )
     print(
         f"=== claude-worker REPL: {args.name}{banner_suffix} ===\n"
         f"Type your message at the prompt. /exit or Ctrl-D to quit.\n"
@@ -2385,6 +2587,12 @@ examples:
 
   # Chat with the worker interactively (turn-by-turn human REPL)
   claude-worker repl researcher
+
+  # Check token usage (context window + session totals)
+  claude-worker tokens researcher
+
+  # Or just the current context window as a scriptable one-liner
+  claude-worker read researcher --context
 
   # Stop and clean up
   claude-worker stop researcher
@@ -2539,6 +2747,12 @@ def main():
         help="Show one-line summary per message: [uuid] ROLE: preview",
     )
     p_read.add_argument(
+        "--context",
+        action="store_true",
+        help="Print the current context window usage (e.g. '77%% (776k/1M)') "
+        "and exit. Bypasses all other read flags.",
+    )
+    p_read.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -2650,6 +2864,13 @@ def main():
         "PM workers; pass --chat to use a specific identity instead.",
     )
 
+    # -- tokens --
+    p_tokens = sub.add_parser(
+        "tokens",
+        help="Print token stats for a worker (context window + session totals)",
+    )
+    p_tokens.add_argument("name", help="Worker name")
+
     args = parser.parse_args()
 
     handlers = {
@@ -2662,5 +2883,6 @@ def main():
         "stop": cmd_stop,
         "install-hook": cmd_install_hook,
         "repl": cmd_repl,
+        "tokens": cmd_tokens,
     }
     handlers[args.command](args)

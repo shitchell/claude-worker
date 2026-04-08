@@ -184,6 +184,10 @@ messages are **shown by default** — pass `--exclude-user` to hide them.
 - `--count` — print the message count instead of content.
 - `--summary` — print a one-line-per-message summary: `[uuid-short] ROLE:
   first ~80 chars`.
+- `--context` — print the current context window usage as a one-liner
+  (e.g. `77% (776k/1M)`) and exit. Bypasses all other read flags.
+  Scriptable signal for "how full is this worker?" — see also
+  `claude-worker tokens NAME` for the full stats view.
 - `--verbose`, `-v` — include tool calls, tool results, and thinking blocks.
 - `--color` / `--no-color` — force ANSI or plain output. Defaults to markdown
   when running inside Claude Code (`CLAUDECODE=1`), ANSI in human terminals.
@@ -235,12 +239,16 @@ List all workers. Output format per worker:
     pid: 1234  status: waiting  idle: 12s  cwd: ~/projects/foo
     session: abc123...
     last: first ~80 chars of the most recent assistant message...
+    context: 77% (776k/1M)
 ```
 
 - `[PM]` appears next to PM workers.
 - `idle: <duration>` appears for workers in `waiting` or `dead` state.
 - `last:` shows a preview of the most recent assistant text for quick
   "what's the worker doing?" glance.
+- `context:` shows the current context window usage as a percentage
+  and absolute count (e.g. `77% (776k/1M)`). Silent for workers that
+  haven't produced a first turn yet. Backed by ``claugs``.
 
 ### `stop`
 
@@ -250,6 +258,59 @@ claude-worker stop [--force] NAME
 
 Stop a worker. Sends SIGTERM by default; SIGKILL with `--force`. The manager's
 signal handler cleans up the runtime directory before exiting.
+
+### `tokens`
+
+```
+claude-worker tokens NAME
+```
+
+Print token usage for a worker — both the current context window
+footprint and cumulative session totals. Backed by ``claugs`` (the
+``claude_logs`` package) token-stats API.
+
+Example:
+
+```
+$ claude-worker tokens cw-dev
+Worker: cw-dev
+Session: 86c9ce5a-8223-4164-a794-48a3b89a4901
+
+Context window:        80% (797k/1M)
+  input:                          1
+  cache_creation:             1,017
+  cache_read:               796,789
+  output:                        47
+  source_line:                2,361
+
+Session totals (deduped by message.id):
+  input_tokens:               5,967
+  output_tokens:             25,130
+  cache_creation:         4,425,023
+  cache_read:           377,360,475
+  total_tokens:         381,816,595
+  unique_api_calls:             850
+  messages_considered:        1,345
+```
+
+Two views in one command:
+
+- **Context window**: the current in-flight input footprint from the
+  most recent assistant turn's usage block. Matches the "X/1M tokens"
+  percentage Claude Code's UI shows. Computed as `input +
+  cache_creation_input + cache_read_input` (output is reported for
+  reference but not summed into the total). Excludes sub-agent (Task)
+  calls, which have their own private context.
+- **Session totals**: cumulative tokens across every API call in the
+  session, deduped by `message.id` so streaming chunks don't
+  double-count.
+
+Context window size is auto-detected from the model string in the
+worker's `system/init` message: models with `[1m]` suffix are 1M,
+others default to 200K.
+
+See also: `claude-worker read NAME --context` for a scriptable
+one-line version, `claude-worker ls` for a per-worker context line.
 
 ### `repl`
 
