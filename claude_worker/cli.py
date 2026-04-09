@@ -832,6 +832,54 @@ def _wait_for_turn(
 # -- Subcommand handlers --
 
 
+def _ensure_cwork_dirs(cwd: str, pm: bool, tl: bool) -> None:
+    """Auto-create .cwork/ skeleton directories on first identity-mode start.
+
+    Creates both the global ~/.cwork/ skeleton and the project-level
+    <cwd>/.cwork/ skeleton. Idempotent — mkdir(exist_ok=True) everywhere.
+    Only runs for --pm or --team-lead workers.
+    """
+    if not pm and not tl:
+        return
+
+    # Global skeleton: ~/.cwork/
+    home_cwork = Path.home() / ".cwork"
+    for d in (
+        home_cwork / "gvp",
+        home_cwork / "identities" / "pm" / "gvp",
+        home_cwork / "identities" / "technical-lead",
+        home_cwork / "workers",
+    ):
+        d.mkdir(parents=True, exist_ok=True)
+
+    # Project skeleton: <cwd>/.cwork/
+    project_cwork = Path(cwd) / ".cwork"
+    if pm:
+        for d in (
+            project_cwork / "pm" / "chats",
+            project_cwork / "pm" / "handoffs",
+            project_cwork / "pm" / "gvp",
+        ):
+            d.mkdir(parents=True, exist_ok=True)
+    if tl:
+        for d in (
+            project_cwork / "technical-lead" / "handoffs",
+            project_cwork / "technical-lead" / "notes",
+        ):
+            d.mkdir(parents=True, exist_ok=True)
+
+    # Shared project dirs
+    tickets_dir = project_cwork / "tickets"
+    tickets_dir.mkdir(parents=True, exist_ok=True)
+    index = tickets_dir / "INDEX.md"
+    if not index.exists():
+        index.write_text(
+            "# Tickets\n\n"
+            "| ID | Slug | Status | Priority | Assigned | Consumer | Blocked-by |\n"
+            "|----|------|--------|----------|----------|----------|------------|\n"
+        )
+
+
 def cmd_start(args: argparse.Namespace) -> None:
     """Start a new claude worker."""
     # --resume requires an explicit --name. Without it, the old code
@@ -918,6 +966,9 @@ def cmd_start(args: argparse.Namespace) -> None:
     if not parts and tl_mode:
         parts.append(TL_INTERNALIZE_MESSAGE)
     initial_message = "\n\n".join(parts) if parts else None
+
+    # Auto-create .cwork/ skeleton for identity-mode workers
+    _ensure_cwork_dirs(args.cwd or os.getcwd(), pm_mode, tl_mode)
 
     # Create runtime directory
     try:
