@@ -38,9 +38,7 @@ class TestCollectFilteredWorkers:
         )
         save_worker(name2, cwd="/tmp")
 
-        args = argparse.Namespace(
-            role="pm", status=None, alive=False, cwd_filter=None
-        )
+        args = argparse.Namespace(role="pm", status=None, alive=False, cwd_filter=None)
         workers = _collect_filtered_workers(args)
         names = [w["name"] for w in workers]
         assert "pm-test" in names
@@ -60,9 +58,7 @@ class TestCollectFilteredWorkers:
             alive=False,
         )
 
-        args = argparse.Namespace(
-            role=None, status=None, alive=True, cwd_filter=None
-        )
+        args = argparse.Namespace(role=None, status=None, alive=True, cwd_filter=None)
         workers = _collect_filtered_workers(args)
         names = [w["name"] for w in workers]
         assert "alive-test" in names
@@ -88,9 +84,7 @@ class TestBroadcastSelfExclusion:
             alive=True,
         )
 
-        args = argparse.Namespace(
-            role=None, status=None, alive=True, cwd_filter=None
-        )
+        args = argparse.Namespace(role=None, status=None, alive=True, cwd_filter=None)
         workers = _collect_filtered_workers(args)
         names = [w["name"] for w in workers]
 
