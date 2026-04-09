@@ -2071,12 +2071,38 @@ def _format_worker_line(name: str) -> str | None:
     )
 
 
+def _get_worker_info(name: str) -> dict | None:
+    """Collect structured info about a worker for filtering and display."""
+    runtime = get_runtime_dir(name)
+    if not runtime.exists():
+        return None
+
+    saved = get_saved_worker(name)
+    is_pm = bool(saved and saved.get("pm"))
+    is_tl = bool(saved and saved.get("team_lead"))
+    raw_cwd = (saved.get("cwd") or "-") if saved else "-"
+
+    status, log_mtime = get_worker_status(runtime)
+
+    role = "pm" if is_pm else "tl" if is_tl else "worker"
+
+    return {
+        "name": name,
+        "role": role,
+        "status": status,
+        "cwd": raw_cwd,
+        "log_mtime": log_mtime,
+    }
+
+
 def cmd_list(args: argparse.Namespace) -> None:
-    """List all workers.
+    """List all workers with optional filters.
 
     Scans both the new (~/.cwork/workers/) and legacy (/tmp/) base
-    directories to find workers from before and after the migration.
+    directories. Filters are composable with AND logic.
     """
+    # Collect all workers
+    workers: list[dict] = []
     seen: set[str] = set()
     for base in (get_base_dir(), _legacy_base_dir()):
         if not base.exists():
@@ -2085,7 +2111,41 @@ def cmd_list(args: argparse.Namespace) -> None:
             if not entry.is_dir() or entry.name in seen:
                 continue
             seen.add(entry.name)
-            line = _format_worker_line(entry.name)
+            info = _get_worker_info(entry.name)
+            if info is not None:
+                workers.append(info)
+
+    # Apply filters (AND logic)
+    role_filter = getattr(args, "role", None)
+    status_filter = getattr(args, "status", None)
+    alive_filter = getattr(args, "alive", False)
+    cwd_filter = getattr(args, "cwd_filter", None)
+
+    if role_filter:
+        workers = [w for w in workers if w["role"] == role_filter]
+    if status_filter:
+        workers = [w for w in workers if w["status"] == status_filter]
+    if alive_filter:
+        workers = [w for w in workers if w["status"] != "dead"]
+    if cwd_filter:
+        resolved_filter = str(Path(cwd_filter).resolve())
+        workers = [
+            w
+            for w in workers
+            if w["cwd"] != "-"
+            and str(Path(w["cwd"]).resolve()).startswith(resolved_filter)
+        ]
+
+    # Output
+    format_mode = getattr(args, "format", None)
+    if format_mode == "json":
+        for w in workers:
+            # Remove non-serializable fields
+            out = {k: v for k, v in w.items() if k != "log_mtime"}
+            print(json.dumps(out))
+    else:
+        for w in workers:
+            line = _format_worker_line(w["name"])
             if line:
                 print(line)
 
@@ -3673,7 +3733,34 @@ def main():
     )
 
     # -- list --
-    sub.add_parser("list", aliases=["ls"], help="List all workers")
+    p_list = sub.add_parser("list", aliases=["ls"], help="List all workers")
+    p_list.add_argument(
+        "--role",
+        choices=["pm", "tl", "worker"],
+        help="Filter by identity role",
+    )
+    p_list.add_argument(
+        "--status",
+        choices=["working", "waiting", "dead", "starting"],
+        help="Filter by current status",
+    )
+    p_list.add_argument(
+        "--alive",
+        action="store_true",
+        help="Show only non-dead workers (shorthand for excluding dead)",
+    )
+    p_list.add_argument(
+        "--cwd",
+        dest="cwd_filter",
+        metavar="PATH",
+        help="Filter by CWD (prefix match)",
+    )
+    p_list.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format: text (default) or json (one JSON object per line)",
+    )
 
     # -- stop --
     p_stop = sub.add_parser("stop", help="Stop a worker")
