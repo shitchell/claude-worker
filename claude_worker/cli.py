@@ -2119,7 +2119,9 @@ def _validate_wrapup(name: str, runtime: Path) -> str | None:
     """
     status, _ = get_worker_status(runtime)
     if status == "working":
-        return f"Worker '{name}' is still working. Wait for the current turn to complete."
+        return (
+            f"Worker '{name}' is still working. Wait for the current turn to complete."
+        )
     if status == "dead":
         return f"Worker '{name}' is dead. Nothing to replace."
 
@@ -2275,7 +2277,10 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
             identity_content = _load_bundled_resource("identities", identity_resource)
             identity_path.write_text(identity_content)
             # Prepend --append-system-prompt-file to claude_args
-            claude_args = ["--append-system-prompt-file", str(identity_path)] + claude_args
+            claude_args = [
+                "--append-system-prompt-file",
+                str(identity_path),
+            ] + claude_args
 
         # 6e. Write permission settings if applicable
         permission_settings = _maybe_write_permission_settings(
