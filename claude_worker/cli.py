@@ -1009,7 +1009,9 @@ def cmd_start(args: argparse.Namespace) -> None:
     # subprocess finds the file when it builds the claude command.
     # Gated by --no-permission-hook for tests and for users opting out.
     permission_settings = _maybe_write_permission_settings(
-        name=name, enabled=not getattr(args, "no_permission_hook", False)
+        name=name,
+        enabled=not getattr(args, "no_permission_hook", False),
+        cwd=args.cwd or os.getcwd(),
     )
     if permission_settings is not None:
         # Append --settings to the claude args so claude merges this
@@ -2407,7 +2409,7 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
 
         # 6e. Write permission settings if applicable
         permission_settings = _maybe_write_permission_settings(
-            name=worker_name, enabled=True
+            name=worker_name, enabled=True, cwd=cwd
         )
         if permission_settings is not None:
             claude_args = ["--settings", str(permission_settings)] + claude_args
@@ -2882,12 +2884,14 @@ def _build_permission_hook_settings(
     grants_path: Path,
     python_executable: str,
     sentinel_dir: Path | None = None,
+    cwd: str | None = None,
 ) -> dict:
     """Build the settings dict for per-worker hooks.
 
-    Wires two hooks:
+    Wires up to three hooks:
     1. PreToolUse — permission grant hook for Edit/Write/MultiEdit
-    2. Stop — context threshold check after each turn (if sentinel_dir provided)
+    2. PreToolUse — CWD write guard (if cwd provided)
+    3. Stop — context threshold check after each turn (if sentinel_dir provided)
 
     This is pure data — no I/O — so tests can assert on the shape
     without touching the filesystem.
@@ -2897,19 +2901,33 @@ def _build_permission_hook_settings(
         f"{python_executable} -m claude_worker.permission_grant "
         f"--grants-file {grants_path}"
     )
-    hooks: dict = {
-        "PreToolUse": [
+    pretooluse_entries: list[dict] = [
+        {
+            "matcher": matcher,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": permission_command,
+                }
+            ],
+        }
+    ]
+    if cwd is not None:
+        cwd_guard_command = (
+            f"{python_executable} -m claude_worker.cwd_guard --cwd {cwd}"
+        )
+        pretooluse_entries.append(
             {
                 "matcher": matcher,
                 "hooks": [
                     {
                         "type": "command",
-                        "command": permission_command,
+                        "command": cwd_guard_command,
                     }
                 ],
             }
-        ],
-    }
+        )
+    hooks: dict = {"PreToolUse": pretooluse_entries}
     if sentinel_dir is not None:
         context_command = (
             f"{python_executable} -m claude_worker.context_threshold "
@@ -2928,8 +2946,10 @@ def _build_permission_hook_settings(
     return {"hooks": hooks}
 
 
-def _maybe_write_permission_settings(name: str, enabled: bool) -> Path | None:
-    """Generate the per-worker settings.json for the permission hook.
+def _maybe_write_permission_settings(
+    name: str, enabled: bool, cwd: str | None = None
+) -> Path | None:
+    """Generate the per-worker settings.json for worker hooks.
 
     Called by ``cmd_start`` just after ``create_runtime_dir`` and before
     the fork, so the manager subprocess can pick up the file when it
@@ -2946,6 +2966,7 @@ def _maybe_write_permission_settings(name: str, enabled: bool) -> Path | None:
         grants_path=grants_path,
         python_executable=sys.executable,
         sentinel_dir=runtime,
+        cwd=cwd,
     )
     _atomic_write_text(settings_path, json.dumps(settings, indent=2) + "\n")
     return settings_path
