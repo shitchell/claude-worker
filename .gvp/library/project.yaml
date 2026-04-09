@@ -714,3 +714,26 @@ decisions:
       - file: claude_worker/cli.py
         identifier: cmd_reply
         role: implements
+
+  - id: D22
+    name: wait-for-turn-chat-tag-filter
+    decision: >
+      wait-for-turn accepts --chat <tag> to filter turns by chat tag.
+      Only fires when the turn's assistant content contains
+      [chat:<tag>]. Untagged turns and turns for other consumers are
+      skipped. Composes with --after-uuid and --settle. Handles both
+      result messages (walks back to find assistant content) and
+      assistant end_turn messages (checks directly).
+    origin: >
+      Ticket #029 (2026-04-09). TAStest consumer reported 3-4 false
+      fires while waiting for a multi-step delegation chain on a PM
+      serving multiple concurrent consumers.
+    tags: [pm, races]
+    maps_to: [project:G4, project:P1]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _message_has_chat_tag
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: chat_tag
+        role: implements

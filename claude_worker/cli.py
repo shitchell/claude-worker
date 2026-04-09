@@ -722,11 +722,26 @@ def _settle_is_stable(
     return uuid_after == uuid_before
 
 
+def _message_has_chat_tag(data: dict, chat_tag: str) -> bool:
+    """Check if an assistant message contains [chat:<tag>] in its content."""
+    msg = data.get("message", {})
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return f"[{CHAT_TAG_PREFIX}{chat_tag}]" in content
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                if f"[{CHAT_TAG_PREFIX}{chat_tag}]" in block.get("text", ""):
+                    return True
+    return False
+
+
 def _wait_for_turn(
     name: str,
     timeout: float | None = None,
     after_uuid: str | None = None,
     settle: float = 0.0,
+    chat_tag: str | None = None,
 ) -> int:
     """Block until claude finishes its turn. Returns exit code (0=ready, 1=dead, 2=timeout).
 
@@ -739,6 +754,9 @@ def _wait_for_turn(
     ``settle`` seconds and confirms no new messages appeared before returning.
     A brief idle flipping back to activity (e.g. a subagent dispatch) restarts
     the wait. The settle duration counts against ``timeout``.
+
+    If ``chat_tag`` is provided, only fire when the turn's assistant content
+    contains ``[chat:<tag>]``. Turns without the tag are skipped.
     """
     runtime = get_runtime_dir(name)
     log_file = runtime / "log"
@@ -778,6 +796,7 @@ def _wait_for_turn(
     # - Hit a `user` message: the turn is in progress — no turn-end
     #   exists newer than this user message. Stop without recording.
     turn_end_after_last_user = None
+    last_assistant_in_turn = None
     for data in _iter_log_reverse(log_file):
         if after_uuid:
             msg_uuid = data.get("uuid", "")
@@ -786,21 +805,33 @@ def _wait_for_turn(
         msg_type = data.get("type")
         if msg_type == "result":
             turn_end_after_last_user = data
-            break
+            # Keep walking to find the assistant message for chat tag check
+            continue
         if msg_type == "assistant":
             sr = data.get("message", {}).get("stop_reason")
+            if turn_end_after_last_user is not None:
+                # We already found a result — this is the assistant for that turn
+                last_assistant_in_turn = data
+                break
             if sr == "end_turn":
                 turn_end_after_last_user = data
+                last_assistant_in_turn = data
                 break
-            # Streaming chunk with non-end_turn stop_reason: not a turn
-            # boundary, keep walking back.
+            # Streaming chunk: keep walking back.
             continue
         if msg_type == "user":
             # Reached a user message before any turn-end — turn is
             # still in progress.
             break
 
-    # Scan found an already-complete turn. Confirm it's stable before returning.
+    # Scan found an already-complete turn. Check chat tag if filtering.
+    # Use the assistant message (not result) for tag checking since result
+    # messages don't contain assistant content.
+    if turn_end_after_last_user is not None:
+        tag_check_msg = last_assistant_in_turn or turn_end_after_last_user
+        if chat_tag and not _message_has_chat_tag(tag_check_msg, chat_tag):
+            # Turn doesn't match the chat filter — fall through to tail loop
+            turn_end_after_last_user = None
     if turn_end_after_last_user is not None:
         if _settle_is_stable(log_file, settle, deadline=deadline):
             return 0
@@ -811,6 +842,7 @@ def _wait_for_turn(
         print("Error: worker process died", file=sys.stderr)
         return 1
 
+    tail_last_assistant: dict = {}
     with open(log_file) as f:
         f.seek(0, 2)  # seek to end
         while True:
@@ -836,6 +868,11 @@ def _wait_for_turn(
 
             msg_type = data.get("type")
 
+            # Track the last assistant message for chat tag checking
+            # (result messages don't contain assistant content)
+            if msg_type == "assistant":
+                tail_last_assistant = data
+
             turn_ended = False
             if msg_type == "result":
                 turn_ended = True
@@ -845,6 +882,11 @@ def _wait_for_turn(
                     turn_ended = True
 
             if turn_ended:
+                # Chat tag filter: check assistant content, not result
+                if chat_tag:
+                    check_msg = tail_last_assistant if msg_type == "result" else data
+                    if not _message_has_chat_tag(check_msg, chat_tag):
+                        continue
                 if _settle_is_stable(log_file, settle, deadline=deadline):
                     return 0
                 # New activity during settle: keep tailing for the next
@@ -2072,6 +2114,7 @@ def cmd_wait_for_turn(args: argparse.Namespace) -> None:
         timeout=args.timeout,
         after_uuid=getattr(args, "after_uuid", None),
         settle=args.settle,
+        chat_tag=getattr(args, "chat", None),
     )
     sys.exit(rc)
 
@@ -3958,6 +4001,12 @@ def main():
             f"Prevents false positives when the worker briefly idles between "
             f"internal subagent dispatches. Set to 0 to disable."
         ),
+    )
+    p_wait.add_argument(
+        "--chat",
+        metavar="TAG",
+        help="Only fire when the turn's assistant content contains [chat:<tag>]. "
+        "Skips untagged turns and turns for other consumers.",
     )
 
     # -- list --

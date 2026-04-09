@@ -303,7 +303,10 @@ def make_user_message(text: str, uuid: str, session_id: str = "sess") -> dict[st
 
 
 def make_assistant_message(
-    text: str, uuid: str, session_id: str = "sess"
+    text: str,
+    uuid: str,
+    session_id: str = "sess",
+    stop_reason: str | None = None,
 ) -> dict[str, Any]:
     """Build an assistant text message entry."""
     return {
@@ -311,7 +314,7 @@ def make_assistant_message(
         "message": {
             "role": "assistant",
             "content": [{"type": "text", "text": text}],
-            "stop_reason": None,
+            "stop_reason": stop_reason,
             "model": "claude-opus-4-6",
             "id": f"msg_{uuid[:8]}",
         },

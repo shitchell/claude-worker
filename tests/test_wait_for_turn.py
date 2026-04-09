@@ -136,11 +136,14 @@ class TestWaitForTurnCliSurface:
 
         captured: dict = {}
 
-        def _spy_wait_for_turn(name, timeout=None, after_uuid=None, settle=0.0):
+        def _spy_wait_for_turn(
+            name, timeout=None, after_uuid=None, settle=0.0, chat_tag=None
+        ):
             captured["name"] = name
             captured["timeout"] = timeout
             captured["after_uuid"] = after_uuid
             captured["settle"] = settle
+            captured["chat_tag"] = chat_tag
             return 0
 
         monkeypatch.setattr(cw_cli, "_wait_for_turn", _spy_wait_for_turn)
