@@ -1095,17 +1095,111 @@ def cmd_start(args: argparse.Namespace) -> None:
     os._exit(0)
 
 
-def cmd_send(args: argparse.Namespace) -> None:
-    """Send a message to a worker.
+def _send_to_single_worker(
+    name: str,
+    content: str,
+    args: argparse.Namespace,
+) -> int:
+    """Send a message to a single worker. Returns exit code.
 
-    Default behavior: check worker status first and reject if busy. Use
-    ``--queue`` to bypass the busy check and track a specific response via a
-    correlation ID embedded in the message.
+    Extracted from cmd_send so broadcast can reuse the core send logic
+    per target without duplicating the FIFO write + wait sequence.
     """
-    runtime = resolve_worker(args.name)
+    runtime = get_runtime_dir(name)
     in_fifo = runtime / "in"
     log_file = runtime / "log"
 
+    if not runtime.exists():
+        print(f"Error: worker '{name}' not found at {runtime}", file=sys.stderr)
+        return 1
+
+    # Status gate: skip for broadcast (fire-and-forget to all)
+    if (
+        not args.queue
+        and not getattr(args, "broadcast", False)
+        and not getattr(args, "dry_run", False)
+    ):
+        try:
+            status, _ = _wait_for_ready_state(name)
+        except TimeoutError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if status == "dead":
+            print(
+                f"Error: worker '{name}' is dead. "
+                f"Use `claude-worker start --resume --name {name}` to restart.",
+                file=sys.stderr,
+            )
+            return 1
+        if status == "working":
+            print(
+                f"Error: worker '{name}' is busy. "
+                f"Use `--queue` to send anyway with correlation tracking.",
+                file=sys.stderr,
+            )
+            return 1
+
+    marker_uuid = _get_last_uuid(log_file)
+
+    # Chat routing
+    chat_id = _resolve_chat_id(name, args.chat, args.all_chats)
+    tagged_content = content
+    if chat_id is not None:
+        tagged_content = f"[{CHAT_TAG_PREFIX}{chat_id}] {tagged_content}"
+
+    # Queue correlation
+    queue_id: str | None = None
+    if args.queue:
+        queue_id = _generate_queue_id()
+        tagged_content = (
+            tagged_content
+            + f"\n\n[Please include [{QUEUE_TAG_PREFIX}{queue_id}] literally in your response so the sender can identify it.]"
+        )
+
+    msg = json.dumps(
+        {"type": "user", "message": {"role": "user", "content": tagged_content}}
+    )
+
+    if getattr(args, "dry_run", False):
+        print(json.dumps(json.loads(msg), indent=2))
+        return 0
+
+    if getattr(args, "verbose", False):
+        print(json.dumps(json.loads(msg), indent=2), file=sys.stderr)
+
+    with open(in_fifo, "w") as f:
+        f.write(msg + "\n")
+        f.flush()
+
+    # For broadcast fire-and-forget, don't wait
+    if (
+        getattr(args, "broadcast", False)
+        and not args.show_response
+        and not args.show_full_response
+    ):
+        return 0
+
+    if queue_id is not None:
+        rc = _wait_for_queue_response(name, queue_id, after_uuid=marker_uuid)
+    else:
+        rc = _wait_for_turn(name, after_uuid=marker_uuid)
+
+    if rc == 0 and args.show_response:
+        _show_worker_response(name, last_turn=True)
+    elif rc == 0 and args.show_full_response:
+        _show_worker_response(name, since_uuid=marker_uuid)
+
+    return rc
+
+
+def cmd_send(args: argparse.Namespace) -> None:
+    """Send a message to a worker, or broadcast to multiple workers.
+
+    Default behavior: check worker status first and reject if busy. Use
+    ``--queue`` to bypass the busy check and track a specific response via a
+    correlation ID embedded in the message. Use ``--broadcast`` with filter
+    flags to send to multiple workers matching a filter.
+    """
     if args.show_response and args.show_full_response:
         print(
             "Error: --show-response and --show-full-response are mutually exclusive",
@@ -1123,87 +1217,46 @@ def cmd_send(args: argparse.Namespace) -> None:
         print("Error: empty message", file=sys.stderr)
         sys.exit(1)
 
-    # Status gate: refuse to send to a busy worker unless --queue or --dry-run.
-    # `starting` is transient — wait for it to clear. `dead` is fatal.
-    if not args.queue and not getattr(args, "dry_run", False):
-        try:
-            status, _ = _wait_for_ready_state(args.name)
-        except TimeoutError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
+    # Broadcast mode: send to all matching workers
+    if getattr(args, "broadcast", False):
+        targets = _collect_filtered_workers(args)
+
+        # Self-exclusion
+        self_name = _find_worker_by_ancestry()
+        if self_name:
+            targets = [w for w in targets if w["name"] != self_name]
+
+        if not targets:
+            print("No matching workers found for broadcast", file=sys.stderr)
             sys.exit(1)
-        if status == "dead":
+
+        names = [w["name"] for w in targets]
+        results: list[tuple[str, int]] = []
+        for name in names:
+            rc = _send_to_single_worker(name, content, args)
+            results.append((name, rc))
+
+        # Summary
+        sent = [n for n, rc in results if rc == 0]
+        failed = [n for n, rc in results if rc != 0]
+        if sent:
+            print(f"Broadcast sent to {len(sent)} workers: {', '.join(sent)}")
+        if failed:
             print(
-                f"Error: worker '{args.name}' is dead. "
-                f"Use `claude-worker start --resume --name {args.name}` to restart.",
+                f"Failed for {len(failed)} workers: {', '.join(failed)}",
                 file=sys.stderr,
             )
-            sys.exit(1)
-        if status == "working":
-            print(
-                f"Error: worker '{args.name}' is busy. "
-                f"Use `--queue` to send anyway with correlation tracking.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        # status == "waiting" → proceed
+        sys.exit(1 if failed and not sent else 0)
 
-    # Remember the last UUID BEFORE writing to the FIFO. This marker serves
-    # two purposes:
-    #   1. `--show-full-response` uses it as a `--since` marker to render
-    #      everything new since the send.
-    #   2. `_wait_for_turn` uses it to ignore the prior turn's `result`
-    #      message — otherwise the scan phase would find the OLD turn
-    #      boundary and return immediately before the new user message
-    #      reaches claude (race condition).
-    marker_uuid = _get_last_uuid(log_file)
-
-    # Chat routing: if a chat ID is effective (explicit --chat or env
-    # auto-detection on a PM worker), prefix the message body with the
-    # tag so the PM can identify which consumer it's responding to.
-    chat_id = _resolve_chat_id(args.name, args.chat, args.all_chats)
-    if chat_id is not None:
-        content = f"[{CHAT_TAG_PREFIX}{chat_id}] {content}"
-
-    # If --queue, append a correlation instruction so we can detect the
-    # specific response that corresponds to THIS send.
-    queue_id: str | None = None
-    if args.queue:
-        queue_id = _generate_queue_id()
-        content = (
-            content
-            + f"\n\n[Please include [{QUEUE_TAG_PREFIX}{queue_id}] literally in your response so the sender can identify it.]"
+    # Single-target mode
+    if not args.name:
+        print(
+            "Error: worker name required (or use --broadcast with filters)",
+            file=sys.stderr,
         )
+        sys.exit(1)
 
-    msg = json.dumps(
-        {
-            "type": "user",
-            "message": {"role": "user", "content": content},
-        }
-    )
-
-    if getattr(args, "dry_run", False):
-        print(json.dumps(json.loads(msg), indent=2))
-        return
-
-    if getattr(args, "verbose", False):
-        print(json.dumps(json.loads(msg), indent=2), file=sys.stderr)
-
-    with open(in_fifo, "w") as f:
-        f.write(msg + "\n")
-        f.flush()
-
-    if queue_id is not None:
-        rc = _wait_for_queue_response(args.name, queue_id, after_uuid=marker_uuid)
-    else:
-        rc = _wait_for_turn(args.name, after_uuid=marker_uuid)
-
-    # Print response BEFORE the status line so the status appears at the
-    # bottom (last line the user sees) — matching the style of cmd_start.
-    if rc == 0 and args.show_response:
-        _show_worker_response(args.name, last_turn=True)
-    elif rc == 0 and args.show_full_response:
-        _show_worker_response(args.name, since_uuid=marker_uuid)
-
+    rc = _send_to_single_worker(args.name, content, args)
     _print_worker_status(args.name)
     sys.exit(rc)
 
@@ -2111,17 +2164,8 @@ def _get_worker_info(name: str) -> dict | None:
     }
 
 
-def cmd_list(args: argparse.Namespace) -> None:
-    """List all workers with optional filters.
-
-    Scans both the new (~/.cwork/workers/) and legacy (/tmp/) base
-    directories. Filters are composable with AND logic. Prunes old
-    archives (>30 days) as a side effect.
-    """
-    # Prune old archives opportunistically
-    prune_archives()
-
-    # Collect all workers
+def _collect_filtered_workers(args: argparse.Namespace) -> list[dict]:
+    """Scan all workers and apply filter flags. Shared by cmd_list and --broadcast."""
     workers: list[dict] = []
     seen: set[str] = set()
     for base in (get_base_dir(), _legacy_base_dir()):
@@ -2130,7 +2174,6 @@ def cmd_list(args: argparse.Namespace) -> None:
         for entry in sorted(base.iterdir()):
             if not entry.is_dir() or entry.name in seen:
                 continue
-            # Skip archive directories (contain dots from timestamps)
             if "." in entry.name:
                 continue
             seen.add(entry.name)
@@ -2138,7 +2181,6 @@ def cmd_list(args: argparse.Namespace) -> None:
             if info is not None:
                 workers.append(info)
 
-    # Apply filters (AND logic)
     role_filter = getattr(args, "role", None)
     status_filter = getattr(args, "status", None)
     alive_filter = getattr(args, "alive", False)
@@ -2158,12 +2200,22 @@ def cmd_list(args: argparse.Namespace) -> None:
             if w["cwd"] != "-"
             and str(Path(w["cwd"]).resolve()).startswith(resolved_filter)
         ]
+    return workers
 
-    # Output
+
+def cmd_list(args: argparse.Namespace) -> None:
+    """List all workers with optional filters.
+
+    Scans both the new (~/.cwork/workers/) and legacy (/tmp/) base
+    directories. Filters are composable with AND logic. Prunes old
+    archives (>30 days) as a side effect.
+    """
+    prune_archives()
+    workers = _collect_filtered_workers(args)
+
     format_mode = getattr(args, "format", None)
     if format_mode == "json":
         for w in workers:
-            # Remove non-serializable fields
             out = {k: v for k, v in w.items() if k != "log_mtime"}
             print(json.dumps(out))
     else:
@@ -3699,9 +3751,40 @@ def main():
 
     # -- send --
     p_send = sub.add_parser("send", help="Send a message to a worker")
-    p_send.add_argument("name", help="Worker name")
+    p_send.add_argument(
+        "name",
+        nargs="?",
+        default=None,
+        help="Worker name (omit when using --broadcast)",
+    )
     p_send.add_argument(
         "message", nargs="*", help="Message text (reads stdin if omitted)"
+    )
+    p_send.add_argument(
+        "--broadcast",
+        action="store_true",
+        help="Send to all workers matching filter flags (--role, --status, --alive, --cwd)",
+    )
+    p_send.add_argument(
+        "--role",
+        choices=["pm", "tl", "worker"],
+        help="Filter targets by identity role (broadcast only)",
+    )
+    p_send.add_argument(
+        "--status",
+        choices=["working", "waiting", "dead", "starting"],
+        help="Filter targets by status (broadcast only)",
+    )
+    p_send.add_argument(
+        "--alive",
+        action="store_true",
+        help="Exclude dead workers from broadcast targets",
+    )
+    p_send.add_argument(
+        "--cwd",
+        dest="cwd_filter",
+        metavar="PATH",
+        help="Filter targets by CWD prefix (broadcast only)",
     )
     p_send.add_argument(
         "--queue",

@@ -660,3 +660,27 @@ decisions:
       - file: claude_worker/identities/pm.md
         identifier: Src ID
         role: defines
+
+  - id: D20
+    name: send-broadcast-with-filter-flags
+    decision: >
+      send --broadcast sends a message to all workers matching filter
+      flags (--role, --status, --alive, --cwd). Reuses the filter
+      logic from cmd_list via _collect_filtered_workers. Fire-and-
+      forget by default (skips status gate, writes to each FIFO
+      without waiting). --show-response waits for each target
+      sequentially. Self-exclusion via _find_worker_by_ancestry.
+      Core send logic extracted to _send_to_single_worker for reuse.
+    origin: >
+      Ticket #027 (2026-04-09). Human: "new feature that would
+      probably be good is a send --broadcast flag or some ability
+      to send messages to multiple agents."
+    tags: [architecture, fifo]
+    maps_to: [project:G4, project:V5]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _send_to_single_worker
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _collect_filtered_workers
+        role: uses
