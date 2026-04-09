@@ -47,11 +47,11 @@ LOG_REVERSE_CHUNK_SIZE: int = 8192
 QUEUE_WAIT_TIMEOUT_SECONDS: float = 600.0
 
 # Stop wrap-up — two-phase shutdown sends a wrap-up message before SIGTERM
-STOP_WRAPUP_TIMEOUT_SECONDS: float = 600.0
+STOP_WRAPUP_TIMEOUT_SECONDS: float = 900.0
 STOP_WRAPUP_MESSAGE: str = (
     "[system:stop-requested] Stop has been requested. Please complete your "
     "wrap-up procedure and respond with 'wrap-up complete' when done. "
-    "You have up to 10 minutes."
+    "You have up to 15 minutes."
 )
 
 # Hook installation
@@ -132,6 +132,28 @@ from claude_worker.manager import (
     run_manager,
     save_worker,
 )
+
+
+def _get_cwork_config() -> dict:
+    """Read ~/.cwork/config.yaml, returning {} on missing/error."""
+    config_path = Path.home() / ".cwork" / "config.yaml"
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml
+
+        return yaml.safe_load(config_path.read_text()) or {}
+    except Exception:
+        return {}
+
+
+def _get_wrapup_timeout_minimum() -> float:
+    """Read the wrap-up timeout minimum from config, defaulting to the constant."""
+    config = _get_cwork_config()
+    try:
+        return float(config.get("stop", {}).get("wrap_up_timeout_minimum", STOP_WRAPUP_TIMEOUT_SECONDS))
+    except (TypeError, ValueError):
+        return STOP_WRAPUP_TIMEOUT_SECONDS
 
 
 def generate_name() -> str:
@@ -2018,6 +2040,16 @@ def cmd_stop(args: argparse.Namespace) -> None:
         in_fifo = runtime / "in"
         log_file = runtime / "log"
         if in_fifo.exists():
+            # Resolve effective timeout: CLI flag → config minimum → default
+            minimum = _get_wrapup_timeout_minimum()
+            timeout = getattr(args, "wrap_up_timeout", None) or minimum
+            if timeout < minimum:
+                print(
+                    f"Warning: wrap-up timeout must be at minimum {minimum}s, "
+                    f"using {minimum}s",
+                    file=sys.stderr,
+                )
+                timeout = minimum
             try:
                 # Capture the last UUID before writing so _wait_for_turn
                 # skips the prior turn's result (same race guard as cmd_send).
@@ -2028,17 +2060,26 @@ def cmd_stop(args: argparse.Namespace) -> None:
                         "message": {"role": "user", "content": STOP_WRAPUP_MESSAGE},
                     }
                 )
-                with open(in_fifo, "w") as f:
-                    f.write(msg + "\n")
+                # Use O_NONBLOCK to avoid hanging if the worker dies between
+                # the pid_alive check and here.
+                wr = os.open(str(in_fifo), os.O_WRONLY | os.O_NONBLOCK)
+                try:
+                    os.write(wr, (msg + "\n").encode())
+                finally:
+                    os.close(wr)
                 print(
                     f"Sent wrap-up message to '{args.name}', waiting for completion..."
                 )
                 _wait_for_turn(
                     args.name,
-                    timeout=STOP_WRAPUP_TIMEOUT_SECONDS,
+                    timeout=timeout,
                     settle=0,
                     after_uuid=marker_uuid,
                 )
+            except BlockingIOError:
+                # No reader on the FIFO — worker likely died between
+                # pid_alive check and here. Proceed to SIGTERM.
+                pass
             except Exception:
                 # Wrap-up is best-effort — proceed to SIGTERM on any failure
                 pass
@@ -3529,6 +3570,15 @@ def main():
         "--no-wrap-up",
         action="store_true",
         help="Skip the wrap-up message and go straight to SIGTERM",
+    )
+    p_stop.add_argument(
+        "--wrap-up-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Maximum time to wait for wrap-up before sending SIGTERM. "
+        "Must be >= the configured minimum (default: 900s). "
+        "Values below the minimum are clamped with a warning.",
     )
 
     # -- replaceme --
