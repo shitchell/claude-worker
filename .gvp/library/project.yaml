@@ -780,3 +780,27 @@ decisions:
       - file: claude_worker/cli.py
         identifier: verbose
         role: implements
+
+  - id: D25
+    name: pyyaml-required-dependency
+    decision: >
+      pyyaml is a required dependency (not optional). Added to
+      pyproject.toml as pyyaml>=6.0. _get_cwork_config now warns
+      to stderr on ImportError instead of silently returning {}.
+      The previous "keep pyyaml optional" decision from PM session
+      02 is reversed — config.yaml is used by stop wrap-up timeout,
+      notifications, and will be used by more features. Silent
+      failure violates G2.
+    origin: >
+      PM session 03 (2026-04-09). PM caught the bug before pushing
+      #031: import yaml silently fails, cmd_notify silently does
+      nothing. G2 violation.
+    tags: [durability, observability]
+    maps_to: [project:G2, project:V3]
+    refs:
+      - file: pyproject.toml
+        identifier: pyyaml
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _get_cwork_config
+        role: implements

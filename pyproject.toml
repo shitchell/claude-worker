@@ -9,6 +9,7 @@ description = "Launch and communicate with Claude Code subprocess workers via na
 requires-python = ">=3.11"
 dependencies = [
     "claugs>=0.6.7",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

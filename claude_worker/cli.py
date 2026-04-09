@@ -164,7 +164,14 @@ def _get_cwork_config() -> dict:
         return {}
     try:
         import yaml
-
+    except ImportError:
+        print(
+            "Warning: pyyaml not installed — cannot read ~/.cwork/config.yaml. "
+            "Run: pip install pyyaml",
+            file=sys.stderr,
+        )
+        return {}
+    try:
         return yaml.safe_load(config_path.read_text()) or {}
     except Exception:
         return {}
