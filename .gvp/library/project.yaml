@@ -543,3 +543,32 @@ decisions:
       - file: tests/test_notify.py
         identifier: TestNotifyConfigHandling
         role: implements
+
+  - id: D15
+    name: ticket-watcher-posttooluse-hook
+    decision: >
+      Ticket change notifications use a PostToolUse hook on
+      Write/Edit/MultiEdit, not manager polling or inotify.
+      The hook fires after each successful file write, checks if
+      the target path is under .cwork/tickets/, discovers PM/TL
+      workers with the same CWD via .sessions.json, and sends
+      [system:ticket-change] notifications via fire-and-forget
+      claude-worker send --queue subprocess calls. Rate-limited
+      to 5s per target to batch rapid changes.
+    origin: >
+      Ticket #020 (2026-04-09). Three options assessed:
+      (a) Manager polling — rejected, contradicts the architectural
+      cleanup from #016 where we removed polling from the manager.
+      (b) PostToolUse hook — chosen, event-driven, no polling,
+      rides existing hook infrastructure (PreToolUse and Stop already
+      wired). (c) inotify watcher — rejected, over-engineered,
+      requires new dependency and third daemon thread.
+    tags: [observability, architecture]
+    maps_to: [project:G2, project:G4]
+    refs:
+      - file: claude_worker/ticket_watcher.py
+        identifier: PostToolUse hook entry point
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: PostToolUse
+        role: implements
