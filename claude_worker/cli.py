@@ -113,6 +113,10 @@ REPL_IDLE_POLL_INTERVAL_SECONDS: float = 0.25
 REPL_INPUT_PROMPT: str = "you> "
 REPL_EXIT_COMMANDS: frozenset[str] = frozenset({"/exit", "/quit"})
 
+# Notifications — human escalation channel
+NOTIFY_COOLDOWN_SECONDS: float = 60.0
+NOTIFY_SUBPROCESS_TIMEOUT_SECONDS: float = 10.0
+
 # Replaceme — auto-restart mechanism
 REPLACEME_ANCESTOR_WALK_MAX: int = 5
 REPLACEME_OLD_MANAGER_WAIT_TIMEOUT: float = 30.0
@@ -2520,6 +2524,85 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_notify(args: argparse.Namespace) -> None:
+    """Send a notification to the human via the configured channel.
+
+    Reads ``notifications.command`` from ``~/.cwork/config.yaml``,
+    substitutes ``${MESSAGE}`` with the notification text, and runs it
+    via subprocess. Best-effort: logs failures to stderr, never crashes.
+    Rate-limited per caller to NOTIFY_COOLDOWN_SECONDS.
+    """
+    config = _get_cwork_config()
+    notif = config.get("notifications", {})
+    if not isinstance(notif, dict):
+        return
+
+    if not notif.get("enabled", False):
+        return
+
+    command_template = notif.get("command")
+    if not command_template:
+        print(
+            "Warning: notifications.command not set in ~/.cwork/config.yaml",
+            file=sys.stderr,
+        )
+        return
+
+    message = " ".join(args.message) if args.message else sys.stdin.read()
+    if not message.strip():
+        print("Error: empty notification message", file=sys.stderr)
+        sys.exit(1)
+
+    # Rate limiting via cooldown file
+    cooldown_dir = Path.home() / ".cwork" / "notify-cooldowns"
+    cooldown_dir.mkdir(parents=True, exist_ok=True)
+    import hashlib
+
+    caller_id = getattr(args, "worker", None) or "cli"
+    cooldown_file = cooldown_dir / hashlib.md5(caller_id.encode()).hexdigest()
+    if cooldown_file.exists():
+        try:
+            last_sent = float(cooldown_file.read_text().strip())
+            if time.time() - last_sent < NOTIFY_COOLDOWN_SECONDS:
+                print(
+                    f"Notification rate-limited (cooldown {NOTIFY_COOLDOWN_SECONDS}s)",
+                    file=sys.stderr,
+                )
+                return
+        except (ValueError, OSError):
+            pass
+
+    # Substitute and run
+    command = command_template.replace("${MESSAGE}", message.replace("'", "'\\''"))
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            command,
+            shell=True,
+            timeout=NOTIFY_SUBPROCESS_TIMEOUT_SECONDS,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(
+                f"Warning: notification command exited {result.returncode}: {result.stderr.strip()}",
+                file=sys.stderr,
+            )
+    except subprocess.TimeoutExpired:
+        print("Warning: notification command timed out", file=sys.stderr)
+    except Exception as exc:
+        print(f"Warning: notification failed: {exc}", file=sys.stderr)
+
+    # Update cooldown timestamp
+    try:
+        cooldown_file.write_text(str(time.time()))
+    except OSError:
+        pass
+
+    print(f"Notification sent: {message[:80]}...")
+
+
 def _load_bundled_resource(subdir: str, filename: str) -> str:
     """Return the text contents of a resource bundled with the package.
 
@@ -3806,6 +3889,21 @@ def main():
         "Use when the worker is stuck or the human is supervising.",
     )
 
+    # -- notify --
+    p_notify = sub.add_parser(
+        "notify",
+        help="Send a notification to the human via configured channel",
+    )
+    p_notify.add_argument(
+        "message",
+        nargs="*",
+        help="Notification text (reads stdin if omitted)",
+    )
+    p_notify.add_argument(
+        "--worker",
+        help="Worker name for rate-limiting context (auto-detected if inside a worker)",
+    )
+
     # -- install-hook --
     p_hook = sub.add_parser(
         "install-hook",
@@ -3943,6 +4041,7 @@ def main():
         "ls": cmd_list,
         "stop": cmd_stop,
         "replaceme": cmd_replaceme,
+        "notify": cmd_notify,
         "install-hook": cmd_install_hook,
         "repl": cmd_repl,
         "tokens": cmd_tokens,
