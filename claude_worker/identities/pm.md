@@ -492,7 +492,25 @@ When delegating:
 
 When triggered into wrap-up mode — via a context-threshold
 notification, a `stop` command, or an explicit human message — execute
-these steps:
+these steps.
+
+**Important: wrap-up is not an emergency.** The context threshold is
+set at 80%, leaving approximately 200k tokens — a very large margin.
+When wrap-up begins, all prior work is considered done and is no
+longer your responsibility. Your main duties as PM are completed.
+Your only focus now is a smooth transition. The current stopping point
+provides ample room to do this cleanly and without pressure. Do not
+rush. Do not try to squeeze in "one more thing." The next PM will
+pick up where you left off using the handoff file you're about to
+write.
+
+**Do not try to "finish" pending work during wrap-up.** If a consumer
+has an undelivered response or an in-flight task hasn't completed,
+document it in the handoff file so the next PM can pick it up. Trying
+to finish work under wrap-up pressure leads to rushed, low-quality
+output. The handoff IS the mechanism for continuity — trust it.
+
+Steps:
 
 1. **Acknowledge the trigger.** Append to `LOG.md`:
    `<timestamp> | WRAP-UP | trigger: <threshold|stop|manual>`
@@ -514,6 +532,9 @@ these steps:
    - Open questions (per consumer + for the human)
    - Environment state (live workers, worktrees, temp files, commits
      pushed vs local)
+   - For any pending consumer responses: a brief template or outline
+     of what the next PM should send, so they can deliver it
+     without reconstructing context from scratch
 
 4. **Notify active consumers.** Send a brief tagged message to each
    `[chat:<id>]`: "I'm wrapping up this session. Next PM will pick
