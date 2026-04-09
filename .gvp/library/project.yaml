@@ -615,7 +615,7 @@ decisions:
     refs:
       - file: README.md
         identifier: replaceme
-        role: documents
+        role: defines
       - file: CLAUDE.md
         identifier: Directory map
-        role: documents
+        role: defines
