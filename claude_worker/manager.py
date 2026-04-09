@@ -21,6 +21,7 @@ FIFO_SELECT_TIMEOUT_SECONDS: float = 1.0
 FIFO_READ_BUFFER_BYTES: int = 65536
 SIGTERM_WAIT_TIMEOUT_SECONDS: float = 10.0
 LOG_THREAD_JOIN_TIMEOUT_SECONDS: float = 5.0
+QUEUE_DRAIN_INTERVAL_SECONDS: float = 5.0
 
 # Env var override for the claude binary path. Tests set this to point at
 # a stub-claude script that emits canned JSONL output; production leaves
@@ -47,6 +48,83 @@ def _legacy_base_dir() -> Path:
     migration from /tmp to ~/.cwork/.
     """
     return Path(f"/tmp/claude-workers/{os.getuid()}")
+
+
+def get_queue_dir(name: str) -> Path:
+    """Return the message queue directory for a named worker."""
+    return Path.home() / ".cwork" / "queues" / name
+
+
+def enqueue_message(worker_name: str, sender: str, content: str) -> Path:
+    """Write a message to a worker's queue directory.
+
+    Returns the path of the queue file. Queue files are JSONL with
+    timestamp, sender, and content fields. Named with epoch-ns for
+    ordering.
+    """
+    queue_dir = get_queue_dir(worker_name)
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    msg = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "sender": sender,
+        "content": content,
+    }
+    # Epoch nanoseconds for unique, ordered filenames
+    filename = f"{time.time_ns()}.json"
+    msg_path = queue_dir / filename
+    msg_path.write_text(json.dumps(msg))
+    return msg_path
+
+
+def drain_queue(name: str, in_fifo: Path) -> int:
+    """Drain pending messages from a worker's queue into its FIFO.
+
+    Reads queue files in order, injects each as a synthetic user message
+    via the FIFO, and deletes the file after successful injection.
+    Returns the number of messages drained.
+
+    Best-effort: catches exceptions per-message so a corrupt queue file
+    doesn't block other messages.
+    """
+    queue_dir = get_queue_dir(name)
+    if not queue_dir.exists():
+        return 0
+
+    drained = 0
+    for msg_file in sorted(queue_dir.iterdir()):
+        if not msg_file.is_file() or not msg_file.name.endswith(".json"):
+            continue
+        try:
+            data = json.loads(msg_file.read_text())
+            sender = data.get("sender", "unknown")
+            content = data.get("content", "")
+            if not content:
+                msg_file.unlink(missing_ok=True)
+                continue
+
+            # Build the synthetic user message with sender attribution
+            envelope = json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": f"[reply-from:{sender}] {content}",
+                    },
+                }
+            )
+            # Write to FIFO via a non-blocking fd
+            wr = os.open(str(in_fifo), os.O_WRONLY | os.O_NONBLOCK)
+            try:
+                os.write(wr, (envelope + "\n").encode())
+            finally:
+                os.close(wr)
+
+            msg_file.unlink(missing_ok=True)
+            drained += 1
+        except (json.JSONDecodeError, OSError, BlockingIOError):
+            # Skip corrupt or unwritable — will retry next cycle
+            continue
+    return drained
 
 
 def get_runtime_dir(name: str) -> Path:
@@ -483,6 +561,8 @@ def _run_manager_forkless(
         # Open write end to keep FIFO alive (prevents EOF)
         wr_fd = os.open(str(in_fifo), os.O_WRONLY)
 
+        last_queue_drain = time.monotonic()
+
         try:
             while proc.poll() is None:
                 # Wait for data on the read fd
@@ -494,6 +574,15 @@ def _run_manager_forkless(
                     if data and proc.stdin:
                         proc.stdin.write(data)
                         proc.stdin.flush()
+
+                # Periodic queue drain — deliver pending reply messages
+                now = time.monotonic()
+                if now - last_queue_drain >= QUEUE_DRAIN_INTERVAL_SECONDS:
+                    last_queue_drain = now
+                    try:
+                        drain_queue(name, in_fifo)
+                    except Exception:
+                        pass  # best-effort, never crash the FIFO thread
         except (OSError, BrokenPipeError):
             # These are EXPECTED during normal shutdown (claude exits,
             # FIFO closes). Not a panic condition.

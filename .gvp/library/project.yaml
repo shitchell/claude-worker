@@ -684,3 +684,33 @@ decisions:
       - file: claude_worker/cli.py
         identifier: _collect_filtered_workers
         role: uses
+
+  - id: D21
+    name: callback-queue-guaranteed-delivery
+    decision: >
+      Guaranteed inter-agent message delivery uses a callback +
+      persistent queue pattern. Senders include [reply-to:<name>]
+      in multi-turn questions. Recipients run claude-worker reply
+      <name> "answer" which writes to ~/.cwork/queues/<name>/.
+      The manager drains the queue every 5s on the FIFO thread's
+      select() timeout, injecting replies as [reply-from:<sender>]
+      synthetic user messages. No status gate on reply — messages
+      persist even if the recipient is busy. Phase 2 (MCP server
+      for plain-session recipients) deferred.
+    origin: >
+      Ticket #028 (2026-04-09). Real failure: PM sent question to
+      GVP PM, got ack (closed send), but actual answer came in a
+      follow-up turn that was never delivered. Callback + queue
+      decouples sender from recipient's turn count.
+    tags: [fifo, architecture]
+    maps_to: [project:G1, project:G4]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: enqueue_message
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: drain_queue
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_reply
+        role: implements

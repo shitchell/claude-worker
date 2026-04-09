@@ -147,6 +147,7 @@ from claude_worker.manager import (
     archive_runtime_dir,
     cleanup_runtime_dir,
     create_runtime_dir,
+    enqueue_message,
     get_base_dir,
     get_runtime_dir,
     get_saved_worker,
@@ -2585,6 +2586,33 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_reply(args: argparse.Namespace) -> None:
+    """Send a reply to a worker's message queue.
+
+    Unlike ``send``, this writes to a persistent queue directory, not a
+    FIFO. The recipient's manager drains the queue on each poll cycle and
+    injects replies as synthetic user messages. No status gate — the reply
+    is stored even if the worker is busy or temporarily dead.
+
+    Designed for the callback pattern: a worker sends a question with
+    ``[reply-to:<name>]``, the recipient calls ``claude-worker reply
+    <name> "answer"`` when ready.
+    """
+    if args.message:
+        content = " ".join(args.message)
+    else:
+        content = sys.stdin.read()
+
+    if not content.strip():
+        print("Error: empty reply message", file=sys.stderr)
+        sys.exit(1)
+
+    sender = args.sender or _find_worker_by_ancestry() or "unknown"
+
+    msg_path = enqueue_message(args.name, sender, content)
+    print(f"Reply queued for '{args.name}' (from: {sender})")
+
+
 def cmd_notify(args: argparse.Namespace) -> None:
     """Send a notification to the human via the configured channel.
 
@@ -3996,6 +4024,20 @@ def main():
         "Use when the worker is stuck or the human is supervising.",
     )
 
+    # -- reply --
+    p_reply = sub.add_parser(
+        "reply",
+        help="Send a reply to a worker's message queue (persistent, no FIFO needed)",
+    )
+    p_reply.add_argument("name", help="Recipient worker name")
+    p_reply.add_argument(
+        "message", nargs="*", help="Reply text (reads stdin if omitted)"
+    )
+    p_reply.add_argument(
+        "--sender",
+        help="Sender identity (auto-detected from PID ancestry if omitted)",
+    )
+
     # -- notify --
     p_notify = sub.add_parser(
         "notify",
@@ -4149,6 +4191,7 @@ def main():
         "stop": cmd_stop,
         "replaceme": cmd_replaceme,
         "notify": cmd_notify,
+        "reply": cmd_reply,
         "install-hook": cmd_install_hook,
         "repl": cmd_repl,
         "tokens": cmd_tokens,

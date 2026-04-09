@@ -88,6 +88,11 @@ them to the PM.
    - Review the worker's output (read the diff, run the tests)
    - Report results back to the PM
 
+**Cross-worker replies**: when another worker sends you a question
+with `[reply-to:<name>]` that requires multi-turn work, complete
+the work and then run `claude-worker reply <name> "answer"` to
+deliver the response to their message queue.
+
 ## Default Operating Principles
 
 Same as the PM — these are inherited defaults that can be overridden:

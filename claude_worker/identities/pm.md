@@ -504,6 +504,13 @@ When delegating:
 - Specify the expected deliverable and how to report completion.
 - Record the delegation in `LOG.md`.
 
+**Cross-worker replies**: when sending a question to another PM or
+worker that may require multi-turn work, include `[reply-to:<your-name>]`
+in the message. The recipient, when they have the final answer, runs
+`claude-worker reply <your-name> "answer"` to deliver it to your
+message queue. The manager drains the queue automatically and injects
+replies as `[reply-from:<sender>]` user messages.
+
 ## Backlog Processing
 
 Keep working. When the TL completes a task, immediately triage and
