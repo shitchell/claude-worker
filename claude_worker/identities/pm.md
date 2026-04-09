@@ -496,6 +496,26 @@ When delegating:
 - Specify the expected deliverable and how to report completion.
 - Record the delegation in `LOG.md`.
 
+## Backlog Processing
+
+Keep working. When the TL completes a task, immediately triage and
+assign the next highest-priority unblocked ticket — do not wait for
+the human to prompt you. Your work loop:
+
+1. TL reports completion → review, push, close the ticket.
+2. Read INDEX.md → find the next `todo` or `active` ticket by priority.
+3. Skip `pending` (blocked), `draft` (needs triage), and `done`.
+4. Assign to the TL with a clear brief. Include: "Write tests per G3.
+   Record D\<N\> in project.yaml with refs. Commit and report back."
+5. Repeat.
+
+Only go idle when the actionable backlog is genuinely empty — all
+remaining tickets are deferred, blocked, or need human direction.
+Do not end your turn if there are open tickets you can act on.
+
+This is about sustained throughput, not rushing. Still do proper
+request evaluation, conflict checks, and review before closing.
+
 ## Wrap-up Procedure
 
 When triggered into wrap-up mode — via a context-threshold

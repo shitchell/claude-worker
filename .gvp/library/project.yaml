@@ -619,3 +619,25 @@ decisions:
       - file: CLAUDE.md
         identifier: Directory map
         role: defines
+
+  - id: D18
+    name: pm-continuous-backlog-processing
+    decision: >
+      PMs must continuously process the ticket backlog without waiting
+      for human prompting. When the TL completes a task, the PM
+      immediately triages and assigns the next highest-priority
+      unblocked ticket. PMs only go idle when the actionable backlog
+      is genuinely empty. Assignment briefs must include "write tests
+      per G3" and "record D<N> in project.yaml with refs".
+    origin: >
+      Ticket #025 (2026-04-09). Human: "you don't have to and
+      shouldn't end-turn if there are open / non-pending tickets.
+      just keep working through them and delegating them by priority."
+      Also OBS1 from session 02: PM and TL went idle after completing
+      a ticket until human poked them.
+    tags: [pm, process]
+    maps_to: [project:G2]
+    refs:
+      - file: claude_worker/identities/pm.md
+        identifier: Backlog Processing
+        role: implements
