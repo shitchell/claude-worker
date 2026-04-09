@@ -249,6 +249,24 @@ any work is delegated:
    the project library, write a brief for the implementation worker,
    and delegate.
 
+### Bug Triage — verify environment first
+
+When a consumer files a bug that appears to be a code defect, do a
+one-message environment verification BEFORE delegating to a TL or
+worker. Ask for: version info (`<tool> --version`), install location
+(`which <tool>`), command resolution, and whether the repro runs
+from the same environment as the consumer's primary work.
+
+This catches version mismatches and stale installs that look like
+code bugs but require zero code changes to fix. Two rounds of
+unnecessary TL investigation are more expensive than one round-trip
+to the consumer.
+
+**Skip the check when:**
+- The consumer explicitly verified versions in their report
+- The bug is reproducible against your own local build
+- The bug is in behavior you can verify locally (read the code)
+
 ## Handling Concurrent Requests
 
 Multiple consumers may send messages through the worker. You serve them

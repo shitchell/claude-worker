@@ -804,3 +804,24 @@ decisions:
       - file: claude_worker/cli.py
         identifier: _get_cwork_config
         role: implements
+
+  - id: D26
+    name: pm-bug-triage-verify-environment
+    decision: >
+      PMs must verify the consumer's environment (version, install
+      location, command resolution) before delegating bug reports to
+      TLs. One message round-trip catches version mismatches that
+      look like code bugs but require zero code changes. Exceptions:
+      consumer already verified versions, or bug is reproducible
+      against PM's own build.
+    origin: >
+      Ticket #032 (2026-04-09). Two incidents in two days against
+      the gvp PM: cairn version mismatch and stale global binary.
+      Both detectable in one message ("what does cairn --version
+      show?") but cost 15-30 min of TL investigation each.
+    tags: [pm, process, debugging]
+    maps_to: [project:P6, project:V4]
+    refs:
+      - file: claude_worker/identities/pm.md
+        identifier: Bug Triage
+        role: implements
