@@ -116,6 +116,7 @@ SENSITIVE_DENIAL_MARKER: str = "which is a sensitive file"
 
 from claude_worker.manager import (
     _atomic_write_text,
+    _legacy_base_dir,
     cleanup_runtime_dir,
     create_runtime_dir,
     get_base_dir,
@@ -1961,17 +1962,22 @@ def _format_worker_line(name: str) -> str | None:
 
 
 def cmd_list(args: argparse.Namespace) -> None:
-    """List all workers."""
-    base = get_base_dir()
-    if not base.exists():
-        return
+    """List all workers.
 
-    for entry in sorted(base.iterdir()):
-        if not entry.is_dir():
+    Scans both the new (~/.cwork/workers/) and legacy (/tmp/) base
+    directories to find workers from before and after the migration.
+    """
+    seen: set[str] = set()
+    for base in (get_base_dir(), _legacy_base_dir()):
+        if not base.exists():
             continue
-        line = _format_worker_line(entry.name)
-        if line:
-            print(line)
+        for entry in sorted(base.iterdir()):
+            if not entry.is_dir() or entry.name in seen:
+                continue
+            seen.add(entry.name)
+            line = _format_worker_line(entry.name)
+            if line:
+                print(line)
 
 
 def cmd_stop(args: argparse.Namespace) -> None:

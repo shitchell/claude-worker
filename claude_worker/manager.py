@@ -48,21 +48,51 @@ def _resolve_claude_bin() -> str:
 
 
 def get_base_dir() -> Path:
-    """Return /tmp/claude-workers/{UID}/."""
+    """Return ~/.cwork/workers/."""
+    return Path.home() / ".cwork" / "workers"
+
+
+def _legacy_base_dir() -> Path:
+    """Return the pre-migration /tmp/claude-workers/{UID}/ path.
+
+    Used for backwards compatibility with workers started before the
+    migration from /tmp to ~/.cwork/.
+    """
     return Path(f"/tmp/claude-workers/{os.getuid()}")
 
 
 def get_runtime_dir(name: str) -> Path:
-    """Return the runtime directory for a named worker."""
-    return get_base_dir() / name
+    """Return the runtime directory for a named worker.
+
+    Checks the current base dir first, then falls back to the legacy
+    /tmp/ path for workers started before the migration. Returns the
+    new-location path for workers that don't exist yet.
+    """
+    primary = get_base_dir() / name
+    if primary.exists():
+        return primary
+    legacy = _legacy_base_dir() / name
+    if legacy.exists():
+        return legacy
+    return primary
 
 
 def create_runtime_dir(name: str) -> Path:
-    """Create runtime directory with FIFOs. Returns the path."""
-    runtime = get_runtime_dir(name)
+    """Create runtime directory with FIFOs. Returns the path.
+
+    Always creates under the new base dir (~/.cwork/workers/).
+    Parent directories are created with mode 700.
+    """
+    runtime = get_base_dir() / name
     if runtime.exists():
         raise FileExistsError(f"Worker '{name}' already exists at {runtime}")
-    runtime.mkdir(parents=True)
+    # Also check legacy path to prevent name collisions across locations
+    legacy = _legacy_base_dir() / name
+    if legacy.exists():
+        raise FileExistsError(f"Worker '{name}' already exists at {legacy}")
+    runtime.mkdir(parents=True, mode=0o700)
+    # Ensure the base dir itself is 700 (mkdir parents inherit umask)
+    get_base_dir().chmod(0o700)
     os.mkfifo(runtime / "in")
     return runtime
 
@@ -101,14 +131,46 @@ def cleanup_runtime_dir(name: str) -> None:
     cmd_stop all race on this). Uses shutil.rmtree(ignore_errors=True)
     instead of iterdir+unlink so subdirectories are handled and a
     concurrent deletion between iterdir and unlink doesn't raise.
+
+    Checks both the new (~/.cwork/workers/) and legacy (/tmp/) paths
+    to handle workers started before the migration.
     """
-    runtime = get_runtime_dir(name)
-    shutil.rmtree(runtime, ignore_errors=True)
+    # Clean up in both possible locations
+    for base in (get_base_dir(), _legacy_base_dir()):
+        runtime = base / name
+        shutil.rmtree(runtime, ignore_errors=True)
 
 
 def get_sessions_file() -> Path:
     """Return path to the persistent name→session_id map."""
     return get_base_dir() / ".sessions.json"
+
+
+def _load_sessions() -> dict:
+    """Load sessions from the current path, merging legacy if needed.
+
+    Reads the new-location .sessions.json first. If it doesn't exist,
+    falls back to the legacy /tmp/ path. Legacy entries are included
+    but not migrated on disk — the next save_worker call writes to the
+    new location, effectively migrating that entry.
+    """
+    sessions: dict = {}
+    # Try legacy first (lower priority — new entries override)
+    legacy_path = _legacy_base_dir() / ".sessions.json"
+    if legacy_path.exists():
+        try:
+            sessions = json.loads(legacy_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    # New path overrides legacy entries
+    path = get_sessions_file()
+    if path.exists():
+        try:
+            new_sessions = json.loads(path.read_text())
+            sessions.update(new_sessions)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return sessions
 
 
 def save_worker(name: str, **kwargs) -> None:
@@ -119,12 +181,7 @@ def save_worker(name: str, **kwargs) -> None:
     leave a truncated .sessions.json that breaks future --resume.
     """
     path = get_sessions_file()
-    sessions = {}
-    if path.exists():
-        try:
-            sessions = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
+    sessions = _load_sessions()
     # Migrate legacy string entries (old format: name → session_id)
     existing = sessions.get(name)
     if isinstance(existing, str):
@@ -190,22 +247,17 @@ def get_saved_worker(name: str) -> dict | None:
     """Look up saved worker metadata by name.
 
     Returns a dict with keys like session_id, cwd, agent, claude_args.
-    Returns None if no entry exists.
+    Returns None if no entry exists. Checks both new and legacy session
+    files via _load_sessions.
     """
-    path = get_sessions_file()
-    if not path.exists():
+    sessions = _load_sessions()
+    entry = sessions.get(name)
+    if entry is None:
         return None
-    try:
-        sessions = json.loads(path.read_text())
-        entry = sessions.get(name)
-        if entry is None:
-            return None
-        # Migrate legacy string entries
-        if isinstance(entry, str):
-            return {"session_id": entry}
-        return entry
-    except (json.JSONDecodeError, OSError):
-        return None
+    # Migrate legacy string entries
+    if isinstance(entry, str):
+        return {"session_id": entry}
+    return entry
 
 
 def _detect_context_window_size(log_file: Path) -> int:

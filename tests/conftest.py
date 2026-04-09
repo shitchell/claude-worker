@@ -47,8 +47,12 @@ def fake_worker(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(cw_manager, "get_base_dir", lambda: base_dir)
     monkeypatch.setattr(cw_cli, "get_base_dir", lambda: base_dir)
-    # get_runtime_dir / get_saved_worker / get_sessions_file all derive from
-    # get_base_dir, so patching the two visible symbols is sufficient.
+    # Patch legacy base dir to an empty temp dir so fallback lookups
+    # don't hit real /tmp/claude-workers/ during tests.
+    legacy_dir = tmp_path / "legacy-workers"
+    legacy_dir.mkdir()
+    monkeypatch.setattr(cw_manager, "_legacy_base_dir", lambda: legacy_dir)
+    monkeypatch.setattr(cw_cli, "_legacy_base_dir", lambda: legacy_dir)
 
     def _factory(
         entries: list[dict[str, Any]],
@@ -127,6 +131,10 @@ def running_worker(tmp_path: Path, monkeypatch):
     base_dir.mkdir()
     monkeypatch.setattr(cw_manager, "get_base_dir", lambda: base_dir)
     monkeypatch.setattr(cw_cli, "get_base_dir", lambda: base_dir)
+    legacy_dir = tmp_path / "legacy-workers"
+    legacy_dir.mkdir()
+    monkeypatch.setattr(cw_manager, "_legacy_base_dir", lambda: legacy_dir)
+    monkeypatch.setattr(cw_cli, "_legacy_base_dir", lambda: legacy_dir)
 
     # Point manager at the stub-claude script
     monkeypatch.setenv("CLAUDE_WORKER_CLAUDE_BIN", str(STUB_CLAUDE_SCRIPT))
