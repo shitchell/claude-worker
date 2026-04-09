@@ -3096,6 +3096,21 @@ def _build_permission_hook_settings(
                 ],
             }
         ]
+    if cwd is not None:
+        ticket_watcher_command = (
+            f"{python_executable} -m claude_worker.ticket_watcher --cwd {cwd}"
+        )
+        hooks["PostToolUse"] = [
+            {
+                "matcher": matcher,
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": ticket_watcher_command,
+                    }
+                ],
+            }
+        ]
     return {"hooks": hooks}
 
 
