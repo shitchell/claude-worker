@@ -146,6 +146,7 @@ from claude_worker.manager import (
     get_base_dir,
     get_runtime_dir,
     get_saved_worker,
+    prune_archives,
     run_manager,
     save_worker,
 )
@@ -2099,8 +2100,12 @@ def cmd_list(args: argparse.Namespace) -> None:
     """List all workers with optional filters.
 
     Scans both the new (~/.cwork/workers/) and legacy (/tmp/) base
-    directories. Filters are composable with AND logic.
+    directories. Filters are composable with AND logic. Prunes old
+    archives (>30 days) as a side effect.
     """
+    # Prune old archives opportunistically
+    prune_archives()
+
     # Collect all workers
     workers: list[dict] = []
     seen: set[str] = set()
@@ -2109,6 +2114,9 @@ def cmd_list(args: argparse.Namespace) -> None:
             continue
         for entry in sorted(base.iterdir()):
             if not entry.is_dir() or entry.name in seen:
+                continue
+            # Skip archive directories (contain dots from timestamps)
+            if "." in entry.name:
                 continue
             seen.add(entry.name)
             info = _get_worker_info(entry.name)

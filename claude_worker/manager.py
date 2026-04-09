@@ -140,22 +140,59 @@ def archive_runtime_dir(name: str) -> Path | None:
     return archive_path
 
 
-def cleanup_runtime_dir(name: str) -> None:
-    """Remove runtime directory and all contents.
+ARCHIVE_RETENTION_DAYS: int = 30
 
-    Idempotent: safe to call on a non-existent directory or concurrently
-    from multiple callers (the SIGTERM handler, natural manager exit, and
-    cmd_stop all race on this). Uses shutil.rmtree(ignore_errors=True)
-    instead of iterdir+unlink so subdirectories are handled and a
-    concurrent deletion between iterdir and unlink doesn't raise.
+
+def cleanup_runtime_dir(name: str) -> None:
+    """Archive and then remove the runtime directory.
+
+    Archives the log and metadata to a timestamped directory under the
+    same base dir before deletion. If archival fails, falls back to
+    direct deletion. Idempotent: safe to call on a non-existent
+    directory or concurrently from multiple callers.
 
     Checks both the new (~/.cwork/workers/) and legacy (/tmp/) paths
     to handle workers started before the migration.
     """
-    # Clean up in both possible locations
+    # Try to archive before deleting (best-effort)
+    try:
+        archive_runtime_dir(name)
+    except Exception:
+        pass
+    # Clean up in both possible locations (archive may have moved the
+    # dir, but rmtree with ignore_errors handles non-existent paths)
     for base in (get_base_dir(), _legacy_base_dir()):
         runtime = base / name
         shutil.rmtree(runtime, ignore_errors=True)
+
+
+def prune_archives(max_age_days: int = ARCHIVE_RETENTION_DAYS) -> int:
+    """Remove archived worker directories older than max_age_days.
+
+    Archives are identified by their name pattern: they contain a
+    dot-separated timestamp (e.g., ``worker.20260409T010000.abc123``).
+    Active worker dirs don't contain dots in their names.
+
+    Returns the number of archives pruned.
+    """
+    cutoff = time.time() - (max_age_days * 86400)
+    pruned = 0
+    for base in (get_base_dir(), _legacy_base_dir()):
+        if not base.exists():
+            continue
+        for entry in base.iterdir():
+            if not entry.is_dir():
+                continue
+            # Archives have dots in their name (timestamp separator)
+            if "." not in entry.name:
+                continue
+            try:
+                if entry.stat().st_mtime < cutoff:
+                    shutil.rmtree(entry, ignore_errors=True)
+                    pruned += 1
+            except OSError:
+                continue
+    return pruned
 
 
 def get_sessions_file() -> Path:
