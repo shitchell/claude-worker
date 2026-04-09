@@ -869,12 +869,21 @@ def _ensure_cwork_dirs(cwd: str, pm: bool, tl: bool) -> None:
     # Global skeleton: ~/.cwork/
     home_cwork = Path.home() / ".cwork"
     for d in (
-        home_cwork / "gvp",
+        home_cwork / "gvp" / "library",
         home_cwork / "identities" / "pm" / "gvp",
         home_cwork / "identities" / "technical-lead",
         home_cwork / "workers",
     ):
         d.mkdir(parents=True, exist_ok=True)
+
+    # Create CATEGORIES.md manifest if missing
+    categories_md = home_cwork / "gvp" / "library" / "CATEGORIES.md"
+    if not categories_md.exists():
+        categories_md.write_text(
+            "# Categories\n\n"
+            "- [code](code/) — Coding principles: DRY, naming, style, circular imports\n"
+            "- [identities](identities/) — Role-specific guidance for PM and TL workers\n"
+        )
 
     # Project skeleton: <cwd>/.cwork/
     project_cwork = Path(cwd) / ".cwork"

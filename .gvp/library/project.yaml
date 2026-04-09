@@ -572,3 +572,26 @@ decisions:
       - file: claude_worker/cli.py
         identifier: PostToolUse
         role: implements
+
+  - id: D16
+    name: gvp-categorical-structure-emergent-manifest
+    decision: >
+      The global GVP library at ~/.cwork/gvp/library/ uses emergent
+      categories (directories) with a CATEGORIES.md manifest for
+      discovery. Categories are not fixed — any TL can add a new
+      directory and update the manifest. Each YAML file is
+      self-describing via its meta block (name, scope, description).
+      No schema enforcement tooling — the manifest is the discovery
+      mechanism.
+    origin: >
+      Ticket #018 (2026-04-09). TL assessed four questions: what
+      categories, how to discover, fixed vs emergent, schema vs
+      self-describing. Chose emergent + manifest over fixed categories
+      (too rigid) and config schema (requires tooling). CATEGORIES.md
+      auto-created by _ensure_cwork_dirs on first identity-mode start.
+    tags: [gvp, architecture]
+    maps_to: [project:V2, project:V5]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: CATEGORIES.md
+        role: implements
