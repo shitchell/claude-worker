@@ -25,10 +25,7 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_worker.cli import (
-    STOP_WRAPUP_MESSAGE,
-    cmd_stop,
-)
+from claude_worker.cli import cmd_stop
 from claude_worker.manager import get_runtime_dir
 
 _real_os_kill = os.kill

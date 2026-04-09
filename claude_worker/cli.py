@@ -48,11 +48,28 @@ QUEUE_WAIT_TIMEOUT_SECONDS: float = 600.0
 
 # Stop wrap-up — two-phase shutdown sends a wrap-up message before SIGTERM
 STOP_WRAPUP_TIMEOUT_SECONDS: float = 900.0
-STOP_WRAPUP_MESSAGE: str = (
-    "[system:stop-requested] Stop has been requested. Please complete your "
-    "wrap-up procedure and respond with 'wrap-up complete' when done. "
-    "You have up to 15 minutes."
-)
+ANALYZE_SESSION_SKILL_RESOURCE: str = "analyze-session.md"
+
+
+def _build_stop_wrapup_message() -> str:
+    """Build the stop wrap-up message with the bundled skill path."""
+    try:
+        from importlib.resources import files
+
+        skill_path = files("claude_worker") / "skills" / ANALYZE_SESSION_SKILL_RESOURCE
+        skill_hint = (
+            f" If the analyze-session skill is available, invoke it. "
+            f"Otherwise, read the instructions at {skill_path} and follow them "
+            f"to produce a session analysis before wrapping up."
+        )
+    except Exception:
+        skill_hint = ""
+    return (
+        "[system:stop-requested] Stop has been requested. Please complete your "
+        "wrap-up procedure and respond with 'wrap-up complete' when done."
+        f"{skill_hint} You have up to 15 minutes."
+    )
+
 
 # Hook installation
 HOOK_SCRIPT_SOURCE_NAME: str = "session-uuid-env-injection.sh"
@@ -2119,7 +2136,10 @@ def cmd_stop(args: argparse.Namespace) -> None:
                 msg = json.dumps(
                     {
                         "type": "user",
-                        "message": {"role": "user", "content": STOP_WRAPUP_MESSAGE},
+                        "message": {
+                            "role": "user",
+                            "content": _build_stop_wrapup_message(),
+                        },
                     }
                 )
                 # Use O_NONBLOCK to avoid hanging if the worker dies between
