@@ -659,4 +659,4 @@ decisions:
     refs:
       - file: claude_worker/identities/pm.md
         identifier: Src ID
-        role: documents
+        role: defines
