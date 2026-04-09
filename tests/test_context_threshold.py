@@ -1,24 +1,25 @@
 """Tests for context threshold notification (Feature 5).
 
-Verifies that _check_context_threshold fires a synthetic FIFO message
-when context usage crosses the threshold, respects the sentinel file,
-and never crashes on missing/empty logs.
+Verifies the context_threshold Stop hook module: _detect_context_window_size,
+sentinel one-shot behavior, and threshold detection via the main() entry point.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from claude_worker.manager import (
+from claude_worker.context_threshold import (
     CONTEXT_WAKEUP_THRESHOLD_PCT,
-    _check_context_threshold,
     _detect_context_window_size,
+    main,
 )
 from tests.conftest import make_system_init
 
@@ -48,8 +49,41 @@ def _write_log(log_path: Path, entries: list[dict]) -> None:
             f.write(json.dumps(entry) + "\n")
 
 
+def _make_hook_payload(transcript_path: str) -> dict:
+    """Build a minimal Stop hook JSON payload."""
+    return {
+        "session_id": "test-session",
+        "transcript_path": transcript_path,
+        "cwd": "/tmp",
+        "permission_mode": "bypassPermissions",
+        "hook_event_name": "Stop",
+        "stop_hook_active": False,
+    }
+
+
+def _run_main(payload: dict, sentinel_dir: str) -> str:
+    """Run main() with the given payload on stdin, return stdout."""
+    stdin_backup = sys.stdin
+    stdout_backup = sys.stdout
+    argv_backup = sys.argv
+    try:
+        sys.stdin = StringIO(json.dumps(payload))
+        captured = StringIO()
+        sys.stdout = captured
+        sys.argv = ["context_threshold", "--sentinel-dir", sentinel_dir]
+        try:
+            main()
+        except SystemExit:
+            pass
+        return captured.getvalue()
+    finally:
+        sys.stdin = stdin_backup
+        sys.stdout = stdout_backup
+        sys.argv = argv_backup
+
+
 # ---------------------------------------------------------------------------
-# _detect_context_window_size (manager-local copy)
+# _detect_context_window_size
 # ---------------------------------------------------------------------------
 
 
@@ -78,126 +112,97 @@ class TestDetectContextWindowSize:
 
 
 # ---------------------------------------------------------------------------
-# _check_context_threshold
+# main() — Stop hook entry point
 # ---------------------------------------------------------------------------
 
 
-class TestCheckContextThreshold:
-    """Test the one-shot context threshold notification."""
+class TestContextThresholdHook:
+    """Test the Stop hook via main()."""
 
-    def _setup(self, tmp_path: Path) -> tuple[Path, Path, Path]:
-        """Create runtime dir with log and FIFO, return (log, runtime, fifo)."""
-        runtime = tmp_path / "runtime"
-        runtime.mkdir()
-        log_path = runtime / "log"
-        in_fifo = runtime / "in"
-        os.mkfifo(in_fifo)
-        # Write a minimal log with a system/init so _detect_context_window_size works
+    def _setup(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Create a log file with system/init, return (log_path, sentinel_dir)."""
+        log_path = tmp_path / "log"
+        sentinel_dir = tmp_path / "sentinel"
+        sentinel_dir.mkdir()
         init = make_system_init("u1", "sess")
         init["model"] = "claude-opus-4-6[1m]"
         _write_log(log_path, [init])
-        return log_path, runtime, in_fifo
+        return log_path, sentinel_dir
 
-    def test_below_threshold_no_write(self, tmp_path: Path):
-        """When usage is below 80%, no sentinel and no FIFO write."""
-        log_path, runtime, in_fifo = self._setup(tmp_path)
-        sentinel = runtime / "wakeup-context-sent"
+    def test_below_threshold_no_output(self, tmp_path: Path):
+        """When usage is below 80%, no output and no sentinel."""
+        log_path, sentinel_dir = self._setup(tmp_path)
+        payload = _make_hook_payload(str(log_path))
 
-        # 50% of 1M = 500k tokens
         mock_usage = _make_cw_usage(500_000)
         with patch(
             "claude_logs.compute_context_window_usage",
             return_value=mock_usage,
         ):
-            _check_context_threshold(log_path, runtime, in_fifo)
+            output = _run_main(payload, str(sentinel_dir))
 
-        assert not sentinel.exists()
+        assert output == ""
+        assert not (sentinel_dir / "wakeup-context-sent").exists()
 
-    def test_above_threshold_fires(self, tmp_path: Path):
-        """When usage >= 80%, writes to FIFO and creates sentinel."""
-        log_path, runtime, in_fifo = self._setup(tmp_path)
-        sentinel = runtime / "wakeup-context-sent"
+    def test_above_threshold_prints_warning(self, tmp_path: Path):
+        """When usage >= 80%, prints warning and creates sentinel."""
+        log_path, sentinel_dir = self._setup(tmp_path)
+        payload = _make_hook_payload(str(log_path))
 
-        # 85% of 1M = 850k tokens
         mock_usage = _make_cw_usage(850_000)
-
-        # Open the FIFO read end so the write doesn't block/fail
-        rd_fd = os.open(str(in_fifo), os.O_RDONLY | os.O_NONBLOCK)
-        try:
-            with patch(
-                "claude_logs.compute_context_window_usage",
-                return_value=mock_usage,
-            ):
-                _check_context_threshold(log_path, runtime, in_fifo)
-
-            assert sentinel.exists()
-
-            # Read what was written to the FIFO
-            data = os.read(rd_fd, 65536)
-            msg = json.loads(data.decode())
-            assert msg["type"] == "user"
-            assert "[system:context-threshold]" in msg["message"]["content"]
-            assert "85%" in msg["message"]["content"]
-        finally:
-            os.close(rd_fd)
-
-    def test_already_fired_no_second_write(self, tmp_path: Path):
-        """When sentinel exists, skip even if threshold is crossed."""
-        log_path, runtime, in_fifo = self._setup(tmp_path)
-        sentinel = runtime / "wakeup-context-sent"
-        sentinel.write_text("")
-
-        mock_usage = _make_cw_usage(900_000)
-
-        # The FIFO read end is NOT opened — if a write were attempted
-        # with O_NONBLOCK it would raise. The function should bail before
-        # reaching the write because the sentinel already exists.
         with patch(
             "claude_logs.compute_context_window_usage",
             return_value=mock_usage,
         ):
-            _check_context_threshold(log_path, runtime, in_fifo)
+            output = _run_main(payload, str(sentinel_dir))
 
-        # No crash, sentinel still exists
-        assert sentinel.exists()
+        assert "[system:context-threshold]" in output
+        assert "85%" in output
+        assert (sentinel_dir / "wakeup-context-sent").exists()
 
-    def test_missing_log_no_crash(self, tmp_path: Path):
-        """Missing log file → no crash, no sentinel."""
-        runtime = tmp_path / "runtime"
-        runtime.mkdir()
-        log_path = runtime / "log"  # does not exist
-        in_fifo = runtime / "in"
-        os.mkfifo(in_fifo)
+    def test_sentinel_prevents_second_fire(self, tmp_path: Path):
+        """When sentinel exists, skip even if threshold is crossed."""
+        log_path, sentinel_dir = self._setup(tmp_path)
+        (sentinel_dir / "wakeup-context-sent").write_text("already fired")
+        payload = _make_hook_payload(str(log_path))
 
-        _check_context_threshold(log_path, runtime, in_fifo)
-
-        assert not (runtime / "wakeup-context-sent").exists()
-
-    def test_empty_log_no_crash(self, tmp_path: Path):
-        """Empty log file → no crash, no sentinel."""
-        runtime = tmp_path / "runtime"
-        runtime.mkdir()
-        log_path = runtime / "log"
-        log_path.write_text("")
-        in_fifo = runtime / "in"
-        os.mkfifo(in_fifo)
-
+        mock_usage = _make_cw_usage(900_000)
         with patch(
             "claude_logs.compute_context_window_usage",
-            return_value=None,
+            return_value=mock_usage,
         ):
-            _check_context_threshold(log_path, runtime, in_fifo)
+            output = _run_main(payload, str(sentinel_dir))
 
-        assert not (runtime / "wakeup-context-sent").exists()
+        assert output == ""
+
+    def test_stop_hook_active_bails(self, tmp_path: Path):
+        """When stop_hook_active is true, exit immediately."""
+        log_path, sentinel_dir = self._setup(tmp_path)
+        payload = _make_hook_payload(str(log_path))
+        payload["stop_hook_active"] = True
+
+        output = _run_main(payload, str(sentinel_dir))
+        assert output == ""
+
+    def test_missing_transcript_no_crash(self, tmp_path: Path):
+        """Missing transcript_path → no output, no crash."""
+        sentinel_dir = tmp_path / "sentinel"
+        sentinel_dir.mkdir()
+        payload = _make_hook_payload("/nonexistent/path")
+
+        output = _run_main(payload, str(sentinel_dir))
+        assert output == ""
 
     def test_compute_raises_no_crash(self, tmp_path: Path):
         """If compute_context_window_usage raises, no crash."""
-        log_path, runtime, in_fifo = self._setup(tmp_path)
+        log_path, sentinel_dir = self._setup(tmp_path)
+        payload = _make_hook_payload(str(log_path))
 
         with patch(
             "claude_logs.compute_context_window_usage",
             side_effect=OSError("disk on fire"),
         ):
-            _check_context_threshold(log_path, runtime, in_fifo)
+            output = _run_main(payload, str(sentinel_dir))
 
-        assert not (runtime / "wakeup-context-sent").exists()
+        assert output == ""
+        assert not (sentinel_dir / "wakeup-context-sent").exists()

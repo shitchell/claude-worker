@@ -2755,35 +2755,54 @@ def cmd_revoke(args: argparse.Namespace) -> None:
     print(f"Revoked grant '{target_id}' for worker '{args.name}'.")
 
 
-def _build_permission_hook_settings(grants_path: Path, python_executable: str) -> dict:
-    """Build the settings dict that wires the PreToolUse permission hook.
+def _build_permission_hook_settings(
+    grants_path: Path,
+    python_executable: str,
+    sentinel_dir: Path | None = None,
+) -> dict:
+    """Build the settings dict for per-worker hooks.
+
+    Wires two hooks:
+    1. PreToolUse — permission grant hook for Edit/Write/MultiEdit
+    2. Stop — context threshold check after each turn (if sentinel_dir provided)
 
     This is pure data — no I/O — so tests can assert on the shape
-    without touching the filesystem. The command string references the
-    given Python executable (so the venv's Python is used even if the
-    claude-subprocess CWD would otherwise find a different claude_worker)
-    and the given grants file path.
+    without touching the filesystem.
     """
     matcher = "|".join(PERMISSION_HOOK_TOOLS)
-    command = (
+    permission_command = (
         f"{python_executable} -m claude_worker.permission_grant "
         f"--grants-file {grants_path}"
     )
-    return {
-        "hooks": {
-            "PreToolUse": [
-                {
-                    "matcher": matcher,
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": command,
-                        }
-                    ],
-                }
-            ]
-        }
+    hooks: dict = {
+        "PreToolUse": [
+            {
+                "matcher": matcher,
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": permission_command,
+                    }
+                ],
+            }
+        ],
     }
+    if sentinel_dir is not None:
+        context_command = (
+            f"{python_executable} -m claude_worker.context_threshold "
+            f"--sentinel-dir {sentinel_dir}"
+        )
+        hooks["Stop"] = [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": context_command,
+                    }
+                ],
+            }
+        ]
+    return {"hooks": hooks}
 
 
 def _maybe_write_permission_settings(name: str, enabled: bool) -> Path | None:
@@ -2803,6 +2822,7 @@ def _maybe_write_permission_settings(name: str, enabled: bool) -> Path | None:
     settings = _build_permission_hook_settings(
         grants_path=grants_path,
         python_executable=sys.executable,
+        sentinel_dir=runtime,
     )
     _atomic_write_text(settings_path, json.dumps(settings, indent=2) + "\n")
     return settings_path
