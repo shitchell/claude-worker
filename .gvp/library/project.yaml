@@ -595,3 +595,27 @@ decisions:
       - file: claude_worker/cli.py
         identifier: CATEGORIES.md
         role: implements
+
+  - id: D17
+    name: docs-update-sessions-02-03
+    decision: >
+      README.md and CLAUDE.md updated to reflect features shipped in
+      sessions 02-03: replaceme, notify, ls filters, CWD guard, ticket
+      watcher, persistent session logs, context threshold Stop hook,
+      stop wrap-up improvements, and the ~/.cwork/workers/ migration.
+      Directory map updated with all new modules. Runtime directory
+      section updated to reflect ~/.cwork/workers/ path and archive
+      behavior.
+    origin: >
+      PM session 03 (2026-04-09). Docs were stale — referenced
+      /tmp/claude-workers/, listed ~90 tests (now ~170), and missed
+      8 new subcommands/hooks added across sessions 02-03.
+    tags: [craftsmanship]
+    maps_to: [project:V1]
+    refs:
+      - file: README.md
+        identifier: replaceme
+        role: documents
+      - file: CLAUDE.md
+        identifier: Directory map
+        role: documents

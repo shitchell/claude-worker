@@ -225,10 +225,19 @@ Exit codes:
 ### `list` / `ls`
 
 ```
-claude-worker list
+claude-worker list [--role pm|tl|worker] [--status working|waiting|dead|starting]
+                   [--alive] [--cwd PATH] [--format text|json]
 ```
 
-List all workers. Output format per worker:
+List all workers with optional filters. Filters are composable (AND logic).
+
+- `--role` — filter by identity type (pm, tl, or plain worker).
+- `--status` — filter by current status.
+- `--alive` — shorthand for excluding dead workers.
+- `--cwd PATH` — filter by working directory (prefix match).
+- `--format json` — one JSON object per line for scriptable output.
+
+Output format per worker:
 
 ```
   my-worker [PM]
@@ -249,11 +258,21 @@ List all workers. Output format per worker:
 ### `stop`
 
 ```
-claude-worker stop [--force] NAME
+claude-worker stop [--force] [--no-wrap-up] [--wrap-up-timeout SECONDS] NAME
 ```
 
-Stop a worker. Sends SIGTERM by default; SIGKILL with `--force`. The manager's
-signal handler cleans up the runtime directory before exiting.
+Stop a worker. Default behavior is two-phase: send a wrap-up message,
+wait for the turn to complete (up to 15 minutes), then SIGTERM.
+
+- `--force` — send SIGKILL instead of SIGTERM, skip wrap-up.
+- `--no-wrap-up` — skip the wrap-up message, go straight to SIGTERM.
+- `--wrap-up-timeout SECONDS` — maximum time to wait for wrap-up.
+  Must be >= the configured minimum (default 900s). Values below the
+  minimum are clamped with a stderr warning.
+
+The manager archives the runtime directory before cleanup, preserving
+logs and metadata for later review. Archives older than 30 days are
+pruned automatically on the next `ls` invocation.
 
 ### `tokens`
 
@@ -378,6 +397,51 @@ After installation, verify with:
 claude -p 'env | grep CLAUDE_SESSION_UUID'
 ```
 
+### `replaceme`
+
+```
+claude-worker replaceme [--skip-validation]
+```
+
+Replace the current worker with a fresh instance. Auto-detects which
+worker is calling by walking the process ancestry and matching against
+`claude-pid` files. Used by PM and TL workers to self-replace when
+approaching context limits.
+
+The command validates wrap-up completion (turn is idle, handoff file
+exists for PM/TL workers), then forks a detached replacer process that:
+
+1. Sends SIGUSR1 to the old manager (archives runtime dir instead of
+   deleting it)
+2. Waits for the old manager to exit
+3. Creates a new runtime dir with the same name
+4. Starts a fresh manager with `--resume` pointing at the old session
+
+- `--skip-validation` — skip wrap-up checks (for stuck workers or
+  human-supervised replacements).
+
+### `notify`
+
+```
+claude-worker notify [--worker NAME] MESSAGE
+```
+
+Send a notification to the human via the configured channel. Reads
+`~/.cwork/config.yaml`:
+
+```yaml
+notifications:
+  enabled: true
+  command: "curl -s -d '${MESSAGE}' https://ntfy.sh/my-topic"
+```
+
+The `command` is a shell template — `${MESSAGE}` is replaced with the
+notification text. Any shell command that accepts a message works
+(ntfy.sh, Slack webhooks, desktop notifications, etc.).
+
+Rate-limited to one notification per 60 seconds per worker. Best-effort:
+failures are logged to stderr, never crash the worker.
+
 ## PM mode (multi-consumer workers)
 
 A PM (**Project Manager**) worker is a single claude instance that coordinates
@@ -446,22 +510,31 @@ stderr warnings. Capped at 1000 entries to avoid unbounded growth.
 
 ## Runtime directory layout
 
-Each worker has a runtime directory at `/tmp/claude-workers/<UID>/<name>/`:
+Each worker has a runtime directory at `~/.cwork/workers/<name>/`:
 
 ```
-/tmp/claude-workers/1000/my-worker/
+~/.cwork/workers/my-worker/
 ├── in              # named FIFO, accepts stream-json user messages
 ├── log             # all claude stdout, newline-delimited JSONL
 ├── pid             # manager process PID
 ├── claude-pid      # claude subprocess PID (used by test harness)
 ├── session         # claude session ID (written after init)
-├── identity.md     # PM identity (PM workers only)
+├── settings.json   # per-worker hooks (permission, context, CWD guard, ticket watcher)
+├── identity.md     # PM/TL identity (identity workers only)
+├── grants.jsonl    # pre-authorized edits (permission-grant feature)
 └── missing-tags.json  # PM tag monitoring dedup log (PM workers only)
 ```
 
-Worker metadata (session ID, cwd, claude args, PM flag) is persisted to
-`/tmp/claude-workers/<UID>/.sessions.json`. Writes are atomic so a crash
+Worker metadata (session ID, cwd, claude args, PM/TL flags) is persisted to
+`~/.cwork/workers/.sessions.json`. Writes are atomic so a crash
 mid-save cannot truncate the file and break `--resume`.
+
+Workers started under the legacy path (`/tmp/claude-workers/<UID>/`) are
+found via backwards-compatible fallback.
+
+When a worker is stopped, its runtime directory is archived to a
+timestamped path (e.g., `my-worker.20260409T010000.abc123/`) before
+cleanup. Archives older than 30 days are pruned automatically.
 
 ## Examples
 

@@ -194,18 +194,27 @@ have more headroom than they do).
 claude_worker/
 ├── __init__.py              # version string
 ├── __main__.py              # `python -m claude_worker` entry
-├── cli.py                   # ~2000 lines; all subcommand handlers + helpers
-├── manager.py               # ~400 lines; daemon process + fork wrapper
+├── cli.py                   # all subcommand handlers + helpers
+├── manager.py               # daemon process + fork wrapper
+├── context_threshold.py     # Stop hook: context window check after each turn
+├── cwd_guard.py             # PreToolUse hook: deny writes outside worker CWD
+├── permission_grant.py      # PreToolUse hook: apply pre-authorized edits
+├── ticket_watcher.py        # PostToolUse hook: notify PM/TL of ticket changes
 ├── hooks/
 │   └── session-uuid-env-injection.sh  # pure-bash SessionStart hook
-└── identities/
-    └── pm.md                # PM worker behavioral contract
+├── identities/
+│   ├── pm.md                # PM worker behavioral contract
+│   └── technical-lead.md    # TL worker behavioral contract
+├── references/
+│   └── ai-driven-development.md  # AI dev guide (bundled)
+└── skills/
+    └── analyze-session.md   # session analysis skill (bundled)
 
 tests/
 ├── conftest.py              # fake_worker, running_worker, helpers
 ├── stub_claude.py           # stub claude binary (canonical + scripted modes)
 ├── stub_claude.sh           # wrapper accepting claude CLI flags
-└── test_*.py                # ~90 tests covering all subcommands
+└── test_*.py                # ~170 tests covering all subcommands
 ```
 
 ## Before merging
