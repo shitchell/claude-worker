@@ -1037,9 +1037,9 @@ def cmd_send(args: argparse.Namespace) -> None:
         print("Error: empty message", file=sys.stderr)
         sys.exit(1)
 
-    # Status gate: refuse to send to a busy worker unless --queue was passed.
+    # Status gate: refuse to send to a busy worker unless --queue or --dry-run.
     # `starting` is transient — wait for it to clear. `dead` is fatal.
-    if not args.queue:
+    if not args.queue and not getattr(args, "dry_run", False):
         try:
             status, _ = _wait_for_ready_state(args.name)
         except TimeoutError as exc:
@@ -1094,6 +1094,13 @@ def cmd_send(args: argparse.Namespace) -> None:
             "message": {"role": "user", "content": content},
         }
     )
+
+    if getattr(args, "dry_run", False):
+        print(json.dumps(json.loads(msg), indent=2))
+        return
+
+    if getattr(args, "verbose", False):
+        print(json.dumps(json.loads(msg), indent=2), file=sys.stderr)
 
     with open(in_fifo, "w") as f:
         f.write(msg + "\n")
@@ -3432,6 +3439,18 @@ def main():
         action="store_true",
         help="Send even if worker is busy; embed a correlation ID and wait "
         "for the specific tagged response",
+    )
+    p_send.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the JSON envelope that would be sent (with chat/queue "
+        "tags applied) without writing to the FIFO. Zero side effects.",
+    )
+    p_send.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print the JSON envelope to stderr before sending. "
+        "The message is still sent normally.",
     )
     p_send.add_argument(
         "--show-response",
