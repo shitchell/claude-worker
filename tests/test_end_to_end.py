@@ -237,7 +237,6 @@ class TestCmdSendEndToEnd:
         args = argparse.Namespace(
             name=handle.name,
             message=["hello", "from", "cmd_send"],
-            background=False,
             queue=False,
             show_response=False,
             show_full_response=False,

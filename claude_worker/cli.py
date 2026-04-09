@@ -986,12 +986,6 @@ def cmd_send(args: argparse.Namespace) -> None:
     in_fifo = runtime / "in"
     log_file = runtime / "log"
 
-    # --queue + --background is incoherent: the whole point of queue is
-    # correlation tracking, which requires waiting for the tagged response.
-    if args.queue and args.background:
-        print("Error: --queue and --background are mutually exclusive", file=sys.stderr)
-        sys.exit(1)
-
     if args.show_response and args.show_full_response:
         print(
             "Error: --show-response and --show-full-response are mutually exclusive",
@@ -1070,23 +1064,6 @@ def cmd_send(args: argparse.Namespace) -> None:
     with open(in_fifo, "w") as f:
         f.write(msg + "\n")
         f.flush()
-
-    if args.background:
-        _print_worker_status(args.name)
-        # Print the pre-send marker UUID so callers can pass it to
-        # `wait-for-turn --after-uuid` and avoid the scan-phase race where
-        # the prior turn's `result` message matches before claude processes
-        # the new input.
-        if marker_uuid:
-            # Short-form UUID for readability. `_uuid_matches` is
-            # case-insensitive prefix-based, so the 8-char prefix is
-            # sufficient as a marker in practice.
-            print(
-                f"\nTo wait for THIS turn's response: "
-                f"claude-worker wait-for-turn {args.name} "
-                f"--after-uuid {marker_uuid[:UUID_SHORT_LENGTH]}"
-            )
-        return
 
     if queue_id is not None:
         rc = _wait_for_queue_response(args.name, queue_id, after_uuid=marker_uuid)
@@ -2998,11 +2975,6 @@ examples:
   claude-worker send researcher "summarize the architecture of this repo"
   claude-worker read researcher --last-turn
 
-  # Fire-and-forget with --background
-  claude-worker send researcher "do something long" --background
-  # ... do other work ...
-  claude-worker wait-for-turn researcher
-
   # Follow output in real-time
   claude-worker read researcher --follow
 
@@ -3111,11 +3083,6 @@ def main():
     p_send.add_argument("name", help="Worker name")
     p_send.add_argument(
         "message", nargs="*", help="Message text (reads stdin if omitted)"
-    )
-    p_send.add_argument(
-        "--background",
-        action="store_true",
-        help="Return immediately without waiting for claude's response",
     )
     p_send.add_argument(
         "--queue",
@@ -3232,11 +3199,10 @@ def main():
         "--after-uuid",
         metavar="UUID",
         help=(
-            "Only consider log entries appearing AFTER this UUID. Use this "
-            "with the canonical `send --background` + `wait-for-turn` "
-            "workflow: capture the last log UUID before sending, then pass "
-            "it here so wait-for-turn doesn't match the prior turn's "
-            "`result` message before the new input reaches claude."
+            "Only consider log entries appearing AFTER this UUID. Pass the "
+            "last log UUID captured before sending, so wait-for-turn "
+            "doesn't match the prior turn's `result` message before the "
+            "new input reaches claude."
         ),
     )
     p_wait.add_argument(

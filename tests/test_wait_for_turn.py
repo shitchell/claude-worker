@@ -8,10 +8,8 @@ and returns 0 immediately — handing a stale "turn done" to the caller.
 Fix: `_wait_for_turn(after_uuid=marker)` skips entries up to and including
 the marker, so a caller that captured the last UUID before writing can
 avoid the stale match. cmd_send already does this (cli.py marker_uuid).
-But the `wait-for-turn` CLI subcommand did NOT expose --after-uuid, so
-the documented `send --background` + `wait-for-turn` workflow was racy.
-
-Imp-1: expose --after-uuid on the wait-for-turn CLI and wire it through.
+The `wait-for-turn` CLI subcommand also exposes --after-uuid for external
+callers who need the same race protection.
 """
 
 from __future__ import annotations
@@ -116,8 +114,8 @@ class TestWaitForTurnAfterUuid:
 
 class TestWaitForTurnCliSurface:
     """The wait-for-turn subcommand must accept --after-uuid and pass it
-    through to _wait_for_turn. Without this, the canonical fire-and-forget
-    workflow `send --background; wait-for-turn` is racy."""
+    through to _wait_for_turn so external callers get the same race
+    protection that cmd_send uses internally."""
 
     def test_cmd_wait_for_turn_passes_after_uuid_through(
         self, fake_worker, monkeypatch

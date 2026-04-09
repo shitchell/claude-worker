@@ -119,25 +119,22 @@ subprocess lifecycle.
 ### `send`
 
 ```
-claude-worker send [--background] [--queue] [--show-response | --show-full-response]
+claude-worker send [--queue] [--show-response | --show-full-response]
                    [--chat ID | --all-chats]
                    NAME [MESSAGE...]
 ```
 
-Send a user message to a worker. Message can be positional args or piped via
-stdin:
+Send a user message to a worker. Blocks until the worker responds. Message
+can be positional args or piped via stdin:
 
 ```bash
 echo "analyze this code" | claude-worker send myworker
 ```
 
-- `--background` — return immediately without waiting. Prints a hint with
-  the pre-send marker UUID for `wait-for-turn --after-uuid`.
 - `--queue` — bypass the status gate; embed a `[queue:<epoch-ms>]` correlation
   tag in the message and wait for the specific tagged response. Use this when
   multiple senders might be producing responses concurrently, or when you
-  need to send to a worker that's still processing a previous turn. Mutually
-  exclusive with `--background`.
+  need to send to a worker that's still processing a previous turn.
 - `--show-response` — after the turn completes, print only the assistant's
   response.
 - `--show-full-response` — after the turn completes, print everything new
@@ -210,10 +207,9 @@ Block until claude finishes its current turn.
 
 - `--timeout SECONDS` — total time budget before returning 2 (timeout).
 - `--after-uuid UUID` — ignore log entries up to and including this UUID.
-  Use this with the `send --background` + `wait-for-turn` workflow to avoid
-  matching the prior turn's `result` message before the new input reaches
-  claude. `send --background` prints a ready-made `wait-for-turn --after-uuid
-  X` hint with the pre-send marker.
+  Pass the last log UUID captured before sending, so wait-for-turn doesn't
+  match the prior turn's `result` message before the new input reaches
+  claude.
 - `--settle SECONDS` — after detecting a turn boundary, wait this long and
   confirm no new messages appeared before returning. Default 3s. Prevents
   false positives when the worker briefly idles between internal subagent
@@ -470,12 +466,6 @@ mid-save cannot truncate the file and break `--resume`.
 ## Examples
 
 ```bash
-# Fire-and-forget with --background (race-safe via marker UUID)
-claude-worker send researcher "long task" --background
-# Prints: "To wait for THIS turn's response: claude-worker wait-for-turn ..."
-# ... do other work ...
-claude-worker wait-for-turn researcher --after-uuid abc12345
-
 # Queue multiple messages through a busy worker
 claude-worker send worker1 "task 1" --queue &
 claude-worker send worker1 "task 2" --queue &

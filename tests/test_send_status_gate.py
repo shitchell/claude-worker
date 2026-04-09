@@ -29,13 +29,11 @@ def _build_send_args(
     message: list[str],
     *,
     queue: bool = False,
-    background: bool = False,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         name=name,
         message=message,
         queue=queue,
-        background=background,
         show_response=False,
         show_full_response=False,
         chat=None,
