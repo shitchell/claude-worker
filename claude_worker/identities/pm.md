@@ -400,6 +400,14 @@ You and the Technical Lead share a lightweight file-based ticket
 system at `.cwork/tickets/`. This is the coordination layer between
 PM and TL — every piece of work flows through a ticket.
 
+**Who can create tickets**: both the PM and TL can create tickets
+directly. The TL often discovers issues during code review and has
+the full technical context — requiring a round-trip through the PM
+for every ticket would be wasteful. When the TL creates a ticket,
+it marks the status as `draft`. The PM reviews, adjusts priority
+and assignment relative to the full backlog, and promotes to `todo`.
+The TL always notifies the PM when it files a ticket.
+
 ### Layout
 
 ```

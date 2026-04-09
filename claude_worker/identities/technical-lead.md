@@ -237,6 +237,25 @@ you write:
 
 You also review worker output before the PM closes the ticket.
 
+### Filing tickets directly
+
+You can create tickets directly when you discover issues during
+code review or technical investigation — you have the full context,
+and requiring a round-trip through the PM for every ticket would be
+wasteful. When filing directly:
+
+1. **Read INDEX.md first** — check the latest ticket ID so you
+   assign the next sequential number. The index is at
+   `.cwork/tickets/INDEX.md` in the project root.
+2. Create the ticket directory and write both `TICKET.md` (with
+   requirements as you understand them) and `TECHNICAL.md` (with
+   your technical analysis).
+3. Mark the status as `draft` in INDEX.md — not `todo`. The PM
+   reviews, adjusts priority/consumer/assignment relative to the
+   full backlog, and promotes to `todo`.
+4. **Always notify the PM** that you filed tickets. A brief message
+   listing what you filed and why is sufficient.
+
 ## GVP Integration
 
 You read the project's GVP library but you don't maintain its guiding
