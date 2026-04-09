@@ -1,0 +1,483 @@
+meta:
+  name: claude-worker
+  scope: project
+  definitions:
+    tags:
+      architecture:
+        description: Code structure and module organization
+      cairn:
+        description: GVP/cairn integration decisions
+      correctness:
+        description: Correctness guarantees and invariants
+      craftsmanship:
+        description: Code quality, naming, and readability
+      debugging:
+        description: Debugging process and diagnostics
+      delegation:
+        description: Work delegation to sub-workers or agents
+      dry:
+        description: Don't Repeat Yourself principle
+      durability:
+        description: Crash safety and data persistence
+      efficiency:
+        description: Performance and resource usage
+      fifo:
+        description: Named FIFO plumbing and IPC
+      gitignore:
+        description: Version control exclusion decisions
+      gvp:
+        description: Goals, Values, and Principles framework
+      handoff:
+        description: PM session handoff and continuity
+      identity:
+        description: Project and worker identity mechanisms
+      naming:
+        description: Naming conventions and renames
+      observability:
+        description: Logging, monitoring, and failure visibility
+      performance:
+        description: Runtime performance optimization
+      pm:
+        description: Project Manager worker behavior
+      process:
+        description: Development workflow and methodology
+      races:
+        description: Race condition prevention and fixes
+      refactor:
+        description: Code restructuring decisions
+      regression-safety:
+        description: Preventing regressions via tests
+      state-awareness:
+        description: Worker state detection and management
+      status:
+        description: Worker status detection logic
+      testing:
+        description: Test infrastructure and methodology
+      tokens:
+        description: Token accounting and context window tracking
+
+goals:
+  - id: G1
+    name: race-free-send-wait
+    statement: >
+      Every send/wait interaction between the parent CLI and the claude
+      subprocess must be immune to stale-state races. A caller who writes
+      to the FIFO and then waits for a turn boundary must only match
+      turn boundaries that occur AFTER their own write, never prior
+      turns' boundaries that were already in the log.
+    tags: [correctness, races]
+    maps_to: []
+
+  - id: G2
+    name: loud-over-silent-failure
+    statement: >
+      When a subsystem fails (daemon thread crash, sensitive file gate,
+      send envelope mismatch, test fixture disabling the tested
+      condition), the failure must produce an observable signal —
+      either a sentinel log line, a stderr warning, a worker state
+      transition to `dead`, or a test that fails for the right reason.
+      A worker that appears alive but is actually broken is worse
+      than a dead worker because operators don't know to investigate.
+    tags: [observability, state-awareness]
+    maps_to: []
+
+  - id: G3
+    name: test-first-with-real-conditions
+    statement: >
+      Every bugfix and feature lands with a test that would fail if
+      the production change were reverted. Tests must exercise the
+      SAME conditions as production — speedups via monkey-patch must
+      not disable the very thing being tested.
+    tags: [testing, regression-safety]
+    maps_to: []
+
+  - id: G4
+    name: composable-subcommands
+    statement: >
+      Every new subcommand or flag should compose cleanly with the
+      existing CLI surface. Shared helpers (_wait_for_turn,
+      _resolve_chat_id, _render_one_message, _iter_log_reverse) are
+      reused across multiple subcommands rather than reimplemented.
+    tags: [architecture, dry]
+    maps_to: []
+
+values:
+  - id: V1
+    name: clarity-over-cleverness
+    statement: >
+      Obvious code beats impressive code. Descriptive names, explicit
+      signatures, "why" comments only. One-liners that save two lines
+      but cost understanding are a net loss.
+    tags: [craftsmanship]
+    maps_to: []
+
+  - id: V2
+    name: explicit-over-implicit
+    statement: >
+      No hidden state, no side-channel parameters, no magic globals.
+      Function signatures show all dependencies. Constants are named
+      and documented at the point of definition, not inferred from
+      usage.
+    tags: [craftsmanship]
+    maps_to: []
+
+  - id: V3
+    name: atomic-persistence
+    statement: >
+      User-critical state (settings.json, .sessions.json,
+      missing-tags.json) is written atomically via sibling .tmp +
+      os.replace. A crash mid-write must leave the old content
+      intact. Non-atomic writes to these files are a bug.
+    tags: [correctness, durability]
+    maps_to: []
+
+  - id: V4
+    name: delegation-beats-self-discovery
+    statement: >
+      When the task is "investigate an unfamiliar system" and the
+      worker is not already expert, prefer a subagent or sub-worker
+      over self-reasoning. Fresh context is faster AND more accurate
+      than loaded context. Memory-based claims about unfamiliar APIs
+      should be verified before stating.
+    tags: [process, efficiency]
+    maps_to: []
+
+  - id: V5
+    name: one-contiguous-block
+    statement: >
+      A feature should live in one place, not scattered across
+      multiple files. If a feature forces changes in 5+ files,
+      reconsider the architecture before committing.
+    tags: [architecture]
+    maps_to: []
+
+principles:
+  - id: P1
+    name: capture-marker-before-fifo-write
+    statement: >
+      Before writing a user message to a worker's FIFO, capture the
+      current last-uuid of the log as a marker. Pass this marker as
+      after_uuid to any subsequent wait-for-turn or
+      wait-for-queue-response call so the scan phase skips past prior
+      turn boundaries. Applies to cmd_send, cmd_repl, and any future
+      caller that writes-then-waits.
+    tags: [races, fifo]
+    maps_to: [project:G1]
+
+  - id: P2
+    name: named-constants-for-all-magic-numbers
+    statement: >
+      Every timeout, threshold, retry count, buffer size, poll
+      interval, and display limit is a module-level UPPER_SNAKE_CASE
+      constant with a docstring or inline comment explaining its
+      rationale.
+    tags: [craftsmanship]
+    maps_to: [project:V1, project:V2]
+
+  - id: P3
+    name: atomic-write-for-user-state
+    statement: >
+      Code that writes settings.json, .sessions.json, missing-tags.json,
+      or similar persistent state files uses manager._atomic_write_text.
+      Direct path.write_text calls to these paths are forbidden.
+    tags: [durability]
+    maps_to: [project:V3]
+
+  - id: P4
+    name: test-real-conditions-not-monkey-patched-away
+    statement: >
+      When speeding up a test, prefer controllable injection
+      (stub_delay_ms, time.monotonic clock advancer, stub session IDs)
+      over disabling the condition. Ask "what is the minimum production
+      change that would make this test fail?" — if the answer is
+      "removing the monkey-patch", the test is broken.
+    tags: [testing]
+    maps_to: [project:G3]
+
+  - id: P5
+    name: fix-class-of-bug-not-instance
+    statement: >
+      When fixing a race, state-machine regression, or filter/display
+      mismatch in one call site, grep for all other sites with the
+      same shape and apply the fix uniformly before committing.
+    tags: [debugging, process]
+    maps_to: [project:G1, project:G2]
+
+  - id: P6
+    name: try-before-look-is-wrong
+    statement: >
+      When a thing silently fails or behaves unexpectedly, the FIRST
+      action is to inspect current state of inputs and outputs, not
+      to try a variant approach. Looking is cheaper than trying.
+    tags: [debugging]
+    maps_to: [project:V4]
+
+  - id: P7
+    name: publish-dont-discover
+    statement: >
+      When a test or external tool needs a value the owning code
+      already has (subprocess PID, session ID, marker UUID), publish
+      it to a sidecar file or stdout from the owning code. Don't
+      reverse-engineer identity from outside the source of truth.
+    tags: [testing, process]
+    maps_to: [project:V4]
+
+  - id: P8
+    name: loud-thread-panic-handling
+    statement: >
+      Any daemon thread in the manager wraps its body in a panic
+      handler that writes a sentinel JSONL line to the log AND
+      SIGTERMs the manager's own PID.
+    tags: [observability]
+    maps_to: [project:G2]
+
+  - id: P9
+    name: idempotent-cleanup
+    statement: >
+      cleanup_runtime_dir and similar cleanup helpers must be safe
+      to call from multiple concurrent callers. Use
+      shutil.rmtree(ignore_errors=True), missing_ok flags, and
+      explicit try/except around potentially-racy operations.
+    tags: [durability]
+    maps_to: [project:V3, project:G2]
+
+decisions:
+  - id: D1
+    name: status-idle-threshold-seconds-unified
+    decision: >
+      STATUS_IDLE_THRESHOLD_SECONDS = 3.0 is applied as a display-level
+      debounce in get_worker_status. A turn-end is reported as `waiting`
+      only if the log mtime is at least the threshold old; fresher
+      turn-ends are reported as `working`. Applied uniformly to ls,
+      REPL idle check, status lines after send/start, and send's
+      status gate.
+    origin: >
+      REPL feature implementation (P7 of 2026-04-07/08 session). User
+      explicitly chose unified (option a) over split display-vs-gate
+      (option b). Risk: send gate inherits ~3s post-turn latency.
+    tags: [status, races]
+    maps_to: [project:P1, project:P5]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: STATUS_IDLE_THRESHOLD_SECONDS constant and get_worker_status mtime check
+        role: implements
+
+  - id: D2
+    name: wait-for-turn-after-uuid-marker-everywhere
+    decision: >
+      _wait_for_turn, _wait_for_queue_response, and cmd_repl's
+      post-send wait all accept an after_uuid parameter. Callers
+      capture _get_last_uuid(log_file) BEFORE writing to the FIFO.
+      This is the canonical fix for the write-then-wait race class.
+    origin: >
+      First discovered P1 during --show-response implementation. Bit
+      again in P5 Imp-1 (CLI missing flag), P5 Imp-6 (queue response
+      had same race), P8 (REPL post-send wait used status-mtime
+      instead). Each incident expanded the same fix. Pattern P5
+      (fix-class-of-bug-not-instance) was named from this.
+    tags: [races, fifo]
+    maps_to: [project:P1, project:P5]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _wait_for_turn after_uuid param, _get_last_uuid marker capture in cmd_send, cmd_repl, cmd_stop
+        role: implements
+
+  - id: D3
+    name: stub-claude-harness-via-env-var
+    decision: >
+      End-to-end tests use tests/stub_claude.sh as a drop-in for the
+      claude binary, selected via CLAUDE_WORKER_CLAUDE_BIN. run_manager
+      is a thin wrapper around _run_manager_forkless(install_signals);
+      tests drive the forkless helper directly in a thread with
+      install_signals=False. Manager writes runtime/claude-pid after
+      Popen so tests can SIGTERM the stub directly.
+    origin: >
+      Round 4 Tier A (P6) to unblock _read_follow and cmd_send
+      end-to-end tests deferred from Round 3. The claude-pid
+      sidecar follows P7 (publish-don't-discover).
+    tags: [testing, architecture]
+    maps_to: [project:P7, project:G3]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: CLAUDE_BIN_ENV_VAR, _resolve_claude_bin, _run_manager_forkless, claude-pid sidecar
+        role: implements
+      - file: tests/stub_claude.sh
+        identifier: Stub claude binary for test injection
+        role: implements
+      - file: tests/conftest.py
+        identifier: running_worker fixture with CLAUDE_WORKER_CLAUDE_BIN env var
+        role: implements
+
+  - id: D4
+    name: atomic-writes-for-user-critical-state
+    decision: >
+      manager._atomic_write_text(path, content) is the only path for
+      writing settings.json (install-hook), .sessions.json (save_worker),
+      and missing-tags.json (_handle_missing_tag_reports).
+    origin: >
+      Round 3 Imp-8 (code review finding). settings.json corruption
+      was flagged as highest-risk; fix extended to all three files
+      because the helper cost is trivial.
+    tags: [durability]
+    maps_to: [project:P3, project:V3]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: _atomic_write_text function, used by save_worker
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _atomic_write_text used by cmd_install_hook, _handle_missing_tag_reports
+        role: implements
+
+  - id: D5
+    name: reverse-log-iterator-for-tail-queries
+    decision: >
+      _iter_log_reverse(path, chunk_size=8192) yields JSONL entries
+      newest-to-oldest via reverse chunk reads. Used by 5 callers
+      (_get_last_uuid, _get_last_assistant_preview, get_worker_status,
+      _wait_for_turn scan, _read_static fast path) in place of
+      forward full-log scans.
+    origin: >
+      Round 3 Imp-5 (code review performance finding). Long PM logs
+      made ls expensive. Written as one helper with 11 tests covering
+      chunk boundaries, malformed JSON, empty files, and laziness.
+    tags: [performance]
+    maps_to: [project:V5]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _iter_log_reverse function and its 5 callers
+        role: implements
+      - file: tests/test_log_reverse_iter.py
+        identifier: 11 tests covering chunk boundaries, malformed JSON, laziness
+        role: implements
+
+  - id: D6
+    name: token-stats-via-claugs-delegation
+    decision: >
+      Token accounting lives in claugs (claude_logs package), not in
+      claude-worker. Dependency floor: claugs>=0.6.7. claude-worker
+      surfaces values via ls, tokens subcommand, read --context, and
+      the REPL banner by importing compute_token_stats and
+      compute_context_window_usage.
+    origin: >
+      P9 of 2026-04-08 session. User asked claude-worker to figure
+      out its own token usage. Delegated to a PM worker in the claugs
+      repo which delegated to a sub-worker; the sub-worker discovered
+      the multi-line-per-response JSONL quirk (30-72% inflation in
+      naive line-summing) and built the API. V4 (delegation) validated.
+    tags: [delegation, tokens]
+    maps_to: [project:V4, project:G4]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: cmd_tokens, _format_context_window_label, REPL banner — all import from claude_logs
+        role: implements
+      - file: pyproject.toml
+        identifier: claugs>=0.6.7 dependency floor
+        role: implements
+
+  - id: D7
+    name: gitignore-pm-workspace
+    decision: >
+      .claude-worker-pm/ is gitignored in claude-worker and claugs.
+      Per-environment runtime state shouldn't travel in git.
+      NOTE: directory name to be renamed to .cwork/pm/ (see D9).
+    origin: >
+      P9 of 2026-04-08 session. User: "we'll gitignore it for now;
+      easy enough to undo or unignore specific files on an
+      as-needed basis."
+    tags: [gitignore]
+    maps_to: [project:V2]
+    refs:
+      - file: .gitignore
+        identifier: .cwork/pm/ and .claude-worker-pm/ entries
+        role: implements
+
+  - id: D8
+    name: pm-handoff-packet-cwork-pm-handoffs
+    decision: >
+      PM wrap-up produces a handoff packet at
+      .cwork/pm/handoffs/<timestamp>.md. Fresh PMs read the latest
+      handoff at startup. Contents: active consumers, in-flight
+      work, conflicts needing resolution, cross-project dependencies,
+      decisions made this session with GVP refs, next-action
+      recommendation, open questions, environment state.
+    origin: >
+      P10 of 2026-04-08 session. User approved maintaining handoffs
+      as a running record: "having that record just seems useful."
+      This session produces the first handoff as a prototype while
+      the wrap-up automation is still being built.
+    tags: [pm, handoff]
+    maps_to: [project:G2]
+    refs:
+      - file: claude_worker/identities/pm.md
+        identifier: per-session handoff packets
+        role: implements
+
+  - id: D9
+    name: cwork-namespace-rename-deferred
+    decision: >
+      Runtime directory .claude-worker-pm/ will be renamed to
+      .cwork/pm/ in a future pass. claude-worker global state will
+      live under ~/.cwork/; PM identity global library at
+      ~/.cwork/identities/pm/gvp/; claude-worker global GVP library
+      at ~/.cwork/gvp/.
+    origin: >
+      P10 of 2026-04-08 session. User: "i think .cwork/pm/ is a
+      little cleaner that .claude-worker-pm/ :p and allows
+      flexibility for future claude-worker stuff." Backwards-
+      incompatible accepted since the project has a single user.
+    tags: [naming, refactor]
+    maps_to: [project:V5]
+    refs:
+      - file: .gitignore
+        identifier: Both .cwork/ and .claude-worker-pm/ entries reflect the rename
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: .cwork/pm/ paths in PM startup and chat routing code
+        role: implements
+
+  - id: D10
+    name: gvp-uuid-as-project-identity
+    decision: >
+      cairn init generates a project_id UUID that is the
+      authoritative project identity. Project name is display-only.
+      ~/.gvp/cache/by-id/<uuid>.yml tracks where each project lives
+      (local paths, git URLs) with last_seen timestamps. Consumer
+      requests to a PM must include a [project:<uuid>] tag so
+      decisions are traceable across machines and clones.
+    origin: >
+      P10 of 2026-04-08 session. User wanted UUID-as-identity
+      because git origin URLs can change (project starts local,
+      moves to repo). Tight cairn/claude-worker coupling accepted
+      given imminent TypeScript port where they'd become proper
+      package dependencies.
+    tags: [identity, cairn]
+    maps_to: [project:V2, project:G4]
+    refs:
+      - file: .gvp/config.yaml
+        identifier: project_id
+        role: defines
+
+  - id: D11
+    name: pm-four-tier-library-inheritance
+    decision: >
+      PM workers consult four GVP libraries in decreasing authority:
+      (1) project lib at <project>/.gvp/library — authoritative,
+      validated by cairn;
+      (2) PM personal lib at <project>/.cwork/pm/gvp/ — working
+      notes, not validated;
+      (3) PM identity global lib at ~/.cwork/identities/pm/gvp/ —
+      shared across all PMs, read-only guidance;
+      (4) claude-worker global lib at ~/.cwork/gvp/ — worker-wide
+      rules, read-only guidance.
+      cairn validate on the project library looks at ONLY the
+      project library. Promotion from PM personal to project is
+      explicit.
+    origin: >
+      P10 of 2026-04-08 session. User wanted a personal PM lib
+      without making the project's GVP library dependent on it.
+    tags: [pm, gvp]
+    maps_to: [project:V5, project:V2]
+    refs:
+      - file: claude_worker/identities/pm.md
+        identifier: Maintain the project's GVP library
+        role: implements
