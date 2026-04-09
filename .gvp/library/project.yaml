@@ -737,3 +737,25 @@ decisions:
       - file: claude_worker/cli.py
         identifier: chat_tag
         role: implements
+
+  - id: D23
+    name: wait-for-turn-after-uuid-verified-correct
+    decision: >
+      Investigation of reported silent no-op (#030) confirmed the
+      code is correct. When after_uuid is the most recent entry,
+      the reverse scan breaks at the marker (turn_end stays None),
+      falls through to the tail loop, and polls/times out correctly.
+      The consumer's report was likely caused by a dead worker
+      (rc=1) or missing --after-uuid flag. Three regression tests
+      added to guard the correct behavior.
+    origin: >
+      Ticket #030 (2026-04-09). TAStest consumer reported silent
+      exit 0 on wait-for-turn --after-uuid. TL investigation per
+      P6 (look before trying) confirmed all three hypotheses are
+      false — the code handles the edge case correctly.
+    tags: [races, debugging]
+    maps_to: [project:G2, project:P6]
+    refs:
+      - file: tests/test_wait_after_uuid_edge.py
+        identifier: TestAfterUuidMostRecent
+        role: implements
