@@ -641,3 +641,22 @@ decisions:
       - file: claude_worker/identities/pm.md
         identifier: Backlog Processing
         role: implements
+
+  - id: D19
+    name: ticket-source-tracking-columns
+    decision: >
+      INDEX.md uses Src (human/PM/TL/consumer name) and Src ID
+      (chat:<uuid> or repl:<pid>-<pts>) columns for ticket
+      provenance. repl: = definitively human, chat: = agent.
+      Also includes Blocked-by and Closes columns. PM identity
+      docs updated with column semantics.
+    origin: >
+      Ticket #026 (2026-04-09). Human noticed #010 was misattributed
+      as internal when it was human-originated. Split Consumer into
+      Src + Src ID to separate identity from semantics.
+    tags: [pm, process]
+    maps_to: [project:G2, project:V2]
+    refs:
+      - file: claude_worker/identities/pm.md
+        identifier: Src ID
+        role: documents

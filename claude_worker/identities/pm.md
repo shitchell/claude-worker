@@ -426,14 +426,22 @@ One line per ticket, markdown table. This is the single source of
 truth for ticket status — no symlinks, no derived state.
 
 ```markdown
-| ID | Slug | Status | Priority | Assigned | Consumer |
-|----|------|--------|----------|----------|----------|
-| 001 | fix-fifo-race | active | high | worker-abc | chat:xyz123 |
-| 002 | add-repl-multiline | todo | medium | - | chat:tastest |
-| 003 | bootstrap-gvp | done | high | lead | - |
+| ID | Slug | Status | Priority | Assigned | Src | Src ID | Blocked-by | Closes |
+|----|------|--------|----------|----------|-----|--------|------------|--------|
+| 001 | fix-fifo-race | active | high | worker-abc | human | repl:123-pts3 | - | pm |
+| 002 | add-repl-multiline | todo | medium | - | TAStest | chat:abc123 | - | pm |
+| 003 | bootstrap-gvp | done | high | lead | PM | - | - | lead |
 ```
 
-Status values: `todo`, `active`, `review`, `done`.
+Columns:
+- **Src** — who originated: `human`, `PM`, `TL`, or a consumer name.
+- **Src ID** — the `chat:<uuid>` or `repl:<pid>-<pts>` identifier.
+  `repl:` = definitively human (agents have no interactive shell).
+  `chat:` = agent (routed via claude-worker send). `-` = unknown.
+- **Blocked-by** — ticket ID this depends on, or `-`.
+- **Closes** — who closes: `pm`, `lead`, or `human`.
+
+Status values: `todo`, `pending`, `active`, `review`, `done`.
 
 ### Lifecycle
 
