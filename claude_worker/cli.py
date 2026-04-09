@@ -96,6 +96,12 @@ REPL_IDLE_POLL_INTERVAL_SECONDS: float = 0.25
 REPL_INPUT_PROMPT: str = "you> "
 REPL_EXIT_COMMANDS: frozenset[str] = frozenset({"/exit", "/quit"})
 
+# Replaceme — auto-restart mechanism
+REPLACEME_ANCESTOR_WALK_MAX: int = 5
+REPLACEME_OLD_MANAGER_WAIT_TIMEOUT: float = 30.0
+REPLACEME_OLD_MANAGER_POLL_INTERVAL: float = 0.5
+REPLACEME_HANDOFF_MAX_AGE_MINUTES: int = 30
+
 # Context window size detection. Claude Code models with the `[1m]`
 # suffix (e.g., `claude-opus-4-6[1m]`) use a 1M context window; all
 # others default to the standard 200K. See _detect_context_window_size.
@@ -117,6 +123,7 @@ SENSITIVE_DENIAL_MARKER: str = "which is a sensitive file"
 from claude_worker.manager import (
     _atomic_write_text,
     _legacy_base_dir,
+    archive_runtime_dir,
     cleanup_runtime_dir,
     create_runtime_dir,
     get_base_dir,
@@ -2053,6 +2060,266 @@ def cmd_stop(args: argparse.Namespace) -> None:
         print(f"Cleaned up {runtime}")
 
 
+def _get_ppid(pid: int) -> int | None:
+    """Read the parent PID of a process from /proc.
+
+    Returns None if the process doesn't exist or /proc is unavailable.
+    Linux/WSL2 only — macOS would need ``ps -o ppid= -p PID``.
+    """
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("PPid:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _find_worker_by_ancestry() -> str | None:
+    """Walk the process ancestry looking for a claude-pid match.
+
+    Claude Code Bash tool invocations create this process tree:
+    claude (Node.js) → bash -c '...' → command. The ``claude-pid``
+    file in each worker's runtime dir stores the claude process PID.
+    This function walks up from the current process, checking each
+    ancestor against all workers' claude-pid files.
+
+    Bounded to REPLACEME_ANCESTOR_WALK_MAX levels to prevent runaway
+    walks. Handles subshells and pipes (which add extra levels).
+    """
+    pid = os.getpid()
+    for _ in range(REPLACEME_ANCESTOR_WALK_MAX):
+        pid = _get_ppid(pid)
+        if pid is None or pid <= 1:
+            return None
+        # Scan all worker runtime dirs for a matching claude-pid
+        for base in (get_base_dir(), _legacy_base_dir()):
+            if not base.exists():
+                continue
+            for entry in base.iterdir():
+                if not entry.is_dir():
+                    continue
+                claude_pid_file = entry / "claude-pid"
+                if claude_pid_file.exists():
+                    try:
+                        if int(claude_pid_file.read_text().strip()) == pid:
+                            return entry.name
+                    except (ValueError, OSError):
+                        continue
+    return None
+
+
+def _validate_wrapup(name: str, runtime: Path) -> str | None:
+    """Check that wrap-up is complete. Returns an error message or None.
+
+    Tier 1 (universal): worker must be idle (turn complete).
+    Tier 2 (identity-specific): PM/TL workers must have a recent
+    handoff file.
+    """
+    status, _ = get_worker_status(runtime)
+    if status == "working":
+        return f"Worker '{name}' is still working. Wait for the current turn to complete."
+    if status == "dead":
+        return f"Worker '{name}' is dead. Nothing to replace."
+
+    # Identity-specific checks
+    saved = get_saved_worker(name)
+    if not saved:
+        return None  # no metadata = plain worker, skip identity checks
+
+    cwd = saved.get("cwd", "")
+    if not cwd:
+        return None
+
+    handoff_dirs: list[Path] = []
+    if saved.get("pm"):
+        handoff_dirs.append(Path(cwd) / ".cwork" / "pm" / "handoffs")
+    if saved.get("team_lead"):
+        handoff_dirs.append(Path(cwd) / ".cwork" / "technical-lead" / "handoffs")
+
+    for handoff_dir in handoff_dirs:
+        if not handoff_dir.exists():
+            return (
+                f"No handoff directory at {handoff_dir}. "
+                f"Complete your wrap-up procedure before calling replaceme."
+            )
+        handoff_files = sorted(handoff_dir.iterdir())
+        if not handoff_files:
+            return (
+                f"No handoff files in {handoff_dir}. "
+                f"Write a handoff file before calling replaceme."
+            )
+        newest = handoff_files[-1]
+        age_minutes = (time.time() - newest.stat().st_mtime) / 60
+        if age_minutes > REPLACEME_HANDOFF_MAX_AGE_MINUTES:
+            return (
+                f"Most recent handoff ({newest.name}) is {int(age_minutes)} minutes old. "
+                f"Write a fresh handoff before calling replaceme."
+            )
+
+    return None
+
+
+def cmd_replaceme(args: argparse.Namespace) -> None:
+    """Replace the current worker with a fresh instance.
+
+    Auto-detects which worker is calling by walking the process
+    ancestry and matching against claude-pid files. Forks a detached
+    replacer process that sends SIGUSR1 to the old manager, waits
+    for it to archive and exit, then starts a new manager with the
+    same identity and session.
+    """
+    # 1. Auto-detect which worker we belong to
+    worker_name = _find_worker_by_ancestry()
+    if worker_name is None:
+        print(
+            "Error: could not determine which worker this command is running in. "
+            "replaceme must be called from inside a worker's Bash tool.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    runtime = get_runtime_dir(worker_name)
+    print(f"Detected worker: {worker_name}")
+
+    # 2. Read worker metadata
+    saved = get_saved_worker(worker_name)
+    if not saved:
+        print(f"Error: no saved metadata for worker '{worker_name}'", file=sys.stderr)
+        sys.exit(1)
+
+    session_id = saved.get("session_id")
+    if not session_id:
+        print(f"Error: no session_id for worker '{worker_name}'", file=sys.stderr)
+        sys.exit(1)
+
+    # 3. Validate wrap-up (unless --skip-validation)
+    if not args.skip_validation:
+        error = _validate_wrapup(worker_name, runtime)
+        if error:
+            print(f"Error: {error}", file=sys.stderr)
+            print("Use --skip-validation to override.", file=sys.stderr)
+            sys.exit(1)
+
+    # 4. Read old manager PID
+    pid_file = runtime / "pid"
+    try:
+        old_manager_pid = int(pid_file.read_text().strip())
+    except (ValueError, OSError):
+        print("Error: cannot read manager PID", file=sys.stderr)
+        sys.exit(1)
+
+    if not pid_alive(old_manager_pid):
+        print(f"Error: manager process {old_manager_pid} is not alive", file=sys.stderr)
+        sys.exit(1)
+
+    # 5. Prepare replacement parameters
+    cwd = saved.get("cwd")
+    # Reconstruct claude_args: saved args + --resume
+    saved_args = saved.get("claude_args") or []
+    claude_args = ["--resume", session_id] + saved_args
+    pm_mode = saved.get("pm", False)
+    tl_mode = saved.get("team_lead", False)
+
+    print(f"Forking replacer process (old manager PID: {old_manager_pid})...")
+
+    # 6. Fork a detached replacer process BEFORE signaling.
+    # The replacer survives the old claude process's death.
+    child_pid = os.fork()
+    if child_pid > 0:
+        # Parent (the Bash tool invocation) — exit immediately.
+        # The replacer runs independently.
+        print(f"Replacer forked (PID: {child_pid}). Replacement in progress.")
+        return
+
+    # --- Child: detached replacer process ---
+    os.setsid()
+    # Redirect stdio to /dev/null so the orphaned process doesn't
+    # hold open any pipes to the dying claude process.
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, 0)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    os.close(devnull)
+
+    try:
+        # 6a. Send SIGUSR1 to old manager
+        os.kill(old_manager_pid, signal.SIGUSR1)
+
+        # 6b. Wait for old manager to die
+        deadline = time.monotonic() + REPLACEME_OLD_MANAGER_WAIT_TIMEOUT
+        while time.monotonic() < deadline:
+            if not pid_alive(old_manager_pid):
+                break
+            time.sleep(REPLACEME_OLD_MANAGER_POLL_INTERVAL)
+        else:
+            # Timeout — escalate to SIGTERM
+            try:
+                os.kill(old_manager_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            time.sleep(2.0)
+
+        # 6c. The old manager archived the runtime dir (SIGUSR1 handler).
+        # The worker name is now free. Create new runtime dir.
+        new_runtime = create_runtime_dir(worker_name)
+
+        # 6d. Write identity file if PM or TL
+        if pm_mode or tl_mode:
+            identity_path = new_runtime / "identity.md"
+            if tl_mode:
+                identity_resource = TL_IDENTITY_RESOURCE
+            else:
+                identity_resource = PM_IDENTITY_RESOURCE
+            identity_content = _load_bundled_resource("identities", identity_resource)
+            identity_path.write_text(identity_content)
+            # Prepend --append-system-prompt-file to claude_args
+            claude_args = ["--append-system-prompt-file", str(identity_path)] + claude_args
+
+        # 6e. Write permission settings if applicable
+        permission_settings = _maybe_write_permission_settings(
+            name=worker_name, enabled=True
+        )
+        if permission_settings is not None:
+            claude_args = ["--settings", str(permission_settings)] + claude_args
+
+        # 6f. Save worker metadata (same as cmd_start)
+        save_worker(
+            worker_name,
+            cwd=cwd or os.getcwd(),
+            claude_args=saved_args,  # save without --resume prefix
+            pm=pm_mode,
+            team_lead=tl_mode,
+        )
+
+        # 6g. Determine initial message for the new session
+        initial_message = None
+        if pm_mode:
+            initial_message = PM_INTERNALIZE_MESSAGE
+        elif tl_mode:
+            initial_message = TL_INTERNALIZE_MESSAGE
+
+        # 6h. Fork the new manager daemon (same pattern as cmd_start)
+        manager_pid = os.fork()
+        if manager_pid == 0:
+            # Grandchild: the new manager
+            run_manager(worker_name, cwd, claude_args, initial_message)
+            sys.exit(0)
+        # Replacer: wait for the new manager's PID file, then exit
+        new_pid_file = new_runtime / "pid"
+        pid_deadline = time.monotonic() + 10.0
+        while time.monotonic() < pid_deadline:
+            if new_pid_file.exists():
+                break
+            time.sleep(0.1)
+        sys.exit(0)
+    except Exception:
+        # Best-effort: if anything goes wrong, don't leave the
+        # replacer process lingering.
+        sys.exit(1)
+
+
 def _load_bundled_resource(subdir: str, filename: str) -> str:
     """Return the text contents of a resource bundled with the package.
 
@@ -3239,6 +3506,19 @@ def main():
         help="Skip the wrap-up message and go straight to SIGTERM",
     )
 
+    # -- replaceme --
+    p_replace = sub.add_parser(
+        "replaceme",
+        help="Replace the current worker with a fresh instance. "
+        "Auto-detects which worker is calling via PID ancestry.",
+    )
+    p_replace.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help="Skip wrap-up validation checks (handoff file, turn state). "
+        "Use when the worker is stuck or the human is supervising.",
+    )
+
     # -- install-hook --
     p_hook = sub.add_parser(
         "install-hook",
@@ -3375,6 +3655,7 @@ def main():
         "list": cmd_list,
         "ls": cmd_list,
         "stop": cmd_stop,
+        "replaceme": cmd_replaceme,
         "install-hook": cmd_install_hook,
         "repl": cmd_repl,
         "tokens": cmd_tokens,

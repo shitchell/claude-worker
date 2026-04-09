@@ -123,6 +123,35 @@ def _atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
+def archive_runtime_dir(name: str) -> Path | None:
+    """Rename runtime directory to a timestamped archive path.
+
+    Used by the SIGUSR1 (graceful replace) handler to preserve the
+    runtime dir for the replacement manager to read session metadata
+    from. The archive path is deterministic from the name + timestamp +
+    session ID prefix.
+
+    Returns the archive path, or None if the runtime dir doesn't exist.
+    """
+    runtime = get_runtime_dir(name)
+    if not runtime.exists():
+        return None
+    timestamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    session_id = ""
+    try:
+        session_id = (runtime / "session").read_text().strip()[:8]
+    except OSError:
+        pass
+    suffix = f".{session_id}" if session_id else ""
+    archive_name = f"{name}.{timestamp}{suffix}"
+    archive_path = runtime.parent / archive_name
+    try:
+        os.rename(runtime, archive_path)
+    except OSError:
+        return None
+    return archive_path
+
+
 def cleanup_runtime_dir(name: str) -> None:
     """Remove runtime directory and all contents.
 
@@ -438,24 +467,41 @@ def _run_manager_forkless(
     # Wrapped in try/except so a stuck claude (subprocess.TimeoutExpired)
     # doesn't leave the manager tracebacked and the runtime dir uncleaned.
     # On timeout, escalate to SIGKILL and clean up unconditionally.
-    def handle_term(signum, frame):
+    def _kill_claude():
+        """Terminate the claude subprocess, escalating to SIGKILL on timeout."""
+        proc.terminate()
         try:
-            proc.terminate()
+            proc.wait(timeout=SIGTERM_WAIT_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.kill()
             try:
                 proc.wait(timeout=SIGTERM_WAIT_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                try:
-                    proc.wait(timeout=SIGTERM_WAIT_TIMEOUT_SECONDS)
-                except subprocess.TimeoutExpired:
-                    pass  # claude is truly stuck; cleanup anyway
+                pass  # claude is truly stuck; cleanup anyway
+
+    def handle_term(signum, frame):
+        try:
+            _kill_claude()
         finally:
             cleanup_runtime_dir(name)
+            sys.exit(0)
+
+    def handle_replace(signum, frame):
+        """Graceful replace: kill claude, archive runtime dir, exit.
+
+        Unlike handle_term, does NOT delete the runtime dir. The
+        replacement manager needs the session file for --resume.
+        """
+        try:
+            _kill_claude()
+        finally:
+            archive_runtime_dir(name)
             sys.exit(0)
 
     if install_signals:
         signal.signal(signal.SIGTERM, handle_term)
         signal.signal(signal.SIGINT, handle_term)
+        signal.signal(signal.SIGUSR1, handle_replace)
 
     # Session ID capture event
     session_captured = threading.Event()
