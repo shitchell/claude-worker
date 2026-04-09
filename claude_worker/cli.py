@@ -151,7 +151,11 @@ def _get_wrapup_timeout_minimum() -> float:
     """Read the wrap-up timeout minimum from config, defaulting to the constant."""
     config = _get_cwork_config()
     try:
-        return float(config.get("stop", {}).get("wrap_up_timeout_minimum", STOP_WRAPUP_TIMEOUT_SECONDS))
+        return float(
+            config.get("stop", {}).get(
+                "wrap_up_timeout_minimum", STOP_WRAPUP_TIMEOUT_SECONDS
+            )
+        )
     except (TypeError, ValueError):
         return STOP_WRAPUP_TIMEOUT_SECONDS
 
