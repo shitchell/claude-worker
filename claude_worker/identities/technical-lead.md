@@ -256,6 +256,18 @@ wasteful. When filing directly:
 4. **Always notify the PM** that you filed tickets. A brief message
    listing what you filed and why is sufficient.
 
+### Closing tickets
+
+You can close tickets you own when:
+- The work is complete (review delivered, code merged, tests passing)
+- No PM decision is pending (no unresolved consumer conflicts, no
+  GVP guiding element gaps needing human approval)
+- You notify the PM after closing
+
+If a ticket involves a consumer request or a GVP decision, the PM
+closes it — the PM records the decision and notifies the consumer.
+When in doubt, mark the ticket as `review` and let the PM close.
+
 ## GVP Integration
 
 You read the project's GVP library but you don't maintain its guiding
