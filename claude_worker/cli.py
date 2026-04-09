@@ -46,6 +46,14 @@ LOG_REVERSE_CHUNK_SIZE: int = 8192
 # Queue correlation
 QUEUE_WAIT_TIMEOUT_SECONDS: float = 600.0
 
+# Stop wrap-up — two-phase shutdown sends a wrap-up message before SIGTERM
+STOP_WRAPUP_TIMEOUT_SECONDS: float = 600.0
+STOP_WRAPUP_MESSAGE: str = (
+    "[system:stop-requested] Stop has been requested. Please complete your "
+    "wrap-up procedure and respond with 'wrap-up complete' when done. "
+    "You have up to 10 minutes."
+)
+
 # Hook installation
 HOOK_SCRIPT_SOURCE_NAME: str = "session-uuid-env-injection.sh"
 HOOK_SCRIPT_INSTALL_PATH: Path = (
@@ -73,6 +81,15 @@ MISSING_TAG_PREVIEW_MAX_CHARS: int = 100
 # two of distinct misses without growing unbounded; eviction is a
 # no-op in normal operation where misses are rare.
 MISSING_TAG_LOG_MAX_ENTRIES: int = 1000
+
+# Team Lead (TL) mode
+TL_IDENTITY_RESOURCE: str = "technical-lead.md"
+TL_INTERNALIZE_MESSAGE: str = (
+    "Read the project's documentation (README.md, CLAUDE.md, docs/). "
+    "Export and read the GVP library if one exists. Familiarize yourself "
+    "with the codebase structure. Run the test suite and report the "
+    "baseline state. Then report your readiness to the PM."
+)
 
 # REPL
 REPL_IDLE_POLL_INTERVAL_SECONDS: float = 0.25
@@ -798,9 +815,11 @@ def cmd_start(args: argparse.Namespace) -> None:
 
     # Handle --resume: restore saved startup vars (cwd, claude_args)
     claude_args = list(args.claude_args or [])
-    # Determine whether this worker is a PM worker. For new workers, the
-    # --pm flag drives this. For resumes, we check the saved metadata.
+    # Determine whether this worker is a PM or TL worker. For new workers,
+    # the --pm / --team-lead flag drives this. For resumes, we check the
+    # saved metadata. These are mutually exclusive (enforced by argparse).
     pm_mode = args.pm
+    tl_mode = args.team_lead
     if args.resume:
         saved = get_saved_worker(name)
         if not saved or not saved.get("session_id"):
@@ -815,26 +834,27 @@ def cmd_start(args: argparse.Namespace) -> None:
         claude_args = (
             ["--resume", saved["session_id"]] + (saved.get("claude_args") or []) + extra
         )
-        # Resumed workers inherit PM mode from saved metadata
+        # Resumed workers inherit identity mode from saved metadata
         if saved.get("pm"):
             pm_mode = True
+        if saved.get("team_lead"):
+            tl_mode = True
     else:
         # Build claude_args with --agent etc. (order matters: agent first)
         if args.agent:
             claude_args = ["--agent", args.agent] + claude_args
 
-    # --pm mode: inject --append-system-prompt-file pointing at the runtime
-    # dir's identity.md. The runtime dir path is deterministic from `name`
-    # so we can reference it before creating the dir; we write the identity
-    # file after create_runtime_dir but before the fork, so the manager
-    # subprocess always finds it when spawning claude.
+    # Identity mode (--pm or --team-lead): inject --append-system-prompt-file
+    # pointing at the runtime dir's identity.md. The runtime dir path is
+    # deterministic from `name` so we can reference it before creating the
+    # dir; we write the identity file after create_runtime_dir but before
+    # the fork, so the manager subprocess always finds it when spawning claude.
+    identity_mode = pm_mode or tl_mode
     identity_path: Path | None = None
-    if pm_mode and not args.resume:
-        # For a fresh PM worker, add the identity arg. For resume, the
-        # saved claude_args already contain it.
+    if identity_mode and not args.resume:
         identity_path = get_runtime_dir(name) / "identity.md"
         claude_args = ["--append-system-prompt-file", str(identity_path)] + claude_args
-    elif pm_mode and args.resume:
+    elif identity_mode and args.resume:
         # On resume, recompute the identity path so we can rewrite the file
         # (the previous runtime dir was cleaned up on stop)
         identity_path = get_runtime_dir(name) / "identity.md"
@@ -848,11 +868,12 @@ def cmd_start(args: argparse.Namespace) -> None:
         cwd=args.cwd or os.getcwd(),
         claude_args=saved_args,
         pm=pm_mode,
+        team_lead=tl_mode,
     )
 
     # Build initial message from prompt-file and/or prompt.
-    # For PM workers with no user-provided prompt, inject a canonical
-    # internalization message so the PM runs its startup recovery logic.
+    # For identity workers with no user-provided prompt, inject a canonical
+    # internalization message so the worker runs its startup logic.
     parts = []
     if args.prompt_file:
         parts.append(Path(args.prompt_file).read_text())
@@ -860,6 +881,8 @@ def cmd_start(args: argparse.Namespace) -> None:
         parts.append(args.prompt)
     if not parts and pm_mode:
         parts.append(PM_INTERNALIZE_MESSAGE)
+    if not parts and tl_mode:
+        parts.append(TL_INTERNALIZE_MESSAGE)
     initial_message = "\n\n".join(parts) if parts else None
 
     # Create runtime directory
@@ -869,10 +892,14 @@ def cmd_start(args: argparse.Namespace) -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Write the PM identity file into the runtime dir. Must happen BEFORE
+    # Write the identity file into the runtime dir. Must happen BEFORE
     # the fork so the manager subprocess sees it when spawning claude.
     if identity_path is not None:
-        identity_content = _load_bundled_resource("identities", PM_IDENTITY_RESOURCE)
+        if tl_mode:
+            identity_resource = TL_IDENTITY_RESOURCE
+        else:
+            identity_resource = PM_IDENTITY_RESOURCE
+        identity_content = _load_bundled_resource("identities", identity_resource)
         identity_path.write_text(identity_content)
 
     # Write the per-worker settings.json that wires the PreToolUse
@@ -1915,10 +1942,11 @@ def _format_worker_line(name: str) -> str | None:
         except OSError:
             pass
 
-    # Read CWD + PM flag from saved worker metadata
+    # Read CWD + identity flags from saved worker metadata
     cwd = "-"
     saved = get_saved_worker(name)
     is_pm = bool(saved and saved.get("pm"))
+    is_tl = bool(saved and saved.get("team_lead"))
     if saved and saved.get("cwd"):
         home = os.path.expanduser("~")
         if saved["cwd"].startswith(home):
@@ -1945,9 +1973,9 @@ def _format_worker_line(name: str) -> str | None:
     context_label = _format_context_window_label(log_file)
     context_line = f"\n    context: {context_label}" if context_label else ""
 
-    pm_tag = " [PM]" if is_pm else ""
+    identity_tag = " [PM]" if is_pm else " [TL]" if is_tl else ""
     return (
-        f"  {name}{pm_tag}\n"
+        f"  {name}{identity_tag}\n"
         f"    pid: {pid}  status: {status}{idle_str}  cwd: {cwd}\n"
         f"    session: {session}"
         f"{preview_line}"
@@ -1970,7 +1998,13 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 
 def cmd_stop(args: argparse.Namespace) -> None:
-    """Stop a worker."""
+    """Stop a worker.
+
+    Two-phase shutdown (default): if the worker is alive, write a wrap-up
+    message to the FIFO, wait for the turn to complete (up to
+    STOP_WRAPUP_TIMEOUT_SECONDS), then send SIGTERM. ``--no-wrap-up``
+    or ``--force`` skip straight to the signal.
+    """
     runtime = resolve_worker(args.name)
     pid_file = runtime / "pid"
 
@@ -1985,6 +2019,39 @@ def cmd_stop(args: argparse.Namespace) -> None:
         print("Error: invalid PID file", file=sys.stderr)
         cleanup_runtime_dir(args.name)
         sys.exit(1)
+
+    # Two-phase wrap-up: if the worker is alive and wrap-up is enabled,
+    # send a wrap-up message and wait for the turn to complete before
+    # sending SIGTERM.
+    wrap_up = not args.force and not args.no_wrap_up and pid_alive(pid)
+    if wrap_up:
+        in_fifo = runtime / "in"
+        log_file = runtime / "log"
+        if in_fifo.exists():
+            try:
+                # Capture the last UUID before writing so _wait_for_turn
+                # skips the prior turn's result (same race guard as cmd_send).
+                marker_uuid = _get_last_uuid(log_file) if log_file.exists() else None
+                msg = json.dumps(
+                    {
+                        "type": "user",
+                        "message": {"role": "user", "content": STOP_WRAPUP_MESSAGE},
+                    }
+                )
+                with open(in_fifo, "w") as f:
+                    f.write(msg + "\n")
+                print(
+                    f"Sent wrap-up message to '{args.name}', waiting for completion..."
+                )
+                _wait_for_turn(
+                    args.name,
+                    timeout=STOP_WRAPUP_TIMEOUT_SECONDS,
+                    settle=0,
+                    after_uuid=marker_uuid,
+                )
+            except Exception:
+                # Wrap-up is best-effort — proceed to SIGTERM on any failure
+                pass
 
     sig = signal.SIGKILL if args.force else signal.SIGTERM
     try:
@@ -3009,12 +3076,19 @@ def main():
         action="store_true",
         help="After the initial turn completes, print everything from the log",
     )
-    p_start.add_argument(
+    p_start_identity = p_start.add_mutually_exclusive_group()
+    p_start_identity.add_argument(
         "--pm",
         action="store_true",
         help="Launch as a Project Manager worker — loads the PM identity "
         "via --append-system-prompt-file and enables chat-tag routing for "
         "multi-consumer coordination",
+    )
+    p_start_identity.add_argument(
+        "--team-lead",
+        action="store_true",
+        help="Launch as a Technical Lead worker — loads the TL identity "
+        "via --append-system-prompt-file for code review and delegation",
     )
     p_start.add_argument(
         "--no-permission-hook",
@@ -3186,6 +3260,11 @@ def main():
     p_stop.add_argument("name", help="Worker name")
     p_stop.add_argument(
         "--force", action="store_true", help="Send SIGKILL instead of SIGTERM"
+    )
+    p_stop.add_argument(
+        "--no-wrap-up",
+        action="store_true",
+        help="Skip the wrap-up message and go straight to SIGTERM",
     )
 
     # -- install-hook --

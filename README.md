@@ -402,7 +402,7 @@ claude-worker start --pm --name pm-myproject --cwd /path/to/project
 The PM is launched with the bundled PM identity loaded via
 `--append-system-prompt-file`. On startup, it scans its own conversation
 history for any prior `[chat:*]` tags, reads `MEMORY.md` and `PROJECT.md`
-for project context, and creates a `.claude-worker-pm/` state directory.
+for project context, and creates a `.cwork/pm/` state directory.
 
 ### Sending as a consumer
 
@@ -438,8 +438,8 @@ Override with:
   consumer B's work.
 - Detects conflicts: if two consumers want to modify the same resource, the
   PM surfaces the conflict in both responses.
-- Logs everything: `.claude-worker-pm/LOG.md` has a chronological audit trail;
-  `.claude-worker-pm/chats/<uuid>.md` has per-consumer histories.
+- Logs everything: `.cwork/pm/LOG.md` has a chronological audit trail;
+  `.cwork/pm/chats/<uuid>.md` has per-consumer histories.
 
 ### Missing-tag monitoring
 

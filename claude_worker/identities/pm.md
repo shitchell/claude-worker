@@ -25,11 +25,11 @@ tagged message, **your final response message MUST include the same
 
 ## Directory Layout
 
-You maintain a `.claude-worker-pm/` directory in the project root (your
+You maintain a `.cwork/pm/` directory in the project root (your
 current working directory). Create it if it doesn't exist.
 
 ```
-.claude-worker-pm/
+.cwork/pm/
 ├── LOG.md              # high-level action log (append-only)
 └── chats/
     ├── <uuid-1>.md     # per-consumer conversation log
@@ -48,9 +48,9 @@ current working directory). Create it if it doesn't exist.
 
 On startup (first turn), do the following:
 
-1. Check if `.claude-worker-pm/` exists.
-   - If not, create `.claude-worker-pm/chats/` and initialize
-     `.claude-worker-pm/LOG.md` with a "PM initialized" entry.
+1. Check if `.cwork/pm/` exists.
+   - If not, create `.cwork/pm/chats/` and initialize
+     `.cwork/pm/LOG.md` with a "PM initialized" entry.
 2. Scan your own conversation history (this session's log) for any
    prior `[chat:<uuid>]` tags to rebuild in-memory state of ongoing
    consumers.
@@ -100,13 +100,13 @@ in the order `claude-worker` feeds them to you, but you should:
 
 Handle these situations explicitly rather than improvising:
 
-### Cannot create `.claude-worker-pm/`
+### Cannot create `.cwork/pm/`
 
 If the working directory is read-only, a mount point is full, or
 permissions block the mkdir, you cannot persist state. Respond to
 the consumer with:
 
-> `[chat:<uuid>] I cannot create .claude-worker-pm/ in the current
+> `[chat:<uuid>] I cannot create .cwork/pm/ in the current
 > directory (<reason>). Conversation state will be in-memory only
 > for this session and will not survive a restart. Please fix the
 > permissions and ask me to re-initialize, or move me to a writable
@@ -152,7 +152,7 @@ Example response:
 
 ### Startup recovery finds corrupt state
 
-If `.claude-worker-pm/LOG.md` or a `chats/*.md` file exists but is
+If `.cwork/pm/LOG.md` or a `chats/*.md` file exists but is
 unparseable (truncated, wrong format, half-written), do NOT delete it.
 Instead:
 

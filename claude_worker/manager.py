@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 # -- Named constants --
@@ -20,6 +21,18 @@ FIFO_SELECT_TIMEOUT_SECONDS: float = 1.0
 FIFO_READ_BUFFER_BYTES: int = 65536
 SIGTERM_WAIT_TIMEOUT_SECONDS: float = 10.0
 LOG_THREAD_JOIN_TIMEOUT_SECONDS: float = 5.0
+
+# Context threshold wakeup — fire a synthetic user message when the
+# worker crosses this fraction of its context window. Best-effort:
+# never crashes the manager, fires at most once per session (sentinel
+# file prevents re-fire).
+CONTEXT_WAKEUP_THRESHOLD_PCT: float = 0.80
+CONTEXT_WAKEUP_CHECK_INTERVAL_SECONDS: float = 30.0
+
+# Context window size detection. Mirrors the constants in cli.py — we
+# duplicate here to avoid a circular import (cli imports from manager).
+_CONTEXT_WINDOW_1M: int = 1_000_000
+_CONTEXT_WINDOW_DEFAULT: int = 200_000
 
 # Env var override for the claude binary path. Tests set this to point at
 # a stub-claude script that emits canned JSONL output; production leaves
@@ -195,6 +208,92 @@ def get_saved_worker(name: str) -> dict | None:
         return None
 
 
+def _detect_context_window_size(log_file: Path) -> int:
+    """Read the log's system/init message to determine context window size.
+
+    Mirrors ``cli._detect_context_window_size`` — duplicated here to avoid
+    a circular import (cli imports from manager). Falls back to 1M on any
+    error (safer: underestimates percentage).
+    """
+    try:
+        with open(log_file) as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    data = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if data.get("type") == "system" and data.get("subtype") == "init":
+                    model = data.get("model", "")
+                    if "[1m]" in model:
+                        return _CONTEXT_WINDOW_1M
+                    return _CONTEXT_WINDOW_DEFAULT
+    except OSError:
+        pass
+    return _CONTEXT_WINDOW_1M
+
+
+def _check_context_threshold(log_path: Path, runtime: Path, in_fifo: Path) -> None:
+    """Fire a one-shot synthetic user message when context usage crosses the threshold.
+
+    Best-effort: catches all exceptions so the manager's FIFO loop is never
+    interrupted. Uses a sentinel file (``runtime / "wakeup-context-sent"``)
+    to ensure the message fires at most once per session.
+    """
+    try:
+        sentinel = runtime / "wakeup-context-sent"
+        if sentinel.exists():
+            return
+
+        if not log_path.exists():
+            return
+
+        try:
+            from claude_logs import compute_context_window_usage
+        except ImportError:
+            return
+
+        cw = compute_context_window_usage(log_path)
+        if cw is None:
+            return
+
+        window = _detect_context_window_size(log_path)
+        pct = cw.total / window
+        if pct < CONTEXT_WAKEUP_THRESHOLD_PCT:
+            return
+
+        # Threshold crossed — write the synthetic message to the FIFO
+        pct_display = int(pct * 100)
+        msg = json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": (
+                        f"[system:context-threshold] You are at approximately "
+                        f"{pct_display}% of your context window. Begin your "
+                        f"wrap-up procedure now."
+                    ),
+                },
+            }
+        )
+        # Use a separate fd so we don't interfere with the FIFO loop's
+        # own read/write descriptors. O_WRONLY will block until a reader
+        # exists, but the FIFO loop's rd_fd is already open.
+        wr = os.open(str(in_fifo), os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            os.write(wr, (msg + "\n").encode())
+        finally:
+            os.close(wr)
+
+        sentinel.write_text("")
+    except Exception:
+        # Best-effort — never crash the manager for a context check.
+        pass
+
+
 def run_manager(
     name: str,
     cwd: str | None,
@@ -347,6 +446,8 @@ def _run_manager_forkless(
         # Open write end to keep FIFO alive (prevents EOF)
         wr_fd = os.open(str(in_fifo), os.O_WRONLY)
 
+        last_context_check = time.monotonic()
+
         try:
             while proc.poll() is None:
                 # Wait for data on the read fd
@@ -358,6 +459,13 @@ def _run_manager_forkless(
                     if data and proc.stdin:
                         proc.stdin.write(data)
                         proc.stdin.flush()
+
+                # Periodic context threshold check — piggybacks on the
+                # select() timeout so we don't need a separate thread.
+                now = time.monotonic()
+                if now - last_context_check >= CONTEXT_WAKEUP_CHECK_INTERVAL_SECONDS:
+                    last_context_check = now
+                    _check_context_threshold(log_path, runtime, in_fifo)
         except (OSError, BrokenPipeError):
             # These are EXPECTED during normal shutdown (claude exits,
             # FIFO closes). Not a panic condition.

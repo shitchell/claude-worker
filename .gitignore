@@ -9,4 +9,8 @@ build/
 # ends up with this directory. Contents are logs of chats and actions
 # the PM observed — environment-specific, potentially sensitive, and
 # not something that should travel in git.
+# .cwork/pm/ is the newer canonical name; .claude-worker-pm/ is kept
+# for backwards compatibility until the rename lands (see project
+# decision D9).
 .claude-worker-pm/
+.cwork/pm/
