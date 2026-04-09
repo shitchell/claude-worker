@@ -481,3 +481,65 @@ decisions:
       - file: claude_worker/identities/pm.md
         identifier: Maintain the project's GVP library
         role: implements
+
+  - id: D12
+    name: queue-id-random-hex-not-epoch-ms
+    decision: >
+      Queue correlation IDs use secrets.token_hex(4) instead of
+      str(int(time.time() * 1000)). Eliminates the theoretical
+      sub-millisecond collision risk between concurrent --queue
+      sends from different processes.
+    origin: >
+      Ticket #005 audit (2026-04-09). TL identified the collision
+      risk as residual after D2 (after_uuid marker) fixed the
+      primary stale-match race. 3-line fix.
+    tags: [races, fifo]
+    maps_to: [project:G1, project:P1]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _generate_queue_id using secrets.token_hex
+        role: implements
+
+  - id: D13
+    name: delivery-confirmation-deferred
+    decision: >
+      Post-send delivery confirmation (scanning the log for the
+      sent message before waiting for the response) is deferred.
+      The current failure mode for undelivered messages is a hang
+      (detected by timeout), not silent success. The manager's
+      thread panic handling (P8) catches the edge case where the
+      FIFO reader thread crashes. Fast-fail confirmation (~25 LOE)
+      can be revisited if hang-on-failure proves painful in practice.
+    origin: >
+      Ticket #005 audit (2026-04-09). TL assessed severity as LOW
+      because message loss → worker death → detected. PM concurred:
+      hang-not-silent is acceptable for now.
+    tags: [fifo, observability]
+    maps_to: [project:G2, project:P8]
+    refs:
+      - file: .cwork/tickets/005-review-message-delivery/TECHNICAL.md
+        identifier: Failure Mode 3 analysis
+        role: defines
+
+  - id: D14
+    name: notify-subcommand-human-escalation
+    decision: >
+      claude-worker notify "message" reads notification config from
+      ~/.cwork/config.yaml (notifications.command with ${MESSAGE}
+      placeholder), runs via subprocess, rate-limited to 60s per
+      caller via cooldown timestamp files. Best-effort: failures
+      logged to stderr, never crash. Config is user-level, not
+      project-level, keeping credentials out of committed files.
+    origin: >
+      Ticket #002 (2026-04-09). Human: "i should perhaps implement
+      a policy around using ntfy.sh or something anytime something
+      requires human escalation so there's no confusion."
+    tags: [observability]
+    maps_to: [project:G2, project:V2]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: cmd_notify
+        role: implements
+      - file: tests/test_notify.py
+        identifier: TestNotifyConfigHandling
+        role: implements
