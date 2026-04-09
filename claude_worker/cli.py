@@ -602,13 +602,15 @@ def _handle_missing_tag_reports(worker_name: str, reports: list[dict]) -> None:
 
 
 def _generate_queue_id() -> str:
-    """Generate a correlation ID for queued messages.
+    """Generate a collision-resistant correlation ID for queued messages.
 
-    Uses epoch milliseconds — deterministic without increment state,
-    visually distinct from UUIDs, and works across multiple orchestrators.
-    Sub-millisecond collisions are acceptable for the current use case.
+    Uses random hex (8 chars from 4 bytes) — no sub-millisecond collision
+    risk between concurrent senders. Combined with the after_uuid marker
+    (D2), this eliminates all known queue tag match races.
     """
-    return str(int(time.time() * 1000))
+    import secrets
+
+    return secrets.token_hex(4)
 
 
 def _wait_for_queue_response(

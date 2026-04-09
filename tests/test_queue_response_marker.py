@@ -1,14 +1,11 @@
-"""Tests for _wait_for_queue_response marker UUID race (Imp-6).
+"""Tests for queue correlation: _wait_for_queue_response marker race and
+_generate_queue_id collision resistance.
 
-Bug: _wait_for_queue_response scans the log from byte 0 looking for the
-[queue:<id>] tag. If the same tag string is already in the log from a
-prior cycle (or, more subtly, if a sub-millisecond collision causes two
-queue IDs to collide), it returns 0 against the wrong message.
+The marker race (D2): _wait_for_queue_response scans the log for the
+[queue:<id>] tag. The after_uuid marker skips past stale matches.
 
-Fix: accept an after_uuid marker — same pattern as _wait_for_turn — and
-only consider log entries appearing AFTER that marker when matching.
-cmd_send captures _get_last_uuid(log_file) before writing the FIFO,
-same as it already does for the non-queue wait-for-turn path.
+Queue ID collision (D12): _generate_queue_id uses random hex instead
+of epoch-ms to eliminate sub-millisecond collision risk.
 """
 
 from __future__ import annotations
@@ -83,3 +80,24 @@ class TestQueueResponseMarker:
         )
         rc = _wait_for_queue_response(name, "999", timeout=0.5, after_uuid=marker)
         assert rc == 0
+
+
+class TestQueueIdCollisionResistance:
+    """_generate_queue_id must produce collision-resistant IDs (D12)."""
+
+    def test_ids_are_unique(self):
+        """Two consecutive calls must produce different IDs."""
+        from claude_worker.cli import _generate_queue_id
+
+        id1 = _generate_queue_id()
+        id2 = _generate_queue_id()
+        assert id1 != id2
+
+    def test_id_is_hex(self):
+        """Queue IDs should be hex strings (not epoch-ms integers)."""
+        from claude_worker.cli import _generate_queue_id
+
+        qid = _generate_queue_id()
+        # Should be valid hex and not look like an epoch timestamp
+        int(qid, 16)  # raises ValueError if not hex
+        assert len(qid) == 8  # token_hex(4) = 8 hex chars
