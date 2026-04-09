@@ -3559,13 +3559,20 @@ def cmd_repl(args: argparse.Namespace) -> None:
         RenderConfig,
     )
 
-    hidden = {"timestamps", "metadata", "thinking", "tools"}
-    show_only = {"user", "user-input", "assistant", "queue-operation"}
-    if chat_id:
-        # Filter the stream to the REPL's own chat tag so other
-        # consumers' messages don't leak into this window.
-        pass  # chat filtering happens in the stream loop via should_show_message + our own check
-    config = RenderConfig(filters=FilterConfig(show_only=show_only, hidden=hidden))
+    verbose = getattr(args, "verbose", False)
+    if verbose:
+        hidden = {
+            "timestamps",
+            "metadata",
+            "progress",
+            "file-history-snapshot",
+            "last-prompt",
+        }
+        config = RenderConfig(filters=FilterConfig(hidden=hidden))
+    else:
+        hidden = {"timestamps", "metadata", "thinking", "tools"}
+        show_only = {"user", "user-input", "assistant", "queue-operation"}
+        config = RenderConfig(filters=FilterConfig(show_only=show_only, hidden=hidden))
     formatter: object
     if sys.stdout.isatty():
         formatter = ANSIFormatter()
@@ -4142,6 +4149,12 @@ def main():
         help="Override the auto-generated chat ID for PM workers. By "
         "default the REPL uses 'repl-<pid>-<tty>' as the chat tag on "
         "PM workers; pass --chat to use a specific identity instead.",
+    )
+    p_repl.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Show tool calls, thinking, and metadata (matches read --verbose output)",
     )
 
     # -- tokens --

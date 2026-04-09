@@ -759,3 +759,24 @@ decisions:
       - file: tests/test_wait_after_uuid_edge.py
         identifier: TestAfterUuidMostRecent
         role: implements
+
+  - id: D24
+    name: repl-verbose-flag
+    decision: >
+      REPL accepts --verbose (-v) to show tool calls, thinking, and
+      metadata matching read --verbose output. Default REPL stays
+      simplified (hidden: timestamps, metadata, thinking, tools).
+      Verbose mode uses the same hidden set as read --verbose
+      (hidden: timestamps, metadata, progress, file-history-snapshot,
+      last-prompt) with no show_only filter.
+    origin: >
+      Ticket #031 (2026-04-09). Human: "for repl mode, i'd love it
+      if it showed the equivalent of read --verbose." Chose --verbose
+      flag over /verbose toggle (simpler, no mid-session state) and
+      always-verbose (too noisy by default).
+    tags: [craftsmanship]
+    maps_to: [project:V1]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: verbose
+        role: implements
