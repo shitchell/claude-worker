@@ -443,6 +443,52 @@ def _wait_for_ready_state(
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
+def _get_read_marker_consumer_id(args: argparse.Namespace) -> str:
+    """Determine the consumer ID for read markers.
+
+    Uses --chat value, CLAUDE_SESSION_UUID, or falls back to 'cli'.
+    """
+    chat = getattr(args, "chat", None)
+    if chat:
+        return chat
+    uuid = os.environ.get("CLAUDE_SESSION_UUID", "")
+    if uuid:
+        return uuid
+    return "cli"
+
+
+def _read_marker_path(runtime: Path, consumer_id: str) -> Path:
+    """Return the path for a consumer's read marker file."""
+    import hashlib
+
+    marker_dir = runtime / "read-markers"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    key = hashlib.md5(consumer_id.encode()).hexdigest()
+    return marker_dir / f"{key}.txt"
+
+
+def _load_read_marker(runtime: Path, args: argparse.Namespace) -> str | None:
+    """Load the last-seen UUID for this consumer, or None."""
+    consumer_id = _get_read_marker_consumer_id(args)
+    path = _read_marker_path(runtime, consumer_id)
+    if path.exists():
+        try:
+            return path.read_text().strip() or None
+        except OSError:
+            return None
+    return None
+
+
+def _save_read_marker(runtime: Path, args: argparse.Namespace, uuid: str) -> None:
+    """Save the last-seen UUID for this consumer."""
+    consumer_id = _get_read_marker_consumer_id(args)
+    path = _read_marker_path(runtime, consumer_id)
+    try:
+        path.write_text(uuid)
+    except OSError:
+        pass
+
+
 def _get_worker_identity(name: str) -> str:
     """Return the identity name for a worker ('pm', 'technical-lead', 'worker').
 
@@ -1424,6 +1470,15 @@ def cmd_read(args: argparse.Namespace) -> tuple[str | None, str | None]:
 
     config = RenderConfig(filters=filters)
 
+    # Handle --new: load last-seen marker as the --since value
+    if getattr(args, "new", False):
+        if args.since:
+            print("Error: --new and --since are mutually exclusive", file=sys.stderr)
+            sys.exit(1)
+        marker_uuid = _load_read_marker(runtime, args)
+        if marker_uuid:
+            args.since = marker_uuid
+
     # Handle --since
     since_ts = None
     since_uuid = None
@@ -1918,6 +1973,10 @@ def _render_read_output(
             f"claude-worker read {args.name} "
             f"--since {last_uuid[:UUID_SHORT_LENGTH]}{exclude_user_flag}"
         )
+    # Save read marker if --mark was passed
+    if getattr(args, "mark", False) and last_uuid:
+        _save_read_marker(runtime, args, last_uuid)
+
     return first_uuid, last_uuid
 
 
@@ -4139,6 +4198,18 @@ def main():
     p_read.add_argument("--since", help="Show messages after this UUID or timestamp")
     p_read.add_argument(
         "--until", help="Stop showing messages at this UUID (exclusive)"
+    )
+    p_read.add_argument(
+        "--new",
+        action="store_true",
+        help="Show only messages after the last --mark. Per-consumer via "
+        "CLAUDE_SESSION_UUID or --chat. Mutually exclusive with --since.",
+    )
+    p_read.add_argument(
+        "--mark",
+        action="store_true",
+        help="After displaying, save the last-seen UUID as a read marker. "
+        "Use with --new to track 'unread' messages per consumer.",
     )
     p_read.add_argument(
         "--last-turn",

@@ -936,3 +936,25 @@ decisions:
       - file: claude_worker/cli.py
         identifier: select
         role: implements
+
+  - id: D32
+    name: per-session-read-markers
+    decision: >
+      read accepts --mark (save last-seen UUID) and --new (show only
+      messages after last mark). Consumer identity from
+      CLAUDE_SESSION_UUID, --chat, or "cli" fallback. Markers stored
+      at runtime/read-markers/<md5-of-consumer>.txt. --new is sugar
+      for --since <last-mark>. --new + --since is an error.
+    origin: >
+      Ticket #010, future-queries item #2. Per-consumer read tracking
+      for PM orchestration — enables "show me what's new since my
+      last read" without manual --since UUIDs.
+    tags: [pm, craftsmanship]
+    maps_to: [project:G4, project:V1]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _save_read_marker
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _load_read_marker
+        role: implements
