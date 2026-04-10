@@ -1216,3 +1216,29 @@ decisions:
       - file: claude_worker/manager.py
         identifier: check_periodic_tasks
         role: uses
+
+  - id: D45
+    name: tier1-workflow-enforcement
+    decision: >
+      Tier 1 deterministic enforcement: (1) commit_checker.py
+      PostToolUse hook warns on git commits missing test files (G3)
+      or .gvp/library/ updates. Fires only for Python source changes,
+      exempt for docs. (2) ticket_lifecycle.py validates done tickets
+      have TECHNICAL.md and corresponding D<N> refs. Both are warnings
+      not blocks — enforcement over prose, detection over silence.
+    origin: >
+      Ticket #046 Tier 1 (2026-04-10). OBS10 (TL skips tests + GVP)
+      was the #1 enforcement gap. Post-commit hook catches it at the
+      moment of commission.
+    tags: [process, testing, gvp]
+    maps_to: [project:G2, project:G3]
+    refs:
+      - file: claude_worker/commit_checker.py
+        identifier: _check_commit
+        role: implements
+      - file: claude_worker/ticket_lifecycle.py
+        identifier: validate_ticket_lifecycle
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: commit_checker_command
+        role: implements

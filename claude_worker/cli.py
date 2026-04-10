@@ -3502,11 +3502,12 @@ def _build_permission_hook_settings(
                 ],
             }
         ]
+    posttooluse_entries: list[dict] = []
     if cwd is not None:
         ticket_watcher_command = (
             f"{python_executable} -m claude_worker.ticket_watcher --cwd {cwd}"
         )
-        hooks["PostToolUse"] = [
+        posttooluse_entries.append(
             {
                 "matcher": matcher,
                 "hooks": [
@@ -3516,7 +3517,23 @@ def _build_permission_hook_settings(
                     }
                 ],
             }
-        ]
+        )
+    # Commit checker: warns on missing tests/GVP for identity workers
+    if identity:
+        commit_checker_command = f"{python_executable} -m claude_worker.commit_checker"
+        posttooluse_entries.append(
+            {
+                "matcher": "Bash",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": commit_checker_command,
+                    }
+                ],
+            }
+        )
+    if posttooluse_entries:
+        hooks["PostToolUse"] = posttooluse_entries
     # Merge identity-specific hooks if present
     if identity:
         identity_hooks = _load_identity_hooks(identity)
