@@ -1105,3 +1105,23 @@ decisions:
       - file: claude_worker/manager.py
         identifier: extra_env
         role: implements
+
+  - id: D40
+    name: skeleton-scaffolding-from-identity-dir
+    decision: >
+      _ensure_cwork_dirs checks ~/.cwork/identities/<identity>/skeleton/
+      and copies its directory tree into <cwd>/.cwork/<identity>/ via
+      _scaffold_from_skeleton. Only creates items that don't exist —
+      never overwrites. Falls back to hardcoded PM/TL skeleton for
+      backwards compat when no skeleton dir is present. Custom
+      identities get project scaffolding by populating their
+      skeleton/ directory.
+    origin: >
+      Ticket C of identity directory incremental plan (#042).
+      ~20 LOE. Generalizes the PM/TL skeleton creation.
+    tags: [identity, architecture]
+    maps_to: [project:V5, project:G4]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _scaffold_from_skeleton
+        role: implements

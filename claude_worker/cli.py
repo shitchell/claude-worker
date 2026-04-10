@@ -1040,15 +1040,40 @@ def _wait_for_turn(
 # -- Subcommand handlers --
 
 
+def _scaffold_from_skeleton(skeleton_dir: Path, target_dir: Path) -> None:
+    """Copy a skeleton directory's structure into the target.
+
+    Only creates directories that don't exist yet — never overwrites
+    existing files or directories. Copies the directory tree structure
+    but not file contents (skeleton dirs contain empty subdirectories
+    as scaffolding).
+    """
+    if not skeleton_dir.exists():
+        return
+    for item in skeleton_dir.rglob("*"):
+        rel = item.relative_to(skeleton_dir)
+        target = target_dir / rel
+        if item.is_dir() and not target.exists():
+            target.mkdir(parents=True, exist_ok=True)
+        elif item.is_file() and not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            import shutil
+
+            shutil.copy2(item, target)
+
+
 def _ensure_cwork_dirs(cwd: str, pm: bool, tl: bool) -> None:
     """Auto-create .cwork/ skeleton directories on first identity-mode start.
 
-    Creates both the global ~/.cwork/ skeleton and the project-level
-    <cwd>/.cwork/ skeleton. Idempotent — mkdir(exist_ok=True) everywhere.
-    Only runs for --pm or --team-lead workers.
+    Creates global ~/.cwork/ skeleton, then scaffolds the project-level
+    <cwd>/.cwork/<identity>/ from the identity's skeleton directory at
+    ~/.cwork/identities/<identity>/skeleton/. Falls back to hardcoded
+    directories for pm/tl if no skeleton dir exists.
     """
     if not pm and not tl:
         return
+
+    identity = "pm" if pm else "technical-lead"
 
     # Global skeleton: ~/.cwork/
     home_cwork = Path.home() / ".cwork"
@@ -1071,21 +1096,28 @@ def _ensure_cwork_dirs(cwd: str, pm: bool, tl: bool) -> None:
             "- [identities](identities/) — Role-specific guidance for PM and TL workers\n"
         )
 
-    # Project skeleton: <cwd>/.cwork/
+    # Project skeleton: scaffold from ~/.cwork/identities/<identity>/skeleton/
     project_cwork = Path(cwd) / ".cwork"
-    if pm:
-        for d in (
-            project_cwork / "pm" / "chats",
-            project_cwork / "pm" / "handoffs",
-            project_cwork / "pm" / "gvp",
-        ):
-            d.mkdir(parents=True, exist_ok=True)
-    if tl:
-        for d in (
-            project_cwork / "technical-lead" / "handoffs",
-            project_cwork / "technical-lead" / "notes",
-        ):
-            d.mkdir(parents=True, exist_ok=True)
+    skeleton_dir = home_cwork / "identities" / identity / "skeleton"
+    target_dir = project_cwork / identity
+
+    if skeleton_dir.exists():
+        _scaffold_from_skeleton(skeleton_dir, target_dir)
+    else:
+        # Hardcoded fallback for pm/tl (backwards compat)
+        if pm:
+            for d in (
+                target_dir / "chats",
+                target_dir / "handoffs",
+                target_dir / "gvp",
+            ):
+                d.mkdir(parents=True, exist_ok=True)
+        if tl:
+            for d in (
+                target_dir / "handoffs",
+                target_dir / "notes",
+            ):
+                d.mkdir(parents=True, exist_ok=True)
 
     # Shared project dirs
     tickets_dir = project_cwork / "tickets"
