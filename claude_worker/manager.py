@@ -397,6 +397,7 @@ def run_manager(
     cwd: str | None,
     claude_args: list[str],
     initial_message: str | None,
+    identity: str = "worker",
 ) -> None:
     """Run the manager process (called after fork).
 
@@ -407,7 +408,14 @@ def run_manager(
     the test runner, and so the helper can run in a thread instead of
     a forked process.
     """
-    _run_manager_forkless(name, cwd, claude_args, initial_message, install_signals=True)
+    _run_manager_forkless(
+        name,
+        cwd,
+        claude_args,
+        initial_message,
+        install_signals=True,
+        identity=identity,
+    )
 
 
 def _run_manager_forkless(
@@ -416,6 +424,7 @@ def _run_manager_forkless(
     claude_args: list[str],
     initial_message: str | None,
     install_signals: bool = True,
+    identity: str = "worker",
 ) -> None:
     """Run the manager lifecycle WITHOUT the fork wrapper.
 
@@ -445,6 +454,11 @@ def _run_manager_forkless(
     # Build environment — unset ANTHROPIC_API_KEY to force subscription auth
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)
+
+    # Worker identity env vars — available to hooks and Bash tool calls
+    env["CW_WORKER_NAME"] = name
+    env["CW_IDENTITY"] = identity
+    env["CW_PARENT_WORKER"] = os.environ.get("CW_WORKER_NAME", "")
 
     # Build claude command. Binary path is overridable via
     # CLAUDE_WORKER_CLAUDE_BIN for test injection of a stub.

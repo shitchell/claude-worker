@@ -1136,11 +1136,13 @@ def cmd_start(args: argparse.Namespace) -> None:
     os.dup2(devnull, 1)
     os.dup2(devnull, 2)
 
+    identity = "pm" if pm_mode else "technical-lead" if tl_mode else "worker"
     run_manager(
         name=name,
         cwd=args.cwd,
         claude_args=claude_args,
         initial_message=initial_message,
+        identity=identity,
     )
     os._exit(0)
 
@@ -2620,7 +2622,16 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
         manager_pid = os.fork()
         if manager_pid == 0:
             # Grandchild: the new manager
-            run_manager(worker_name, cwd, claude_args, initial_message)
+            replace_identity = (
+                "pm" if pm_mode else "technical-lead" if tl_mode else "worker"
+            )
+            run_manager(
+                worker_name,
+                cwd,
+                claude_args,
+                initial_message,
+                identity=replace_identity,
+            )
             sys.exit(0)
         # Replacer: wait for the new manager's PID file, then exit
         new_pid_file = new_runtime / "pid"

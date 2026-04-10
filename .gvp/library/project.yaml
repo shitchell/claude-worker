@@ -825,3 +825,26 @@ decisions:
       - file: claude_worker/identities/pm.md
         identifier: Bug Triage
         role: implements
+
+  - id: D27
+    name: worker-environment-variables
+    decision: >
+      Workers set CW_WORKER_NAME, CW_IDENTITY, and CW_PARENT_WORKER
+      in the claude subprocess environment via Popen env dict. Identity
+      (pm, technical-lead, worker) is passed from cmd_start to
+      run_manager via a new identity parameter. CW_PARENT_WORKER
+      inherits from the parent's CW_WORKER_NAME (empty for top-level).
+      Available to hooks and Bash tool calls for self-identification.
+    origin: >
+      Ticket #034 (2026-04-09). TL assessed at ~15 LOE. Unblocks
+      identity-aware subcommands, simpler replaceme detection, and
+      the thin identity first pass.
+    tags: [architecture]
+    maps_to: [project:V2, project:G4]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: CW_WORKER_NAME
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: identity
+        role: uses
