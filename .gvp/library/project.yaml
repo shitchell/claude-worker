@@ -1044,3 +1044,24 @@ decisions:
       - file: claude_worker/manager.py
         identifier: check_cwork_changes
         role: implements
+
+  - id: D37
+    name: project-registry
+    decision: >
+      ~/.cwork/projects/registry.yaml links all projects started
+      with an identity worker. Auto-registered on start --identity.
+      claude-worker projects subcommand shows registered projects
+      cross-referenced with active workers (by CWD match) and ticket
+      counts. Single source of truth — no per-project link.yaml.
+    origin: >
+      Ticket #042 (2026-04-10). TL design approved by PM. Enables
+      cross-project discovery for Right-Hand Claude and PM workers.
+    tags: [architecture, identity]
+    maps_to: [project:G4, project:V2]
+    refs:
+      - file: claude_worker/project_registry.py
+        identifier: register_project
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_projects
+        role: implements

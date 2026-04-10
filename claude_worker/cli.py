@@ -1016,6 +1016,7 @@ def _ensure_cwork_dirs(cwd: str, pm: bool, tl: bool) -> None:
         home_cwork / "identities" / "technical-lead",
         home_cwork / "workers",
         home_cwork / "analyses",
+        home_cwork / "projects",
     ):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -1144,7 +1145,14 @@ def cmd_start(args: argparse.Namespace) -> None:
     initial_message = "\n\n".join(parts) if parts else None
 
     # Auto-create .cwork/ skeleton for identity-mode workers
-    _ensure_cwork_dirs(args.cwd or os.getcwd(), pm_mode, tl_mode)
+    resolved_cwd = args.cwd or os.getcwd()
+    _ensure_cwork_dirs(resolved_cwd, pm_mode, tl_mode)
+
+    # Auto-register project in the registry for identity-mode workers
+    if identity_mode:
+        from claude_worker.project_registry import register_project
+
+        register_project(resolved_cwd)
 
     # Create runtime directory
     try:
@@ -3658,6 +3666,18 @@ def cmd_tokens(args: argparse.Namespace) -> None:
             print(f"  {field}: {value:,}")
 
 
+def cmd_projects(args: argparse.Namespace) -> None:
+    """List all registered projects with active worker info."""
+    from claude_worker.project_registry import format_projects_table, load_registry
+
+    projects = load_registry()
+    # Cross-reference with active workers
+    workers = _collect_filtered_workers(
+        argparse.Namespace(role=None, status=None, alive=False, cwd_filter=None)
+    )
+    print(format_projects_table(projects, workers))
+
+
 def cmd_stats(args: argparse.Namespace) -> None:
     """Print summary statistics from the token tracking CSV."""
     from claude_worker.token_tracking import format_stats, read_summary
@@ -4485,6 +4505,12 @@ def main():
     )
     p_tokens.add_argument("name", help="Worker name")
 
+    # -- projects --
+    sub.add_parser(
+        "projects",
+        help="List registered projects with active workers and ticket counts",
+    )
+
     # -- stats --
     sub.add_parser(
         "stats",
@@ -4585,6 +4611,7 @@ def main():
         "repl": cmd_repl,
         "tokens": cmd_tokens,
         "stats": cmd_stats,
+        "projects": cmd_projects,
         "grant": cmd_grant,
         "grants": cmd_grants,
         "revoke": cmd_revoke,
