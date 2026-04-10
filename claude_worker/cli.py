@@ -51,23 +51,33 @@ STOP_WRAPUP_TIMEOUT_SECONDS: float = 900.0
 ANALYZE_SESSION_SKILL_RESOURCE: str = "analyze-session.md"
 
 
+ANALYSES_DIR: Path = Path.home() / ".cwork" / "analyses"
+
+
 def _build_stop_wrapup_message() -> str:
-    """Build the stop wrap-up message with the bundled skill path."""
+    """Build the stop wrap-up message with analyze-session instruction."""
+    # Ensure analyses directory exists
+    ANALYSES_DIR.mkdir(parents=True, exist_ok=True)
+
     try:
         from importlib.resources import files
 
         skill_path = files("claude_worker") / "skills" / ANALYZE_SESSION_SKILL_RESOURCE
-        skill_hint = (
-            f" If the analyze-session skill is available, invoke it. "
-            f"Otherwise, read the instructions at {skill_path} and follow them "
-            f"to produce a session analysis before wrapping up."
+        analyze_instruction = (
+            f" Before wrapping up, run the analyze-session skill on your own "
+            f"session log and save the analysis to {ANALYSES_DIR}/. If the "
+            f"analyze-session skill is available, invoke it. Otherwise, read "
+            f"the instructions at {skill_path} and follow them."
         )
     except Exception:
-        skill_hint = ""
+        analyze_instruction = (
+            f" Before wrapping up, run the analyze-session skill on your own "
+            f"session log and save the analysis to {ANALYSES_DIR}/."
+        )
     return (
         "[system:stop-requested] Stop has been requested. Please complete your "
         "wrap-up procedure and respond with 'wrap-up complete' when done."
-        f"{skill_hint} You have up to 15 minutes."
+        f"{analyze_instruction} You have up to 15 minutes."
     )
 
 
@@ -1005,6 +1015,7 @@ def _ensure_cwork_dirs(cwd: str, pm: bool, tl: bool) -> None:
         home_cwork / "identities" / "pm" / "gvp",
         home_cwork / "identities" / "technical-lead",
         home_cwork / "workers",
+        home_cwork / "analyses",
     ):
         d.mkdir(parents=True, exist_ok=True)
 

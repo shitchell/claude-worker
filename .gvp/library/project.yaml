@@ -958,3 +958,24 @@ decisions:
       - file: claude_worker/cli.py
         identifier: _load_read_marker
         role: implements
+
+  - id: D33
+    name: auto-analyze-session-in-wrapup
+    decision: >
+      The stop wrap-up message instructs workers to run the
+      analyze-session skill on their own session log and save to
+      ~/.cwork/analyses/. Applies to all identity types (PM, TL,
+      generic). Best-effort — agents invoke the skill as part of
+      their wrap-up turn; failure doesn't block shutdown.
+    origin: >
+      Ticket #037 (2026-04-10). Cluster B planning. The skill was
+      already bundled (#004) but not automatically invoked.
+    tags: [observability]
+    maps_to: [project:G2]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _build_stop_wrapup_message
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: ANALYSES_DIR
+        role: implements
