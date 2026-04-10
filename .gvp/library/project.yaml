@@ -1242,3 +1242,140 @@ decisions:
       - file: claude_worker/cli.py
         identifier: commit_checker_command
         role: implements
+
+  - id: D46
+    name: archive-on-stop-persistent-logs
+    decision: >
+      cleanup_runtime_dir archives the runtime directory (via
+      archive_runtime_dir) before deleting it. Logs, session metadata,
+      and grants are preserved in timestamped archive dirs. Archives
+      older than 30 days (ARCHIVE_RETENTION_DAYS) are pruned by
+      prune_archives on each ls invocation. Archive dirs identified
+      by dots in their name (timestamp separator).
+    origin: >
+      Ticket #006 (2026-04-09). Backfilled — implemented before
+      OBS10 decision recording discipline was established.
+    tags: [durability, observability]
+    maps_to: [project:V3, project:G2]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: archive_runtime_dir
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: prune_archives
+        role: implements
+
+  - id: D47
+    name: workers-dir-to-cwork
+    decision: >
+      Worker runtime directories live at ~/.cwork/workers/ instead
+      of /tmp/claude-workers/<uid>/. Survives reboots for persistent
+      PM/TL state. get_runtime_dir falls back to legacy /tmp/ path
+      for pre-migration workers. create_runtime_dir checks both
+      paths to prevent name collisions. Base dir created with 700.
+    origin: >
+      Ticket #007 (2026-04-09). Backfilled.
+    tags: [architecture, durability]
+    maps_to: [project:V3]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: get_base_dir
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: _legacy_base_dir
+        role: implements
+
+  - id: D48
+    name: ls-filter-flags
+    decision: >
+      ls accepts --role (pm/tl/worker), --status, --alive, --cwd
+      (prefix match), --format json. Composable with AND logic.
+      _collect_filtered_workers extracted as shared helper for both
+      ls and send --broadcast. Archive dirs (dots in name) excluded
+      from ls output.
+    origin: >
+      Ticket #008 (2026-04-09). Backfilled.
+    tags: [architecture]
+    maps_to: [project:G4]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _collect_filtered_workers
+        role: implements
+
+  - id: D49
+    name: cwd-write-enforcement-hook
+    decision: >
+      cwd_guard.py is a PreToolUse hook that denies Edit/Write/
+      MultiEdit calls targeting files outside the worker's CWD.
+      Wired automatically into per-worker settings.json. Reads
+      outside CWD unrestricted. Deny message directs to route
+      changes through the owning PM.
+    origin: >
+      Ticket #014 (2026-04-09). Backfilled.
+    tags: [architecture]
+    maps_to: [project:V2]
+    refs:
+      - file: claude_worker/cwd_guard.py
+        identifier: _is_within
+        role: implements
+
+  - id: D50
+    name: stop-wrapup-timeout-improvements
+    decision: >
+      Stop wrap-up default timeout bumped from 600s to 900s (15min).
+      --wrap-up-timeout flag with minimum enforcement: values below
+      the configured minimum (from ~/.cwork/config.yaml
+      stop.wrap_up_timeout_minimum) are clamped with stderr warning.
+      FIFO write switched to O_NONBLOCK for consistency.
+    origin: >
+      Ticket #017 (2026-04-09). Backfilled.
+    tags: [lifecycle]
+    maps_to: [project:G2]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _get_wrapup_timeout_minimum
+        role: implements
+
+  - id: D51
+    name: replaceme-auto-restart
+    decision: >
+      claude-worker replaceme auto-detects which worker is calling
+      via bounded PID ancestry walk (/proc, max 5 levels). SIGUSR1
+      handler in manager archives runtime dir instead of deleting.
+      Detached replacer process forked before signaling (survives
+      host death). Two-tier wrap-up validation (turn complete +
+      identity-specific handoff file). --skip-validation override.
+    origin: >
+      Ticket #023 (2026-04-09). Backfilled. Keystone feature for
+      PM/TL self-replacement at context limits.
+    tags: [architecture, lifecycle]
+    maps_to: [project:G1, project:G4]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _find_worker_by_ancestry
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_replaceme
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: handle_replace
+        role: implements
+
+  - id: D52
+    name: remove-send-background
+    decision: >
+      The --background flag was removed from the send subcommand.
+      send always blocks until the worker responds. The correct
+      pattern for non-blocking sends is the Bash tool's
+      run_in_background parameter. --background was the most common
+      cause of lost inter-worker messages.
+    origin: >
+      Ticket #024 (2026-04-09). Backfilled. PM and TL both kept
+      using --background despite skill warnings, resulting in
+      dropped responses.
+    tags: [fifo, process]
+    maps_to: [project:G2]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: cmd_send
+        role: implements

@@ -3534,6 +3534,23 @@ def _build_permission_hook_settings(
         )
     if posttooluse_entries:
         hooks["PostToolUse"] = posttooluse_entries
+    # Compaction detector: SessionStart hook that fires on compact events
+    if identity:
+        compaction_command = (
+            f"{python_executable} -m claude_worker.compaction_detector "
+            f"--identity {identity}"
+        )
+        hooks["SessionStart"] = [
+            {
+                "matcher": "compact",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": compaction_command,
+                    }
+                ],
+            }
+        ]
     # Merge identity-specific hooks if present
     if identity:
         identity_hooks = _load_identity_hooks(identity)
