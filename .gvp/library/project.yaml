@@ -1175,3 +1175,23 @@ decisions:
       - file: claude_worker/manager.py
         identifier: load_periodic_config
         role: implements
+
+  - id: D43
+    name: right-hand-claude-identity
+    decision: >
+      Right-Hand Claude (RHC) identity at ~/.cwork/identities/rhc/.
+      Cross-project coordinator: reads project registry, routes work
+      to PMs, answers cross-project questions, never implements.
+      CWD is ~/ for broad visibility. Communicates via claude-worker
+      send with [reply-to:rhc] for async answers. Launched via
+      claude-worker start --identity rhc --name rhc --cwd ~/.
+    origin: >
+      Ticket #044 (2026-04-10). Human: "i would love a right-hand-
+      claude sort of identity — a primary point of contact i go to
+      who maintains a high-level overview of all active projects."
+    tags: [identity]
+    maps_to: [project:G4, project:V1]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: --identity
+        role: uses
