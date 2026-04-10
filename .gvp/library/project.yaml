@@ -979,3 +979,25 @@ decisions:
       - file: claude_worker/cli.py
         identifier: ANALYSES_DIR
         role: implements
+
+  - id: D34
+    name: token-tracking-csv-and-stats
+    decision: >
+      Token tracking uses a global CSV at ~/.cwork/analyses/summary.csv.
+      append_session_row writes one row per analyzed session with 13
+      columns (date, worker, identity, project, tokens, cost, etc.).
+      claude-worker stats reads the CSV and prints summaries by
+      identity type and project. CSV created with headers on first
+      write; subsequent appends are header-free.
+    origin: >
+      Ticket #038 (2026-04-10). Cluster B — observability foundation
+      for answering "how many tokens does a typical X cost?"
+    tags: [observability, tokens]
+    maps_to: [project:G2, project:V2]
+    refs:
+      - file: claude_worker/token_tracking.py
+        identifier: append_session_row
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_stats
+        role: implements

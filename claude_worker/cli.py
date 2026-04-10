@@ -3658,6 +3658,14 @@ def cmd_tokens(args: argparse.Namespace) -> None:
             print(f"  {field}: {value:,}")
 
 
+def cmd_stats(args: argparse.Namespace) -> None:
+    """Print summary statistics from the token tracking CSV."""
+    from claude_worker.token_tracking import format_stats, read_summary
+
+    rows = read_summary()
+    print(format_stats(rows))
+
+
 def _repl_continuous(
     name: str,
     log_file: Path,
@@ -4477,6 +4485,12 @@ def main():
     )
     p_tokens.add_argument("name", help="Worker name")
 
+    # -- stats --
+    sub.add_parser(
+        "stats",
+        help="Print summary statistics from session analyses (cost, tokens, per identity/project)",
+    )
+
     # -- grant --
     p_grant = sub.add_parser(
         "grant",
@@ -4570,6 +4584,7 @@ def main():
         "install-hook": cmd_install_hook,
         "repl": cmd_repl,
         "tokens": cmd_tokens,
+        "stats": cmd_stats,
         "grant": cmd_grant,
         "grants": cmd_grants,
         "revoke": cmd_revoke,
