@@ -1149,3 +1149,29 @@ decisions:
       - file: claude_worker/cli.py
         identifier: _merge_hooks
         role: implements
+
+  - id: D42
+    name: identity-periodic-tasks
+    decision: >
+      Periodic tasks are defined in
+      ~/.cwork/identities/<name>/hooks/periodic/periodic.yaml
+      mapping script names to interval seconds. The manager checks
+      on each poll cycle (~30s) whether any task's interval has
+      elapsed since its last run (timestamps in runtime/periodic/).
+      Due tasks are executed and output injected as [system:cron]
+      via the FIFO. Only runs for identity workers (not plain).
+      Best-effort: failures silently skipped.
+    origin: >
+      Ticket E of identity directory incremental plan (#042/043).
+      ~40 LOE. Completes the full identity directory system:
+      identity.md + internalize.md + config.yaml + skeleton/ +
+      hooks/ + periodic/.
+    tags: [identity, architecture]
+    maps_to: [project:V5, project:G4]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: check_periodic_tasks
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: load_periodic_config
+        role: implements

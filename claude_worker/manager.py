@@ -23,6 +23,8 @@ SIGTERM_WAIT_TIMEOUT_SECONDS: float = 10.0
 LOG_THREAD_JOIN_TIMEOUT_SECONDS: float = 5.0
 QUEUE_DRAIN_INTERVAL_SECONDS: float = 5.0
 CWORK_MONITOR_INTERVAL_SECONDS: float = 30.0
+PERIODIC_CHECK_INTERVAL_SECONDS: float = 30.0
+PERIODIC_SUBPROCESS_TIMEOUT_SECONDS: float = 10.0
 
 # Env var override for the claude binary path. Tests set this to point at
 # a stub-claude script that emits canned JSONL output; production leaves
@@ -208,6 +210,109 @@ def check_cwork_changes(
         return new_snapshot
     except Exception:
         return prev_snapshot
+
+
+def load_periodic_config(identity: str) -> dict[str, float]:
+    """Load periodic task config from the identity's hooks/periodic/periodic.yaml.
+
+    Returns {script_name: interval_seconds}. Returns {} if missing.
+
+    Example periodic.yaml:
+        tasks:
+          hourly-check.sh: 3600
+          daily-review.sh: 86400
+    """
+    config_path = (
+        Path.home()
+        / ".cwork"
+        / "identities"
+        / identity
+        / "hooks"
+        / "periodic"
+        / "periodic.yaml"
+    )
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml
+
+        data = yaml.safe_load(config_path.read_text())
+        if isinstance(data, dict) and isinstance(data.get("tasks"), dict):
+            return {k: float(v) for k, v in data["tasks"].items()}
+        return {}
+    except Exception:
+        return {}
+
+
+def check_periodic_tasks(
+    identity: str,
+    runtime: Path,
+    in_fifo: Path,
+) -> None:
+    """Run any due periodic tasks and inject output as [system:cron].
+
+    Checks each task's last-run timestamp (stored in runtime/periodic/).
+    If the interval has elapsed, runs the script and injects its stdout
+    as a synthetic user message. Best-effort: failures logged, never crash.
+    """
+    tasks = load_periodic_config(identity)
+    if not tasks:
+        return
+
+    periodic_dir = (
+        Path.home() / ".cwork" / "identities" / identity / "hooks" / "periodic"
+    )
+    timestamps_dir = runtime / "periodic"
+    timestamps_dir.mkdir(parents=True, exist_ok=True)
+
+    now = time.time()
+
+    for script_name, interval in tasks.items():
+        # Check last run
+        ts_file = timestamps_dir / f"{script_name}.last"
+        if ts_file.exists():
+            try:
+                last_run = float(ts_file.read_text().strip())
+                if now - last_run < interval:
+                    continue
+            except (ValueError, OSError):
+                pass
+
+        # Run the script
+        script_path = periodic_dir / script_name
+        if not script_path.exists():
+            continue
+
+        try:
+            import subprocess as _sp
+
+            result = _sp.run(
+                ["bash", str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=PERIODIC_SUBPROCESS_TIMEOUT_SECONDS,
+            )
+            output = result.stdout.strip()
+            if output:
+                msg = json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": f"[system:cron] [{script_name}] {output}",
+                        },
+                    }
+                )
+                wr = os.open(str(in_fifo), os.O_WRONLY | os.O_NONBLOCK)
+                try:
+                    os.write(wr, (msg + "\n").encode())
+                finally:
+                    os.close(wr)
+
+            # Update timestamp (even on empty output — task ran)
+            ts_file.write_text(str(now))
+        except Exception:
+            pass  # best-effort
 
 
 def get_runtime_dir(name: str) -> Path:
@@ -667,6 +772,7 @@ def _run_manager_forkless(
 
         last_queue_drain = time.monotonic()
         last_cwork_check = time.monotonic()
+        last_periodic_check = time.monotonic()
         cwork_snapshot: dict[str, tuple[float, int]] = {}
 
         try:
@@ -697,6 +803,17 @@ def _run_manager_forkless(
                     cwork_snapshot = check_cwork_changes(
                         resolved_cwd, in_fifo, cwork_snapshot
                     )
+
+                # Periodic identity tasks (cron)
+                if (
+                    identity != "worker"
+                    and now - last_periodic_check >= PERIODIC_CHECK_INTERVAL_SECONDS
+                ):
+                    last_periodic_check = now
+                    try:
+                        check_periodic_tasks(identity, runtime, in_fifo)
+                    except Exception:
+                        pass
         except (OSError, BrokenPipeError):
             # These are EXPECTED during normal shutdown (claude exits,
             # FIFO closes). Not a panic condition.
