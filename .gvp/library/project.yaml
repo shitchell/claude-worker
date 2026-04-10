@@ -1001,3 +1001,22 @@ decisions:
       - file: claude_worker/cli.py
         identifier: cmd_stats
         role: implements
+
+  - id: D35
+    name: post-fix-gvp-review-flywheel
+    decision: >
+      After closing a bug ticket, the PM reviews the GVP library to
+      identify what guiding elements were associated with the buggy
+      code and what elements were missing that would have prevented
+      the bug. Gaps are proposed as new guiding elements to the
+      human. This is the alignment flywheel: bugs → GVP gaps →
+      fill gaps → fewer bugs.
+    origin: >
+      Ticket #039 (2026-04-10). Cluster B. Human: "we can tweak
+      guiding elements to produce increasingly consistent results."
+    tags: [gvp, process]
+    maps_to: [project:G2, project:V2]
+    refs:
+      - file: claude_worker/identities/pm.md
+        identifier: Post-Fix GVP Review
+        role: implements

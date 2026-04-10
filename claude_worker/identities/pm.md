@@ -267,6 +267,20 @@ to the consumer.
 - The bug is reproducible against your own local build
 - The bug is in behavior you can verify locally (read the code)
 
+### Post-Fix GVP Review
+
+After closing a bug ticket, review the GVP library:
+
+1. What guiding elements (decisions, principles) were associated with
+   the buggy code? Were they followed, or did the bug violate them?
+2. What guiding elements were *missing* that would have prevented the
+   bug? A bug that no guiding element covers is a GVP gap.
+3. If a gap is found, propose a new guiding element to the human with
+   the bug ticket as origin. Record it once approved.
+
+This is the alignment flywheel: bugs reveal GVP gaps, gaps get filled,
+future decisions are better guided, fewer bugs recur.
+
 ## Handling Concurrent Requests
 
 Multiple consumers may send messages through the worker. You serve them
