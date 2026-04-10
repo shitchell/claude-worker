@@ -426,10 +426,29 @@ def _wait_for_ready_state(
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
-def _worker_is_pm(name: str) -> bool:
-    """Return True if the named worker is marked as a PM worker in metadata."""
+def _get_worker_identity(name: str) -> str:
+    """Return the identity name for a worker ('pm', 'technical-lead', 'worker').
+
+    Reads the ``identity`` field from saved metadata. Falls back to
+    legacy ``pm``/``team_lead`` booleans for sessions saved before the
+    identity field was added.
+    """
     saved = get_saved_worker(name)
-    return bool(saved and saved.get("pm"))
+    if not saved:
+        return "worker"
+    identity = saved.get("identity")
+    if identity:
+        return identity
+    if saved.get("pm"):
+        return "pm"
+    if saved.get("team_lead"):
+        return "technical-lead"
+    return "worker"
+
+
+def _worker_is_pm(name: str) -> bool:
+    """Return True if the named worker is a PM (by identity or legacy flag)."""
+    return _get_worker_identity(name) == "pm"
 
 
 def _running_inside_claudecode() -> bool:
@@ -980,11 +999,13 @@ def cmd_start(args: argparse.Namespace) -> None:
 
     # Handle --resume: restore saved startup vars (cwd, claude_args)
     claude_args = list(args.claude_args or [])
-    # Determine whether this worker is a PM or TL worker. For new workers,
-    # the --pm / --team-lead flag drives this. For resumes, we check the
-    # saved metadata. These are mutually exclusive (enforced by argparse).
-    pm_mode = args.pm
-    tl_mode = args.team_lead
+    # Resolve identity: --identity <name>, --pm (→ "pm"), --team-lead (→ "technical-lead")
+    # These are mutually exclusive (enforced by argparse).
+    identity = getattr(args, "identity", None) or ""
+    if args.pm:
+        identity = "pm"
+    elif args.team_lead:
+        identity = "technical-lead"
     if args.resume:
         saved = get_saved_worker(name)
         if not saved or not saved.get("session_id"):
@@ -999,29 +1020,26 @@ def cmd_start(args: argparse.Namespace) -> None:
         claude_args = (
             ["--resume", saved["session_id"]] + (saved.get("claude_args") or []) + extra
         )
-        # Resumed workers inherit identity mode from saved metadata
-        if saved.get("pm"):
-            pm_mode = True
-        if saved.get("team_lead"):
-            tl_mode = True
+        # Resumed workers inherit identity from saved metadata
+        if not identity:
+            identity = _get_worker_identity(name)
     else:
         # Build claude_args with --agent etc. (order matters: agent first)
         if args.agent:
             claude_args = ["--agent", args.agent] + claude_args
 
-    # Identity mode (--pm or --team-lead): inject --append-system-prompt-file
-    # pointing at the runtime dir's identity.md. The runtime dir path is
-    # deterministic from `name` so we can reference it before creating the
-    # dir; we write the identity file after create_runtime_dir but before
-    # the fork, so the manager subprocess always finds it when spawning claude.
-    identity_mode = pm_mode or tl_mode
+    # Backwards compat aliases
+    pm_mode = identity == "pm"
+    tl_mode = identity == "technical-lead"
+    identity_mode = identity and identity != "worker"
+
+    # Identity mode: inject --append-system-prompt-file pointing at the
+    # runtime dir's identity.md.
     identity_path: Path | None = None
     if identity_mode and not args.resume:
         identity_path = get_runtime_dir(name) / "identity.md"
         claude_args = ["--append-system-prompt-file", str(identity_path)] + claude_args
     elif identity_mode and args.resume:
-        # On resume, recompute the identity path so we can rewrite the file
-        # (the previous runtime dir was cleaned up on stop)
         identity_path = get_runtime_dir(name) / "identity.md"
 
     # Save startup vars for future --resume (claude_args without --resume prefix)
@@ -1032,6 +1050,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         name,
         cwd=args.cwd or os.getcwd(),
         claude_args=saved_args,
+        identity=identity or "worker",
         pm=pm_mode,
         team_lead=tl_mode,
     )
@@ -1062,12 +1081,26 @@ def cmd_start(args: argparse.Namespace) -> None:
 
     # Write the identity file into the runtime dir. Must happen BEFORE
     # the fork so the manager subprocess sees it when spawning claude.
+    # Check user-installed identity first (~/.cwork/identities/<name>/identity.md),
+    # fall back to bundled identities for pm and technical-lead.
     if identity_path is not None:
-        if tl_mode:
-            identity_resource = TL_IDENTITY_RESOURCE
+        user_identity = Path.home() / ".cwork" / "identities" / identity / "identity.md"
+        if user_identity.exists():
+            identity_content = user_identity.read_text()
+        elif pm_mode:
+            identity_content = _load_bundled_resource(
+                "identities", PM_IDENTITY_RESOURCE
+            )
+        elif tl_mode:
+            identity_content = _load_bundled_resource(
+                "identities", TL_IDENTITY_RESOURCE
+            )
         else:
-            identity_resource = PM_IDENTITY_RESOURCE
-        identity_content = _load_bundled_resource("identities", identity_resource)
+            print(
+                f"Error: identity '{identity}' not found at {user_identity}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         identity_path.write_text(identity_content)
 
     # Write the per-worker settings.json that wires the PreToolUse
@@ -2152,11 +2185,10 @@ def _format_worker_line(name: str) -> str | None:
         except OSError:
             pass
 
-    # Read CWD + identity flags from saved worker metadata
+    # Read CWD + identity from saved worker metadata
     cwd = "-"
     saved = get_saved_worker(name)
-    is_pm = bool(saved and saved.get("pm"))
-    is_tl = bool(saved and saved.get("team_lead"))
+    worker_identity = _get_worker_identity(name)
     if saved and saved.get("cwd"):
         home = os.path.expanduser("~")
         if saved["cwd"].startswith(home):
@@ -2183,7 +2215,11 @@ def _format_worker_line(name: str) -> str | None:
     context_label = _format_context_window_label(log_file)
     context_line = f"\n    context: {context_label}" if context_label else ""
 
-    identity_tag = " [PM]" if is_pm else " [TL]" if is_tl else ""
+    _IDENTITY_LABELS = {"pm": "PM", "technical-lead": "TL"}
+    identity_tag = ""
+    if worker_identity and worker_identity != "worker":
+        label = _IDENTITY_LABELS.get(worker_identity, worker_identity.upper())
+        identity_tag = f" [{label}]"
     return (
         f"  {name}{identity_tag}\n"
         f"    pid: {pid}  status: {status}{idle_str}  cwd: {cwd}\n"
@@ -2200,13 +2236,17 @@ def _get_worker_info(name: str) -> dict | None:
         return None
 
     saved = get_saved_worker(name)
-    is_pm = bool(saved and saved.get("pm"))
-    is_tl = bool(saved and saved.get("team_lead"))
     raw_cwd = (saved.get("cwd") or "-") if saved else "-"
+    worker_identity = _get_worker_identity(name)
 
     status, log_mtime = get_worker_status(runtime)
 
-    role = "pm" if is_pm else "tl" if is_tl else "worker"
+    # Map identity to role for filter compatibility
+    role = (
+        "pm"
+        if worker_identity == "pm"
+        else "tl" if worker_identity == "technical-lead" else "worker"
+    )
 
     return {
         "name": name,
@@ -2448,9 +2488,10 @@ def _validate_wrapup(name: str, runtime: Path) -> str | None:
         return None
 
     handoff_dirs: list[Path] = []
-    if saved.get("pm"):
+    wid = _get_worker_identity(name)
+    if wid == "pm":
         handoff_dirs.append(Path(cwd) / ".cwork" / "pm" / "handoffs")
-    if saved.get("team_lead"):
+    if wid == "technical-lead":
         handoff_dirs.append(Path(cwd) / ".cwork" / "technical-lead" / "handoffs")
 
     for handoff_dir in handoff_dirs:
@@ -2531,11 +2572,11 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
 
     # 5. Prepare replacement parameters
     cwd = saved.get("cwd")
-    # Reconstruct claude_args: saved args + --resume
     saved_args = saved.get("claude_args") or []
     claude_args = ["--resume", session_id] + saved_args
-    pm_mode = saved.get("pm", False)
-    tl_mode = saved.get("team_lead", False)
+    replace_identity = _get_worker_identity(worker_name)
+    pm_mode = replace_identity == "pm"
+    tl_mode = replace_identity == "technical-lead"
 
     print(f"Forking replacer process (old manager PID: {old_manager_pid})...")
 
@@ -2606,7 +2647,8 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
         save_worker(
             worker_name,
             cwd=cwd or os.getcwd(),
-            claude_args=saved_args,  # save without --resume prefix
+            claude_args=saved_args,
+            identity=replace_identity,
             pm=pm_mode,
             team_lead=tl_mode,
         )
@@ -2622,9 +2664,6 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
         manager_pid = os.fork()
         if manager_pid == 0:
             # Grandchild: the new manager
-            replace_identity = (
-                "pm" if pm_mode else "technical-lead" if tl_mode else "worker"
-            )
             run_manager(
                 worker_name,
                 cwd,
@@ -3817,17 +3856,22 @@ def main():
     )
     p_start_identity = p_start.add_mutually_exclusive_group()
     p_start_identity.add_argument(
+        "--identity",
+        metavar="NAME",
+        help="Launch with an identity from ~/.cwork/identities/<name>/identity.md. "
+        "Built-in identities: pm, technical-lead.",
+    )
+    p_start_identity.add_argument(
         "--pm",
         action="store_true",
-        help="Launch as a Project Manager worker — loads the PM identity "
-        "via --append-system-prompt-file and enables chat-tag routing for "
-        "multi-consumer coordination",
+        help="Shorthand for --identity pm — loads the PM identity "
+        "and enables chat-tag routing for multi-consumer coordination",
     )
     p_start_identity.add_argument(
         "--team-lead",
         action="store_true",
-        help="Launch as a Technical Lead worker — loads the TL identity "
-        "via --append-system-prompt-file for code review and delegation",
+        help="Shorthand for --identity technical-lead — loads the TL identity "
+        "for code review and delegation",
     )
     p_start.add_argument(
         "--no-permission-hook",

@@ -872,3 +872,28 @@ decisions:
       - file: claude_worker/manager.py
         identifier: system:queue-drain
         role: implements
+
+  - id: D29
+    name: thin-identity-flag
+    decision: >
+      start accepts --identity <name> that reads identity prompt from
+      ~/.cwork/identities/<name>/identity.md (user-installed) or falls
+      back to bundled identities for pm and technical-lead. --pm and
+      --team-lead are backwards-compat aliases. Session metadata stores
+      identity: "<name>" alongside legacy pm/team_lead booleans.
+      _get_worker_identity reads the new field with fallback to legacy.
+      ls shows [<LABEL>] using a label map (pm→PM, technical-lead→TL,
+      custom identities show uppercased name).
+    origin: >
+      Ticket #035 (2026-04-10). TL recommended as step 3 of the
+      foundation plan. Thin first pass — no hooks/skeleton/migrations.
+      Full identity directory system grows from here.
+    tags: [architecture, identity]
+    maps_to: [project:G4, project:V5]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _get_worker_identity
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: --identity
+        role: implements
