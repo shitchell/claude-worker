@@ -1195,3 +1195,24 @@ decisions:
       - file: claude_worker/cli.py
         identifier: --identity
         role: uses
+
+  - id: D44
+    name: off-hours-idle-cron-script
+    decision: >
+      PM identity gets an off-hours-idle-check.sh periodic task that
+      fires when: (a) current time is 1am-7am local (configurable
+      via CW_OFFHOURS_START/END), (b) worker idle >= 2 hours
+      (configurable via CW_IDLE_THRESHOLD), (c) open todo tickets
+      exist. Rate-limited to once per calendar day via sentinel file.
+      Configured in periodic.yaml at 30-minute check interval; the
+      script self-gates on conditions.
+    origin: >
+      Ticket #045 (2026-04-10). Human: "i wonder if we should have
+      a cron sort of system whereby PMs get a ping at 3am saying
+      'hey, why not knock out a couple of idle tickets?'"
+    tags: [identity, pm]
+    maps_to: [project:G4]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: check_periodic_tasks
+        role: uses
