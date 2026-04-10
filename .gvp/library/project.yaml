@@ -1020,3 +1020,27 @@ decisions:
       - file: claude_worker/identities/pm.md
         identifier: Post-Fix GVP Review
         role: implements
+
+  - id: D36
+    name: cwork-directory-monitoring
+    decision: >
+      The manager monitors the worker's .cwork/ directory every 30s
+      via snapshot_cwork_dir (rglob + stat) and diff_cwork_snapshots.
+      Changed/added files trigger a [system:cwork-change] synthetic
+      message injected via the FIFO. First scan establishes baseline
+      (no notification). Complements the PostToolUse ticket watcher
+      (#020) by catching external changes (other workers, humans,
+      scripts).
+    origin: >
+      Ticket #040 (2026-04-10). Cherry-picked from Cluster A per
+      TL recommendation. ~30 LOE, no dependencies on full identity
+      system.
+    tags: [observability, architecture]
+    maps_to: [project:G2, project:G4]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: snapshot_cwork_dir
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: check_cwork_changes
+        role: implements

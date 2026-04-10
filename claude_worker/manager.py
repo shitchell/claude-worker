@@ -22,6 +22,7 @@ FIFO_READ_BUFFER_BYTES: int = 65536
 SIGTERM_WAIT_TIMEOUT_SECONDS: float = 10.0
 LOG_THREAD_JOIN_TIMEOUT_SECONDS: float = 5.0
 QUEUE_DRAIN_INTERVAL_SECONDS: float = 5.0
+CWORK_MONITOR_INTERVAL_SECONDS: float = 30.0
 
 # Env var override for the claude binary path. Tests set this to point at
 # a stub-claude script that emits canned JSONL output; production leaves
@@ -125,6 +126,88 @@ def drain_queue(name: str, in_fifo: Path) -> int:
             # Skip corrupt or unwritable — will retry next cycle
             continue
     return drained
+
+
+def snapshot_cwork_dir(cwd: str) -> dict[str, tuple[float, int]]:
+    """Snapshot the .cwork/ directory: {relative_path: (mtime, size)}.
+
+    Returns an empty dict if .cwork/ doesn't exist. Only includes
+    regular files, not directories.
+    """
+    cwork_dir = Path(cwd) / ".cwork"
+    if not cwork_dir.exists():
+        return {}
+    result: dict[str, tuple[float, int]] = {}
+    try:
+        for f in cwork_dir.rglob("*"):
+            if f.is_file():
+                try:
+                    st = f.stat()
+                    rel = str(f.relative_to(Path(cwd)))
+                    result[rel] = (st.st_mtime, st.st_size)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return result
+
+
+def diff_cwork_snapshots(
+    old: dict[str, tuple[float, int]],
+    new: dict[str, tuple[float, int]],
+) -> list[str]:
+    """Compare two .cwork/ snapshots, return list of changed/added file paths."""
+    changed: list[str] = []
+    for path, (mtime, size) in new.items():
+        old_entry = old.get(path)
+        if old_entry is None or old_entry != (mtime, size):
+            changed.append(path)
+    return changed
+
+
+def check_cwork_changes(
+    cwd: str,
+    in_fifo: Path,
+    prev_snapshot: dict[str, tuple[float, int]],
+) -> dict[str, tuple[float, int]]:
+    """Check for .cwork/ changes and inject a notification if any found.
+
+    Returns the new snapshot (to be cached by the caller for the next cycle).
+    Best-effort: never crashes the caller.
+    """
+    try:
+        new_snapshot = snapshot_cwork_dir(cwd)
+        if not prev_snapshot:
+            return new_snapshot  # first scan, no diff
+
+        changed = diff_cwork_snapshots(prev_snapshot, new_snapshot)
+        if not changed:
+            return new_snapshot
+
+        # Build notification
+        file_list = ", ".join(changed[:5])
+        if len(changed) > 5:
+            file_list += f" (+{len(changed) - 5} more)"
+        msg = json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": (
+                        f"[system:cwork-change] {len(changed)} file(s) "
+                        f"modified in .cwork/: {file_list}"
+                    ),
+                },
+            }
+        )
+        wr = os.open(str(in_fifo), os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            os.write(wr, (msg + "\n").encode())
+        finally:
+            os.close(wr)
+        return new_snapshot
+    except Exception:
+        return prev_snapshot
 
 
 def get_runtime_dir(name: str) -> Path:
@@ -576,6 +659,8 @@ def _run_manager_forkless(
         wr_fd = os.open(str(in_fifo), os.O_WRONLY)
 
         last_queue_drain = time.monotonic()
+        last_cwork_check = time.monotonic()
+        cwork_snapshot: dict[str, tuple[float, int]] = {}
 
         try:
             while proc.poll() is None:
@@ -589,14 +674,22 @@ def _run_manager_forkless(
                         proc.stdin.write(data)
                         proc.stdin.flush()
 
-                # Periodic queue drain — deliver pending reply messages
                 now = time.monotonic()
+
+                # Periodic queue drain — deliver pending reply messages
                 if now - last_queue_drain >= QUEUE_DRAIN_INTERVAL_SECONDS:
                     last_queue_drain = now
                     try:
                         drain_queue(name, in_fifo)
                     except Exception:
-                        pass  # best-effort, never crash the FIFO thread
+                        pass
+
+                # Periodic .cwork/ directory monitoring
+                if now - last_cwork_check >= CWORK_MONITOR_INTERVAL_SECONDS:
+                    last_cwork_check = now
+                    cwork_snapshot = check_cwork_changes(
+                        resolved_cwd, in_fifo, cwork_snapshot
+                    )
         except (OSError, BrokenPipeError):
             # These are EXPECTED during normal shutdown (claude exits,
             # FIFO closes). Not a panic condition.
