@@ -3571,6 +3571,146 @@ def cmd_tokens(args: argparse.Namespace) -> None:
             print(f"  {field}: {value:,}")
 
 
+def _repl_continuous(
+    name: str,
+    log_file: Path,
+    in_fifo: Path,
+    config,
+    formatter,
+    chat_id: str | None,
+) -> None:
+    """Continuous-flow REPL: output streams like tail -f, input on demand.
+
+    Messages flow continuously. Pressing Enter activates the input prompt.
+    After submitting, returns to continuous flow. Ctrl-D or /exit quits.
+    """
+    import select as _select
+    import termios
+    import tty
+
+    from claude_logs import parse_message, should_show_message
+
+    print("(continuous mode — press Enter to type, Ctrl-D to quit)\n")
+
+    # Save terminal state for restoration
+    if not sys.stdin.isatty():
+        print("Error: continuous mode requires a TTY", file=sys.stderr)
+        return
+    old_termios = termios.tcgetattr(sys.stdin)
+
+    # Start position for streaming
+    try:
+        stream_pos = log_file.stat().st_size
+    except OSError:
+        stream_pos = 0
+
+    def _stream_output(f, stop_evt):
+        """Print new messages from the log file until stop_evt is set."""
+        while not stop_evt.is_set():
+            line = f.readline()
+            if not line:
+                time.sleep(POLL_INTERVAL_SECONDS)
+                continue
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                data = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            msg = parse_message(data)
+            if not should_show_message(msg, data, config):
+                continue
+            rendered = _render_one_message(data, msg, config, formatter)
+            if rendered is not None:
+                print(rendered, flush=True)
+
+    try:
+        while True:
+            # FLOWING state: stream output + detect keypress
+            stop_event = threading.Event()
+            log_f = open(log_file)
+            log_f.seek(stream_pos)
+            stream_thread = threading.Thread(
+                target=_stream_output, args=(log_f, stop_event), daemon=True
+            )
+            stream_thread.start()
+
+            # Put terminal in raw mode to detect keypress without blocking
+            try:
+                tty.setcbreak(sys.stdin.fileno())
+                while True:
+                    ready, _, _ = _select.select([sys.stdin], [], [], 0.5)
+                    if ready:
+                        ch = sys.stdin.read(1)
+                        if ch == "\x04":  # Ctrl-D
+                            stop_event.set()
+                            stream_thread.join(timeout=1.0)
+                            stream_pos = log_f.tell()
+                            log_f.close()
+                            print()
+                            return
+                        # Any keypress → transition to INPUTTING
+                        break
+            finally:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_termios)
+
+            # INPUTTING state: stop streaming, show prompt
+            stop_event.set()
+            stream_thread.join(timeout=1.0)
+            stream_pos = log_f.tell()
+            log_f.close()
+
+            _flush_stdin()
+            try:
+                # Prepend the triggering character if it was printable
+                prompt_prefix = ch if ch.isprintable() else ""
+                user_input = input(f"{REPL_INPUT_PROMPT}{prompt_prefix}")
+                if prompt_prefix:
+                    user_input = prompt_prefix + user_input
+            except EOFError:
+                print()
+                return
+            except KeyboardInterrupt:
+                print("\n(Ctrl-C — returning to flow)")
+                continue
+
+            stripped_input = user_input.strip()
+            if not stripped_input:
+                continue
+            if stripped_input in REPL_EXIT_COMMANDS:
+                return
+
+            # Send the message
+            send_content = stripped_input
+            if chat_id:
+                send_content = f"[{CHAT_TAG_PREFIX}{chat_id}] {send_content}"
+
+            payload = json.dumps(
+                {"type": "user", "message": {"role": "user", "content": send_content}}
+            )
+            try:
+                with open(in_fifo, "w") as f:
+                    f.write(payload + "\n")
+                    f.flush()
+            except OSError as exc:
+                print(f"\nError writing to worker FIFO: {exc}", file=sys.stderr)
+                return
+
+            # Update stream position to current log end
+            try:
+                stream_pos = log_file.stat().st_size
+            except OSError:
+                pass
+
+    finally:
+        # Restore terminal state no matter what
+        try:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_termios)
+        except Exception:
+            pass
+
+
 def cmd_repl(args: argparse.Namespace) -> None:
     """Interactive human-facing REPL for a claude worker.
 
@@ -3654,6 +3794,11 @@ def cmd_repl(args: argparse.Namespace) -> None:
 
     # Entry context: last turn, if any
     _repl_print_last_turn(args.name)
+
+    # Continuous mode: tail -f with on-demand input
+    if getattr(args, "continuous", False):
+        _repl_continuous(args.name, log_file, in_fifo, config, formatter, chat_id)
+        return
 
     consecutive_sigint_count = 0
 
@@ -4217,6 +4362,13 @@ def main():
         "-v",
         action="store_true",
         help="Show tool calls, thinking, and metadata (matches read --verbose output)",
+    )
+    p_repl.add_argument(
+        "--continuous",
+        "-c",
+        action="store_true",
+        help="Continuous output mode: messages flow like tail -f, press Enter to type. "
+        "No prompt shown by default — input appears on demand.",
     )
 
     # -- tokens --

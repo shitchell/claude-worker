@@ -897,3 +897,23 @@ decisions:
       - file: claude_worker/cli.py
         identifier: --identity
         role: implements
+
+  - id: D30
+    name: repl-continuous-output-mode
+    decision: >
+      REPL accepts --continuous (-c) for tail-f style output with
+      on-demand input. Messages flow continuously; pressing any key
+      activates the readline prompt. After submit, returns to flow.
+      Uses raw terminal mode (termios/tty) + threading, no external
+      deps. Terminal state restored via try/finally. Default REPL
+      behavior unchanged — --continuous is opt-in.
+    origin: >
+      Ticket #036 (2026-04-10). Human: "what i'd love is a mechanism
+      whereby messages always flow by default with an input bar never
+      showing up — not even on end-of-turn."
+    tags: [craftsmanship]
+    maps_to: [project:V1, project:G4]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _repl_continuous
+        role: implements
