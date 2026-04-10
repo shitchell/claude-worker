@@ -917,3 +917,22 @@ decisions:
       - file: claude_worker/cli.py
         identifier: _repl_continuous
         role: implements
+
+  - id: D31
+    name: fifo-pending-status-check
+    decision: >
+      get_worker_status checks whether the FIFO has unread bytes
+      before reporting "waiting." Non-blocking select(fd, 0) on an
+      O_RDONLY|O_NONBLOCK fd detects pending data. If bytes exist,
+      returns "working" despite aged log mtime. Prevents false-idle
+      reports during the window between cmd_send's FIFO write and
+      the manager's drain.
+    origin: >
+      Ticket #011, future-queries item #3. Speculative fix to a
+      <100ms race window. ~10 lines + 2 regression tests.
+    tags: [status, races]
+    maps_to: [project:G1, project:D1]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: select
+        role: implements

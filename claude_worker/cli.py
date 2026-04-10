@@ -292,6 +292,23 @@ def get_worker_status(runtime: Path) -> tuple[str, float | None]:
     if turn_ended:
         log_age = time.time() - log_mtime
         if log_age >= STATUS_IDLE_THRESHOLD_SECONDS:
+            # Check FIFO for unread data — if bytes are pending, the
+            # manager hasn't drained them yet and the worker is about
+            # to start working. Report "working" to prevent false-idle.
+            in_fifo = runtime / "in"
+            if in_fifo.exists():
+                try:
+                    fd = os.open(str(in_fifo), os.O_RDONLY | os.O_NONBLOCK)
+                    try:
+                        import select as _sel
+
+                        ready, _, _ = _sel.select([fd], [], [], 0)
+                        if ready:
+                            return "working", log_mtime
+                    finally:
+                        os.close(fd)
+                except OSError:
+                    pass  # FIFO gone or unreadable — proceed with "waiting"
             return "waiting", log_mtime
         return "working", log_mtime
 
