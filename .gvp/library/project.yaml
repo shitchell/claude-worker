@@ -1125,3 +1125,27 @@ decisions:
       - file: claude_worker/cli.py
         identifier: _scaffold_from_skeleton
         role: implements
+
+  - id: D41
+    name: identity-specific-hooks
+    decision: >
+      Identity-specific hooks are loaded from
+      ~/.cwork/identities/<name>/hooks/hooks.json (raw settings.json
+      fragment format) and merged with standard hooks via _merge_hooks.
+      Each hook type's entries are appended, preserving base entries.
+      Passed through _build_permission_hook_settings via identity
+      parameter. Consistent with existing hook infrastructure — no
+      new format invented.
+    origin: >
+      Ticket D of identity directory incremental plan (#042).
+      ~30 LOE. Chose raw JSON fragments over simpler format for
+      consistency with existing per-worker settings.json.
+    tags: [identity, architecture]
+    maps_to: [project:V5, project:G4]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _load_identity_hooks
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _merge_hooks
+        role: implements

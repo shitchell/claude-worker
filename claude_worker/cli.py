@@ -1273,6 +1273,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         name=name,
         enabled=not getattr(args, "no_permission_hook", False),
         cwd=args.cwd or os.getcwd(),
+        identity=identity if identity_mode else None,
     )
     if permission_settings is not None:
         # Append --settings to the claude args so claude merges this
@@ -2813,7 +2814,7 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
 
         # 6e. Write permission settings if applicable
         permission_settings = _maybe_write_permission_settings(
-            name=worker_name, enabled=True, cwd=cwd
+            name=worker_name, enabled=True, cwd=cwd, identity=replace_identity
         )
         if permission_settings is not None:
             claude_args = ["--settings", str(permission_settings)] + claude_args
@@ -3393,18 +3394,63 @@ def cmd_revoke(args: argparse.Namespace) -> None:
     print(f"Revoked grant '{target_id}' for worker '{args.name}'.")
 
 
+def _load_identity_hooks(identity: str) -> dict:
+    """Load hook definitions from ~/.cwork/identities/<name>/hooks/hooks.json.
+
+    Returns a dict matching the settings.json hooks structure:
+    {"PreToolUse": [...], "Stop": [...], etc.}. Returns {} if the
+    file doesn't exist or can't be parsed.
+
+    Format: raw settings.json hook fragments — same structure as
+    _build_permission_hook_settings produces. This keeps identity
+    hooks consistent with standard hooks without inventing a new format.
+    """
+    hooks_file = (
+        Path.home() / ".cwork" / "identities" / identity / "hooks" / "hooks.json"
+    )
+    if not hooks_file.exists():
+        return {}
+    try:
+        data = json.loads(hooks_file.read_text())
+        if isinstance(data, dict):
+            return data
+        return {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _merge_hooks(base: dict, extra: dict) -> dict:
+    """Merge extra hook entries into the base hooks dict.
+
+    For each hook type (PreToolUse, Stop, PostToolUse, etc.), extra
+    entries are appended to the base list. Base entries are preserved.
+    """
+    merged = dict(base)
+    for hook_type, entries in extra.items():
+        if not isinstance(entries, list):
+            continue
+        if hook_type in merged:
+            merged[hook_type] = merged[hook_type] + entries
+        else:
+            merged[hook_type] = entries
+    return merged
+
+
 def _build_permission_hook_settings(
     grants_path: Path,
     python_executable: str,
     sentinel_dir: Path | None = None,
     cwd: str | None = None,
+    identity: str | None = None,
 ) -> dict:
     """Build the settings dict for per-worker hooks.
 
-    Wires up to three hooks:
+    Wires standard hooks plus identity-specific hooks:
     1. PreToolUse — permission grant hook for Edit/Write/MultiEdit
     2. PreToolUse — CWD write guard (if cwd provided)
-    3. Stop — context threshold check after each turn (if sentinel_dir provided)
+    3. Stop — context threshold check (if sentinel_dir provided)
+    4. PostToolUse — ticket watcher (if cwd provided)
+    5. Identity hooks — merged from ~/.cwork/identities/<name>/hooks/hooks.json
 
     This is pure data — no I/O — so tests can assert on the shape
     without touching the filesystem.
@@ -3471,11 +3517,20 @@ def _build_permission_hook_settings(
                 ],
             }
         ]
+    # Merge identity-specific hooks if present
+    if identity:
+        identity_hooks = _load_identity_hooks(identity)
+        if identity_hooks:
+            hooks = _merge_hooks(hooks, identity_hooks)
+
     return {"hooks": hooks}
 
 
 def _maybe_write_permission_settings(
-    name: str, enabled: bool, cwd: str | None = None
+    name: str,
+    enabled: bool,
+    cwd: str | None = None,
+    identity: str | None = None,
 ) -> Path | None:
     """Generate the per-worker settings.json for worker hooks.
 
@@ -3495,6 +3550,7 @@ def _maybe_write_permission_settings(
         python_executable=sys.executable,
         sentinel_dir=runtime,
         cwd=cwd,
+        identity=identity,
     )
     _atomic_write_text(settings_path, json.dumps(settings, indent=2) + "\n")
     return settings_path
