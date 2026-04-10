@@ -55,6 +55,8 @@ meta:
         description: Test infrastructure and methodology
       tokens:
         description: Token accounting and context window tracking
+      lifecycle:
+        description: Worker lifecycle management (start, stop, wrap-up, compaction)
 
 goals:
   - id: G1
