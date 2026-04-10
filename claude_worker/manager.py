@@ -481,6 +481,7 @@ def run_manager(
     claude_args: list[str],
     initial_message: str | None,
     identity: str = "worker",
+    extra_env: dict[str, str] | None = None,
 ) -> None:
     """Run the manager process (called after fork).
 
@@ -498,6 +499,7 @@ def run_manager(
         initial_message,
         install_signals=True,
         identity=identity,
+        extra_env=extra_env,
     )
 
 
@@ -508,6 +510,7 @@ def _run_manager_forkless(
     initial_message: str | None,
     install_signals: bool = True,
     identity: str = "worker",
+    extra_env: dict[str, str] | None = None,
 ) -> None:
     """Run the manager lifecycle WITHOUT the fork wrapper.
 
@@ -542,6 +545,10 @@ def _run_manager_forkless(
     env["CW_WORKER_NAME"] = name
     env["CW_IDENTITY"] = identity
     env["CW_PARENT_WORKER"] = os.environ.get("CW_WORKER_NAME", "")
+
+    # Extra env vars from identity config
+    if extra_env:
+        env.update(extra_env)
 
     # Build claude command. Binary path is overridable via
     # CLAUDE_WORKER_CLAUDE_BIN for test injection of a stub.

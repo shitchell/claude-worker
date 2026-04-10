@@ -520,6 +520,27 @@ def _get_internalize_message(identity: str) -> str | None:
     return None
 
 
+def _load_identity_config(identity: str) -> dict:
+    """Load per-identity config from ~/.cwork/identities/<name>/config.yaml.
+
+    Returns {} if the file doesn't exist or can't be parsed.
+    Supported keys:
+      claude_args: list[str] — extra args passed to claude
+      env: dict[str, str] — extra env vars for the subprocess
+      auto_skeleton: bool — whether to scaffold .cwork/<name>/ on start
+    """
+    config_path = Path.home() / ".cwork" / "identities" / identity / "config.yaml"
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml
+
+        data = yaml.safe_load(config_path.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def _get_worker_identity(name: str) -> str:
     """Return the identity name for a worker ('pm', 'technical-lead', 'worker').
 
@@ -1129,6 +1150,12 @@ def cmd_start(args: argparse.Namespace) -> None:
     tl_mode = identity == "technical-lead"
     identity_mode = identity and identity != "worker"
 
+    # Load per-identity config (claude_args, env vars, etc.)
+    identity_config = _load_identity_config(identity) if identity_mode else {}
+    # Merge identity claude_args (CLI args take precedence — appended after)
+    if identity_config.get("claude_args") and not args.resume:
+        claude_args = identity_config["claude_args"] + claude_args
+
     # Identity mode: inject --append-system-prompt-file pointing at the
     # runtime dir's identity.md.
     identity_path: Path | None = None
@@ -1272,13 +1299,13 @@ def cmd_start(args: argparse.Namespace) -> None:
     os.dup2(devnull, 1)
     os.dup2(devnull, 2)
 
-    identity = "pm" if pm_mode else "technical-lead" if tl_mode else "worker"
     run_manager(
         name=name,
         cwd=args.cwd,
         claude_args=claude_args,
         initial_message=initial_message,
-        identity=identity,
+        identity=identity or "worker",
+        extra_env=identity_config.get("env"),
     )
     os._exit(0)
 

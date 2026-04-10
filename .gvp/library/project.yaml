@@ -1084,3 +1084,24 @@ decisions:
       - file: claude_worker/cli.py
         identifier: _get_internalize_message
         role: implements
+
+  - id: D39
+    name: identity-config-yaml
+    decision: >
+      Per-identity config at ~/.cwork/identities/<name>/config.yaml.
+      Supported keys: claude_args (list, prepended to CLI args),
+      env (dict, set in subprocess environment via extra_env parameter
+      on run_manager). CLI args take precedence over config. Loaded
+      by _load_identity_config, returns {} on missing/malformed files.
+    origin: >
+      Ticket B of identity directory incremental plan (#042).
+      ~25 LOE. Makes identities carry their own configuration.
+    tags: [identity, architecture]
+    maps_to: [project:V5, project:V2]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _load_identity_config
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: extra_env
+        role: implements
