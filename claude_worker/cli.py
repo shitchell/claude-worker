@@ -499,6 +499,27 @@ def _save_read_marker(runtime: Path, args: argparse.Namespace, uuid: str) -> Non
         pass
 
 
+def _get_internalize_message(identity: str) -> str | None:
+    """Load the internalization message for an identity.
+
+    Checks ~/.cwork/identities/<identity>/internalize.md first.
+    Falls back to hardcoded constants for pm and technical-lead.
+    Returns None for unknown identities without an internalize file.
+    """
+    user_file = Path.home() / ".cwork" / "identities" / identity / "internalize.md"
+    if user_file.exists():
+        try:
+            return user_file.read_text().strip()
+        except OSError:
+            pass
+    # Fall back to built-in constants
+    if identity == "pm":
+        return PM_INTERNALIZE_MESSAGE
+    if identity == "technical-lead":
+        return TL_INTERNALIZE_MESSAGE
+    return None
+
+
 def _get_worker_identity(name: str) -> str:
     """Return the identity name for a worker ('pm', 'technical-lead', 'worker').
 
@@ -1138,10 +1159,10 @@ def cmd_start(args: argparse.Namespace) -> None:
         parts.append(Path(args.prompt_file).read_text())
     if args.prompt:
         parts.append(args.prompt)
-    if not parts and pm_mode:
-        parts.append(PM_INTERNALIZE_MESSAGE)
-    if not parts and tl_mode:
-        parts.append(TL_INTERNALIZE_MESSAGE)
+    if not parts and identity_mode:
+        internalize = _get_internalize_message(identity)
+        if internalize:
+            parts.append(internalize)
     initial_message = "\n\n".join(parts) if parts else None
 
     # Auto-create .cwork/ skeleton for identity-mode workers
@@ -2749,11 +2770,7 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
         )
 
         # 6g. Determine initial message for the new session
-        initial_message = None
-        if pm_mode:
-            initial_message = PM_INTERNALIZE_MESSAGE
-        elif tl_mode:
-            initial_message = TL_INTERNALIZE_MESSAGE
+        initial_message = _get_internalize_message(replace_identity)
 
         # 6h. Fork the new manager daemon (same pattern as cmd_start)
         manager_pid = os.fork()

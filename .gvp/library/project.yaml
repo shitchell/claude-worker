@@ -1065,3 +1065,22 @@ decisions:
       - file: claude_worker/cli.py
         identifier: cmd_projects
         role: implements
+
+  - id: D38
+    name: internalize-md-per-identity
+    decision: >
+      Identity internalization messages are loaded from
+      ~/.cwork/identities/<name>/internalize.md when present, falling
+      back to hardcoded PM_INTERNALIZE_MESSAGE / TL_INTERNALIZE_MESSAGE
+      constants. Custom identities can define their own first-turn
+      message without code changes. Applied in both cmd_start and
+      cmd_replaceme.
+    origin: >
+      Ticket A of identity directory incremental plan (#041).
+      ~15 LOE, makes identities more self-contained.
+    tags: [identity, architecture]
+    maps_to: [project:V5, project:G4]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _get_internalize_message
+        role: implements
