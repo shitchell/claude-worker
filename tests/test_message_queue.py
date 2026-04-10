@@ -67,6 +67,7 @@ class TestDrainQueue:
             data = os.read(rd_fd, 65536)
             msg = json.loads(data.decode().strip())
             assert msg["type"] == "user"
+            assert "[system:queue-drain]" in msg["message"]["content"]
             assert "[reply-from:pm]" in msg["message"]["content"]
             assert "test message" in msg["message"]["content"]
         finally:

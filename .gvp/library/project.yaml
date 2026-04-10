@@ -848,3 +848,27 @@ decisions:
       - file: claude_worker/cli.py
         identifier: identity
         role: uses
+
+  - id: D28
+    name: synthetic-user-message-system-prefix
+    decision: >
+      All synthetic User messages injected by claude-worker are
+      prefixed with [system:<source>] to distinguish them from
+      actual human input. Convention:
+      - [system:context-threshold] — context window warning
+      - [system:stop-requested] — stop wrap-up message
+      - [system:ticket-change] — ticket file change notification
+      - [system:queue-drain] — message queue delivery
+      Agents should treat [system:*] messages with lower authority
+      than [chat:*] or [repl:*] (human-originated) messages.
+    origin: >
+      Ticket #033 (2026-04-09). Human: "we should ensure that all
+      synthetic User messages are clearly labeled as NOT from the
+      User." Queue drain was the only injection point missing the
+      prefix — others already had it.
+    tags: [observability, pm]
+    maps_to: [project:G2, project:V2]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: system:queue-drain
+        role: implements

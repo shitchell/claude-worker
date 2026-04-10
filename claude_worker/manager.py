@@ -108,7 +108,7 @@ def drain_queue(name: str, in_fifo: Path) -> int:
                     "type": "user",
                     "message": {
                         "role": "user",
-                        "content": f"[reply-from:{sender}] {content}",
+                        "content": f"[system:queue-drain] [reply-from:{sender}] {content}",
                     },
                 }
             )
