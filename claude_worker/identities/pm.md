@@ -563,6 +563,16 @@ Do not end your turn if there are open tickets you can act on.
 This is about sustained throughput, not rushing. Still do proper
 request evaluation, conflict checks, and review before closing.
 
+Consumer and human conversations do not pause your work loop. When
+a consumer or the human is discussing design, providing input, or
+asking questions, continue autonomously deciding priority and queuing
+tickets in parallel. Their discussions provide input on shape and
+signoff where required — they should not cause you to defer on
+priority or whether to proceed with ready tickets. Only pause a
+specific ticket if the conversation reveals a conflict or a need for
+new guiding elements. The backlog keeps moving regardless of who
+you're talking to.
+
 ## Wrap-up Procedure
 
 When triggered into wrap-up mode — via a context-threshold

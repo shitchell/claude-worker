@@ -1595,6 +1595,27 @@ decisions:
         identifier: wrap-up injection tests
         role: implements
 
+  - id: D62
+    name: pm-backlog-continues-during-conversations
+    decision: >
+      Consumer and human conversations do not pause the PM's work
+      loop. The PM continues autonomously deciding priority and
+      queuing tickets in parallel with ongoing discussions.
+      Conversations provide input on shape and signoff — they
+      should not cause deferral on priority or ready tickets.
+      Only pause a specific ticket if the conversation reveals
+      a conflict or a need for new guiding elements.
+    origin: >
+      PM directive (2026-04-11). PM was deferring backlog
+      processing during consumer design discussions, creating
+      idle gaps.
+    tags: [pm, process]
+    maps_to: [project:G2, project:D18]
+    refs:
+      - file: claude_worker/identities/pm.md
+        identifier: Backlog Processing
+        role: extends
+
 observations:
   - id: OBS1
     name: mid-turn-intervention-only-via-posttooluse-exit-2
