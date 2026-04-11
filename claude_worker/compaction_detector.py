@@ -12,6 +12,17 @@ Usage (wired automatically via per-worker settings.json):
     python -m claude_worker.compaction_detector --identity <name> --cwd <path>
 """
 
+# IMPORTANT: Compaction detection in claude-worker has two layers:
+#
+# 1. Hook-based (this file): SessionStart fires with matcher_value="compact"
+#    when Claude Code compacts. This is the REAL-TIME detection mechanism.
+#
+# 2. Log-based: The JSONL log contains compact_boundary messages:
+#    {"type": "system", "subtype": "compact_boundary",
+#     "compactMetadata": {"trigger": "manual"|"auto", "preTokens": <int>}}
+#    Use this for post-hoc analysis, not system/init (which fires every turn
+#    in -p stream-json mode and is NOT a compaction indicator).
+
 from __future__ import annotations
 
 import argparse

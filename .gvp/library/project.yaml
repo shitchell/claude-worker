@@ -1520,6 +1520,33 @@ decisions:
         identifier: foreground systemd mode
         role: defines
 
+  - id: D59
+    name: compact-boundary-not-init
+    decision: >
+      system/init fires every turn in -p stream-json mode and is
+      NOT a compaction indicator. The real compaction signal is
+      compact_boundary (type: system, subtype: compact_boundary)
+      with compactMetadata containing trigger type and pre-token
+      count. Hook-based detection (compaction_detector.py) was
+      already correct (uses SessionStart matcher_value=compact).
+      Log analysis must use compact_boundary, never init count.
+    origin: >
+      Ticket #055 (2026-04-11). PM experiment with /compact
+      revealed the real log format. Prior analysis of old TL
+      session incorrectly reported 151 compactions (actually 0).
+    tags: [observability, context]
+    maps_to: [project:G2, project:V2, project:P6]
+    refs:
+      - file: claude_worker/compaction_detector.py
+        identifier: compaction detection hook
+        role: uses
+      - file: claude_worker/cli.py
+        identifier: _count_compactions
+        role: implements
+      - file: tests/test_compaction_detection.py
+        identifier: compaction detection tests
+        role: implements
+
 observations:
   - id: OBS1
     name: mid-turn-intervention-only-via-posttooluse-exit-2

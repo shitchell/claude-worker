@@ -1778,6 +1778,46 @@ def _show_worker_response(
         )
 
 
+def _count_compactions(log_file: Path) -> list[dict]:
+    """Count compact_boundary events in a worker's log.
+
+    Returns a list of compaction records, each containing:
+    - line: line number in the log
+    - trigger: "manual" or "auto"
+    - pre_tokens: token count before compaction
+
+    NOTE: system/init fires every turn in -p stream-json mode and is
+    NOT a compaction indicator. Only compact_boundary marks a real
+    compaction event. See compaction_detector.py for the full story.
+    """
+    compactions: list[dict] = []
+    line_num = 0
+    try:
+        with open(log_file) as f:
+            for raw_line in f:
+                line_num += 1
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    data = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    data.get("type") == "system"
+                    and data.get("subtype") == "compact_boundary"
+                ):
+                    metadata = data.get("compactMetadata", {})
+                    compactions.append({
+                        "line": line_num,
+                        "trigger": metadata.get("trigger", "unknown"),
+                        "pre_tokens": metadata.get("preTokens", 0),
+                    })
+    except OSError:
+        pass
+    return compactions
+
+
 def _iter_log_reverse(log_file: Path, chunk_size: int = LOG_REVERSE_CHUNK_SIZE):
     """Yield parsed JSONL entries from a log file, newest to oldest.
 
@@ -3935,6 +3975,19 @@ def cmd_tokens(args: argparse.Namespace) -> None:
         print("Unknown token fields (not yet classified):")
         for field, value in stats.unknown_token_fields.items():
             print(f"  {field}: {value:,}")
+
+    # Compaction history
+    compactions = _count_compactions(log_file)
+    if compactions:
+        print()
+        print(f"Compactions: {len(compactions)}")
+        for c in compactions:
+            trigger = c["trigger"]
+            pre = c["pre_tokens"]
+            print(f"  line {c['line']}: {trigger} (pre: {pre:,} tokens)")
+    else:
+        print()
+        print("Compactions: 0")
 
 
 def cmd_projects(args: argparse.Namespace) -> None:
