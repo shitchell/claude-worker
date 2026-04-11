@@ -132,6 +132,7 @@ REPLACEME_ANCESTOR_WALK_MAX: int = 5
 REPLACEME_OLD_MANAGER_WAIT_TIMEOUT: float = 30.0
 REPLACEME_OLD_MANAGER_POLL_INTERVAL: float = 0.5
 REPLACEME_HANDOFF_MAX_AGE_MINUTES: int = 30
+REPLACEME_ERROR_LOG_SUFFIX: str = ".replaceme.log"
 
 # Context window size detection. Claude Code models with the `[1m]`
 # suffix (e.g., `claude-opus-4-6[1m]`) use a 1M context window; all
@@ -2589,6 +2590,27 @@ def cmd_stop(args: argparse.Namespace) -> None:
         print(f"Cleaned up {runtime}")
 
 
+def _strip_flag_with_value(args: list[str], flag: str) -> list[str]:
+    """Remove a flag and its following value from an argument list.
+
+    Handles zero, one, or multiple occurrences. If the flag appears at the
+    end of the list with no following value, it is still removed.
+    """
+    result: list[str] = []
+    skip_next = False
+    for i, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == flag:
+            # Skip this flag and its value (if present)
+            if i + 1 < len(args):
+                skip_next = True
+            continue
+        result.append(arg)
+    return result
+
+
 def _get_ppid(pid: int) -> int | None:
     """Read the parent PID of a process from /proc.
 
@@ -2749,10 +2771,17 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
     # 5. Prepare replacement parameters
     cwd = saved.get("cwd")
     saved_args = saved.get("claude_args") or []
+    # Strip --append-system-prompt-file from saved_args to avoid duplicates —
+    # the identity file is re-written to the new runtime dir below.
+    saved_args = _strip_flag_with_value(saved_args, "--append-system-prompt-file")
     claude_args = ["--resume", session_id] + saved_args
     replace_identity = _get_worker_identity(worker_name)
+    identity_mode = replace_identity and replace_identity != "worker"
     pm_mode = replace_identity == "pm"
     tl_mode = replace_identity == "technical-lead"
+
+    # Load per-identity config (env vars, etc.) — mirrors cmd_start
+    identity_config = _load_identity_config(replace_identity) if identity_mode else {}
 
     print(f"Forking replacer process (old manager PID: {old_manager_pid})...")
 
@@ -2793,18 +2822,39 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
                 pass
             time.sleep(2.0)
 
-        # 6c. The old manager archived the runtime dir (SIGUSR1 handler).
+        # 6c. Auto-create .cwork/ skeleton + register project (mirrors cmd_start)
+        resolved_cwd = cwd or os.getcwd()
+        _ensure_cwork_dirs(resolved_cwd, pm_mode, tl_mode)
+        if identity_mode:
+            from claude_worker.project_registry import register_project
+
+            register_project(resolved_cwd)
+
+        # 6d. The old manager archived the runtime dir (SIGUSR1 handler).
         # The worker name is now free. Create new runtime dir.
         new_runtime = create_runtime_dir(worker_name)
 
-        # 6d. Write identity file if PM or TL
-        if pm_mode or tl_mode:
+        # 6e. Write identity file — check user-installed identity first,
+        # fall back to bundled (mirrors cmd_start's resolution at lines 1249-1265).
+        if identity_mode:
             identity_path = new_runtime / "identity.md"
-            if tl_mode:
-                identity_resource = TL_IDENTITY_RESOURCE
+            user_identity = (
+                Path.home() / ".cwork" / "identities" / replace_identity / "identity.md"
+            )
+            if user_identity.exists():
+                identity_content = user_identity.read_text()
+            elif pm_mode:
+                identity_content = _load_bundled_resource(
+                    "identities", PM_IDENTITY_RESOURCE
+                )
+            elif tl_mode:
+                identity_content = _load_bundled_resource(
+                    "identities", TL_IDENTITY_RESOURCE
+                )
             else:
-                identity_resource = PM_IDENTITY_RESOURCE
-            identity_content = _load_bundled_resource("identities", identity_resource)
+                raise FileNotFoundError(
+                    f"Identity '{replace_identity}' not found at {user_identity}"
+                )
             identity_path.write_text(identity_content)
             # Prepend --append-system-prompt-file to claude_args
             claude_args = [
@@ -2812,27 +2862,36 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
                 str(identity_path),
             ] + claude_args
 
-        # 6e. Write permission settings if applicable
+        # 6f. Write permission settings if applicable
         permission_settings = _maybe_write_permission_settings(
             name=worker_name, enabled=True, cwd=cwd, identity=replace_identity
         )
         if permission_settings is not None:
-            claude_args = ["--settings", str(permission_settings)] + claude_args
+            claude_args = claude_args + ["--settings", str(permission_settings)]
 
-        # 6f. Save worker metadata (same as cmd_start)
+        # 6g. Save worker metadata (same as cmd_start).
+        # saved_args was stripped of --append-system-prompt-file above to
+        # prevent duplicates in claude_args. Re-add it with the NEW runtime
+        # path so a future cmd_start --resume can find the identity file.
+        resume_saved_args = saved_args[:]
+        if identity_mode:
+            resume_saved_args = [
+                "--append-system-prompt-file",
+                str(identity_path),
+            ] + resume_saved_args
         save_worker(
             worker_name,
             cwd=cwd or os.getcwd(),
-            claude_args=saved_args,
+            claude_args=resume_saved_args,
             identity=replace_identity,
             pm=pm_mode,
             team_lead=tl_mode,
         )
 
-        # 6g. Determine initial message for the new session
+        # 6h. Determine initial message for the new session
         initial_message = _get_internalize_message(replace_identity)
 
-        # 6h. Fork the new manager daemon (same pattern as cmd_start)
+        # 6i. Fork the new manager daemon (same pattern as cmd_start)
         manager_pid = os.fork()
         if manager_pid == 0:
             # Grandchild: the new manager
@@ -2842,6 +2901,7 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
                 claude_args,
                 initial_message,
                 identity=replace_identity,
+                extra_env=identity_config.get("env"),
             )
             sys.exit(0)
         # Replacer: wait for the new manager's PID file, then exit
@@ -2853,8 +2913,15 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
             time.sleep(0.1)
         sys.exit(0)
     except Exception:
-        # Best-effort: if anything goes wrong, don't leave the
-        # replacer process lingering.
+        # Log the traceback to a sidecar file for diagnostics
+        import traceback
+
+        error_log = get_base_dir() / f"{worker_name}{REPLACEME_ERROR_LOG_SUFFIX}"
+        try:
+            error_log.parent.mkdir(parents=True, exist_ok=True)
+            error_log.write_text(traceback.format_exc())
+        except OSError:
+            pass
         sys.exit(1)
 
 

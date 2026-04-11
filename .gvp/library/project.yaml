@@ -1448,6 +1448,33 @@ decisions:
         identifier: compaction resilience design
         role: defines
 
+  - id: D56
+    name: replaceme-production-hardening
+    decision: >
+      Harden cmd_replaceme against silent failures: log replacer
+      errors to a sidecar file, deduplicate identity flags from
+      saved_args, load identity config for extra_env, resolve
+      user-installed identities before bundled fallback, and add
+      _ensure_cwork_dirs + register_project calls. Mirrors
+      cmd_start's flow to prevent future divergence.
+    origin: >
+      Ticket #052 (2026-04-10). First production test of replaceme
+      (#023) failed silently — old worker died, no replacement
+      launched, no diagnostics. Root cause: multiple bugs from
+      cmd_replaceme diverging from cmd_start's flow.
+    tags: [architecture, lifecycle, observability]
+    maps_to: [project:G2, project:V2, project:P8]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: cmd_replaceme
+        role: implements
+      - file: tests/test_replaceme.py
+        identifier: replaceme tests
+        role: implements
+      - file: .cwork/tickets/052-replaceme-production-failure/TICKET.md
+        identifier: replaceme production failure
+        role: defines
+
 observations:
   - id: OBS1
     name: mid-turn-intervention-only-via-posttooluse-exit-2

@@ -169,6 +169,7 @@ class TestContextThresholdHook:
         # Mark all thresholds as already fired
         (sentinel_dir / "context-warning-50").write_text("1")
         (sentinel_dir / "context-warning-65").write_text("1")
+        (sentinel_dir / "context-warning-70").write_text("1")
         (sentinel_dir / "wakeup-context-sent").write_text("already fired")
         payload = _make_hook_payload(str(log_path))
 
