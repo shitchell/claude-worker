@@ -1,7 +1,11 @@
 """Stop hook that checks context window usage after each turn.
 
-Fires once per session when usage crosses CONTEXT_WAKEUP_THRESHOLD_PCT.
-Echoes a warning to stdout which Claude Code shows to the agent.
+Fires at three thresholds:
+- 50%: [system:context-warning] delegation reminder
+- 65%: [system:context-warning] stronger delegation + wrap-up recommendation
+- 80%: [system:context-threshold] begin wrap-up procedure
+
+Each threshold fires at most once per session (sentinel files).
 
 Usage (wired automatically by cmd_start via per-worker settings.json):
 
@@ -9,10 +13,6 @@ Usage (wired automatically by cmd_start via per-worker settings.json):
 
 Reads the Stop hook JSON payload from stdin. Extracts ``transcript_path``
 to compute context usage via ``claude_logs.compute_context_window_usage``.
-
-Exit codes:
-    0 — success (stdout may contain a warning message)
-    Other — non-blocking error (Claude Code ignores and continues)
 """
 
 from __future__ import annotations
@@ -23,7 +23,31 @@ import sys
 import time
 from pathlib import Path
 
-CONTEXT_WAKEUP_THRESHOLD_PCT: float = 0.80
+# Thresholds: (percentage, sentinel_name, message)
+THRESHOLDS: list[tuple[float, str, str]] = [
+    (
+        0.50,
+        "context-warning-50",
+        "[system:context-warning] You are at approximately {pct}% of your "
+        "context window. Delegate more, implement less — each tool call "
+        "output consumes context. Delegation costs ~1% of context; direct "
+        "implementation costs 5-10%.",
+    ),
+    (
+        0.65,
+        "context-warning-65",
+        "[system:context-warning] You are at approximately {pct}% of your "
+        "context window. Consider wrapping up your current task and "
+        "delegating remaining work to a sub-worker. Context pressure "
+        "increases error rate and compaction risk.",
+    ),
+    (
+        0.80,
+        "wakeup-context-sent",
+        "[system:context-threshold] You are at approximately {pct}% of "
+        "your context window. Begin your wrap-up procedure now.",
+    ),
+]
 
 # Context window size detection constants
 _CONTEXT_WINDOW_1M: int = 1_000_000
@@ -31,12 +55,7 @@ _CONTEXT_WINDOW_DEFAULT: int = 200_000
 
 
 def _detect_context_window_size(log_file: Path) -> int:
-    """Read the log's system/init message to determine context window size.
-
-    Models with ``[1m]`` suffix use a 1M context window; all others
-    default to 200K. Falls back to 1M on error (underestimates
-    percentage, which is the safer failure mode).
-    """
+    """Read the log's system/init message to determine context window size."""
     try:
         with open(log_file) as f:
             for line in f:
@@ -62,7 +81,7 @@ def main() -> None:
     parser.add_argument(
         "--sentinel-dir",
         required=True,
-        help="Directory for the one-shot sentinel file",
+        help="Directory for the one-shot sentinel files",
     )
     args = parser.parse_args()
 
@@ -76,13 +95,6 @@ def main() -> None:
     if payload.get("stop_hook_active"):
         sys.exit(0)
 
-    sentinel_dir = Path(args.sentinel_dir)
-    sentinel = sentinel_dir / "wakeup-context-sent"
-
-    # One-shot: bail if already fired
-    if sentinel.exists():
-        sys.exit(0)
-
     transcript_path = payload.get("transcript_path", "")
     if not transcript_path:
         sys.exit(0)
@@ -91,7 +103,7 @@ def main() -> None:
     if not log_file.exists():
         sys.exit(0)
 
-    # Compute context usage — best-effort, never crash the hook
+    # Compute context usage
     try:
         from claude_logs import compute_context_window_usage
     except ImportError:
@@ -106,21 +118,31 @@ def main() -> None:
 
     window = _detect_context_window_size(log_file)
     pct = cw.total / window
-    if pct < CONTEXT_WAKEUP_THRESHOLD_PCT:
-        sys.exit(0)
 
-    # Threshold crossed — echo warning to stdout (Claude sees it)
-    pct_display = int(pct * 100)
-    print(
-        f"[system:context-threshold] You are at approximately "
-        f"{pct_display}% of your context window. Begin your "
-        f"wrap-up procedure now."
-    )
+    sentinel_dir = Path(args.sentinel_dir)
+
+    # Check thresholds from lowest to highest — fire the highest crossed
+    # threshold that hasn't been fired yet
+    for threshold_pct, sentinel_name, message_template in THRESHOLDS:
+        if pct < threshold_pct:
+            continue
+        sentinel = sentinel_dir / sentinel_name
+        if sentinel.exists():
+            continue
+
+        # Threshold crossed — echo warning and write sentinel
+        pct_display = int(pct * 100)
+        print(message_template.format(pct=pct_display))
+
+        try:
+            sentinel_dir.mkdir(parents=True, exist_ok=True)
+            sentinel.write_text(str(time.time()))
+        except OSError:
+            pass
 
     # Write sentinel to prevent re-fire
     try:
         sentinel_dir.mkdir(parents=True, exist_ok=True)
-        sentinel.write_text(str(time.time()))
     except OSError:
         pass
 

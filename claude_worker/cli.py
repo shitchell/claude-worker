@@ -3538,7 +3538,11 @@ def _build_permission_hook_settings(
     if identity:
         compaction_command = (
             f"{python_executable} -m claude_worker.compaction_detector "
-            f"--identity {identity}"
+            f"--identity {identity} --cwd {cwd or '.'}"
+        )
+        reinjector_command = (
+            f"{python_executable} -m claude_worker.identity_reinjector "
+            f"--identity {identity} --cwd {cwd or '.'}"
         )
         hooks["SessionStart"] = [
             {
@@ -3549,7 +3553,15 @@ def _build_permission_hook_settings(
                         "command": compaction_command,
                     }
                 ],
-            }
+            },
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": reinjector_command,
+                    }
+                ],
+            },
         ]
     # Merge identity-specific hooks if present
     if identity:

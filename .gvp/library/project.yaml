@@ -1461,3 +1461,31 @@ observations:
       (context >85%) where waiting for turn end risks compaction.
       Non-critical warnings should use Stop hooks (between turns).
       Confirmed via live signal testing (2026-04-10, ticket #048).
+
+  - id: D54
+    name: compaction-resilience-immediate-phase
+    decision: >
+      Immediate compaction resilience implementation: (1) context
+      warnings at 50%/65%/80% via Stop hook with per-threshold
+      sentinels. 50% = delegation reminder, 65% = wrap-up
+      recommendation, 80% = begin wrap-up. (2) Enhanced compaction
+      detector: logs to .cwork/<identity>/LOG.md, fires
+      claude-worker notify, notes analyze-session/wrap-up were
+      skipped. (3) Identity re-injector: full identity.md + ticket
+      summary + GVP count on compact/clear events; lighter summary
+      on startup/resume. No truncation.
+    origin: >
+      Ticket #048 immediate phase (2026-04-10). Prevention +
+      detection + recovery layered approach approved by human.
+    tags: [context, observability]
+    maps_to: [project:P10, project:V6, project:G2]
+    refs:
+      - file: claude_worker/context_threshold.py
+        identifier: THRESHOLDS
+        role: implements
+      - file: claude_worker/compaction_detector.py
+        identifier: _log_compaction
+        role: implements
+      - file: claude_worker/identity_reinjector.py
+        identifier: _load_identity_text
+        role: implements

@@ -17,10 +17,13 @@ from unittest.mock import patch
 import pytest
 
 from claude_worker.context_threshold import (
-    CONTEXT_WAKEUP_THRESHOLD_PCT,
+    THRESHOLDS,
     _detect_context_window_size,
     main,
 )
+
+# The 80% threshold for backwards compat with existing tests
+CONTEXT_WAKEUP_THRESHOLD_PCT = 0.80
 from tests.conftest import make_system_init
 
 
@@ -134,7 +137,7 @@ class TestContextThresholdHook:
         log_path, sentinel_dir = self._setup(tmp_path)
         payload = _make_hook_payload(str(log_path))
 
-        mock_usage = _make_cw_usage(500_000)
+        mock_usage = _make_cw_usage(400_000)  # 40% — below all thresholds
         with patch(
             "claude_logs.compute_context_window_usage",
             return_value=mock_usage,
@@ -163,6 +166,9 @@ class TestContextThresholdHook:
     def test_sentinel_prevents_second_fire(self, tmp_path: Path):
         """When sentinel exists, skip even if threshold is crossed."""
         log_path, sentinel_dir = self._setup(tmp_path)
+        # Mark all thresholds as already fired
+        (sentinel_dir / "context-warning-50").write_text("1")
+        (sentinel_dir / "context-warning-65").write_text("1")
         (sentinel_dir / "wakeup-context-sent").write_text("already fired")
         payload = _make_hook_payload(str(log_path))
 

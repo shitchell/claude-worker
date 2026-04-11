@@ -1,24 +1,65 @@
 """SessionStart hook that detects compaction events.
 
 When Claude Code compacts, it fires a SessionStart event with
-matcher value "compact". This hook echoes a re-bootstrap instruction
-to stdout, which Claude sees as hook output.
+matcher value "compact". This hook:
+1. Echoes a re-bootstrap instruction to stdout
+2. Logs the event to .cwork/<identity>/LOG.md
+3. Fires claude-worker notify if configured
+4. Notes that analyze-session and wrap-up were SKIPPED
 
 Usage (wired automatically via per-worker settings.json):
 
-    python -m claude_worker.compaction_detector --identity <name>
+    python -m claude_worker.compaction_detector --identity <name> --cwd <path>
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
+import time
+from pathlib import Path
+
+
+def _log_compaction(cwd: str, identity: str) -> None:
+    """Append compaction event to the identity's LOG.md."""
+    log_file = Path(cwd) / ".cwork" / identity / "LOG.md"
+    if not log_file.parent.exists():
+        return
+    try:
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        entry = (
+            f"{timestamp} | COMPACTION | Context compacted. "
+            f"analyze-session and wrap-up were SKIPPED.\n"
+        )
+        with open(log_file, "a") as f:
+            f.write(entry)
+    except OSError:
+        pass
+
+
+def _notify_compaction(identity: str) -> None:
+    """Fire claude-worker notify if configured."""
+    try:
+        subprocess.run(
+            [
+                "claude-worker",
+                "notify",
+                f"[compaction] {identity} worker context was compacted. "
+                f"Analyze-session and wrap-up were skipped.",
+            ],
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        pass
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--identity", default="worker")
+    parser.add_argument("--cwd", default=".")
     args = parser.parse_args()
 
     try:
@@ -26,22 +67,28 @@ def main() -> None:
     except (json.JSONDecodeError, ValueError):
         sys.exit(0)
 
-    # Only fire on compaction events
-    # SessionStart matcher values: startup, resume, clear, compact
-    # The hook fires for all of them, but we only care about compact
     matcher_value = payload.get("matcher_value", "")
     if matcher_value != "compact":
         sys.exit(0)
 
-    # Compaction detected — instruct the agent to re-bootstrap
     identity = args.identity
+
+    # Log the compaction event
+    _log_compaction(args.cwd, identity)
+
+    # Notify human if configured
+    _notify_compaction(identity)
+
+    # Echo re-bootstrap instruction
     print(
         f"[system:compaction-detected] Your context was just compacted. "
-        f"Prior conversation content has been compressed. To maintain "
-        f"quality: (1) re-read your identity guidance if you're unsure "
-        f"of your behavioral rules, (2) re-read relevant ticket files "
-        f"before continuing implementation, (3) verify assumptions by "
-        f"reading code rather than relying on conversation memory."
+        f"Prior conversation content has been compressed. "
+        f"IMPORTANT: analyze-session and wrap-up were SKIPPED — they cannot "
+        f"run retroactively on compacted context. "
+        f"To recover: (1) re-read your identity file, (2) re-read the "
+        f"latest handoff at .cwork/{identity}/handoffs/, (3) verify your "
+        f"current work by reading ticket files, (4) report status to confirm "
+        f"you've re-bootstrapped successfully."
     )
 
 
