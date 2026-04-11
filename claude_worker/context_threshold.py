@@ -42,6 +42,12 @@ THRESHOLDS: list[tuple[float, str, str]] = [
         "increases error rate and compaction risk.",
     ),
     (
+        0.70,
+        "context-warning-70",
+        "[system:context-threshold] At {pct}% context. Finish your current "
+        "task, close out the ticket, then switch to wrap-up procedures.",
+    ),
+    (
         0.80,
         "wakeup-context-sent",
         "[system:context-threshold] You are at approximately {pct}% of "

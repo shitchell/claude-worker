@@ -1489,3 +1489,21 @@ observations:
       - file: claude_worker/identity_reinjector.py
         identifier: _load_identity_text
         role: implements
+
+  - id: D55
+    name: context-threshold-70-percent
+    decision: >
+      Added 70% context threshold between the 65% warning and 80%
+      wrap-up trigger. Message: "Finish your current task, close out
+      the ticket, then switch to wrap-up procedures." Four thresholds
+      total: 50% (delegate), 65% (consider wrapping up), 70% (finish
+      and wrap up), 80% (begin wrap-up now).
+    origin: >
+      PM session 03 (2026-04-10). Provides a transition step between
+      "consider wrapping up" and "wrap up now."
+    tags: [context]
+    maps_to: [project:V6, project:P10]
+    refs:
+      - file: claude_worker/context_threshold.py
+        identifier: THRESHOLDS
+        role: implements
