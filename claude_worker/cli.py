@@ -1290,6 +1290,32 @@ def cmd_start(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
+    # --foreground and --background are mutually exclusive
+    if getattr(args, "foreground", False) and args.background:
+        print(
+            "Error: --foreground and --background are mutually exclusive",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Foreground mode: run the manager directly, no fork.
+    # Used by systemd Type=simple and similar process supervisors.
+    if getattr(args, "foreground", False):
+        print(f"claude-worker: {name} (foreground)", file=sys.stderr)
+        if identity_mode:
+            print(f"  identity: {identity}", file=sys.stderr)
+        print(f"  cwd: {args.cwd or os.getcwd()}", file=sys.stderr)
+        print(f"  pid: {os.getpid()}", file=sys.stderr)
+        run_manager(
+            name=name,
+            cwd=args.cwd,
+            claude_args=claude_args,
+            initial_message=initial_message,
+            identity=identity or "worker",
+            extra_env=identity_config.get("env"),
+        )
+        sys.exit(0)
+
     # Fork to background
     pid = os.fork()
     if pid > 0:
@@ -4348,6 +4374,11 @@ def main():
         "--background",
         action="store_true",
         help="Return immediately without waiting for claude's response",
+    )
+    p_start.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run in the foreground (no daemonize). For systemd Type=simple.",
     )
     p_start.add_argument(
         "--show-response",

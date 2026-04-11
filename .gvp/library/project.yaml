@@ -1495,6 +1495,31 @@ decisions:
         identifier: Post-completion reporting
         role: defines
 
+  - id: D58
+    name: foreground-systemd-mode
+    decision: >
+      Add --foreground flag to claude-worker start that runs the
+      manager directly in the current process without forking.
+      Calls run_manager (→ _run_manager_forkless with
+      install_signals=True) instead of the fork/setsid/devnull
+      dance. Enables systemd Type=simple service management.
+      Mutually exclusive with --background.
+    origin: >
+      Ticket #053 (2026-04-10). TAStest Director needs always-on
+      family-rhc deployment under systemd.
+    tags: [architecture, lifecycle]
+    maps_to: [project:G4, project:V2]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: cmd_start
+        role: implements
+      - file: tests/test_foreground.py
+        identifier: foreground tests
+        role: implements
+      - file: .cwork/tickets/053-foreground-systemd-mode/TICKET.md
+        identifier: foreground systemd mode
+        role: defines
+
 observations:
   - id: OBS1
     name: mid-turn-intervention-only-via-posttooluse-exit-2
