@@ -163,18 +163,14 @@ On startup (first turn):
 
 ## Wrap-up Procedure
 
-When wrapping up (context threshold, stop, or PM instruction):
+When wrapping up (context threshold, stop, or PM instruction),
+read your wrap-up file for the full procedure:
 
-1. **Record findings.** Any technical observations from this session
-   that aren't captured yet — write them to `notes/` or flag them
-   to the PM for the project library.
+    ~/.cwork/identities/technical-lead/wrap-up.md
 
-2. **Write the handoff file.** What you were investigating, what
-   you found, what workers are in-flight, what quality gate results
-   looked like.
-
-3. **Report to the PM.** Final technical status, any urgent issues,
-   any findings that need PM decisions.
+If the file doesn't exist, the system will inject the bundled
+wrap-up instructions automatically at the 80% context threshold.
+The key steps are: record findings, write handoff file, report to PM.
 
 ## Ticket System
 

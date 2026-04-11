@@ -75,8 +75,9 @@ def _build_stop_wrapup_message() -> str:
             f"session log and save the analysis to {ANALYSES_DIR}/."
         )
     return (
-        "[system:stop-requested] Stop has been requested. Please complete your "
-        "wrap-up procedure and respond with 'wrap-up complete' when done."
+        "[system:stop-requested] Stop has been requested. Read your wrap-up "
+        "file (~/.cwork/identities/<your-identity>/wrap-up.md) for the full "
+        "procedure, then complete it and respond with 'wrap-up complete' when done."
         f"{analyze_instruction} You have up to 15 minutes."
     )
 
@@ -3625,6 +3626,8 @@ def _build_permission_hook_settings(
             f"{python_executable} -m claude_worker.context_threshold "
             f"--sentinel-dir {sentinel_dir}"
         )
+        if identity:
+            context_command += f" --identity {identity}"
         hooks["Stop"] = [
             {
                 "hooks": [

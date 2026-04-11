@@ -1564,6 +1564,37 @@ decisions:
         identifier: claugs dependency
         role: implements
 
+  - id: D61
+    name: wrapup-file-injection-at-threshold
+    decision: >
+      Move wrap-up procedures from identity files to separate
+      wrap-up.md files (~/.cwork/identities/<name>/wrap-up.md,
+      bundled fallback for pm and technical-lead). At the 80%
+      context threshold, the Stop hook auto-injects the wrap-up
+      file contents instead of just a warning. This prevents
+      attention decay — the agent receives the full procedure
+      in-context at the moment it needs it.
+    origin: >
+      Ticket #054 (2026-04-11). Old TL session showed wrap-up
+      instructions from session start had decayed by the time
+      they were needed. Injecting at threshold time ensures
+      the agent sees them fresh.
+    tags: [context, lifecycle, identity]
+    maps_to: [project:V6, project:P10, project:G2]
+    refs:
+      - file: claude_worker/context_threshold.py
+        identifier: _load_wrapup_file
+        role: implements
+      - file: claude_worker/identities/pm-wrapup.md
+        identifier: PM wrap-up procedure
+        role: defines
+      - file: claude_worker/identities/tl-wrapup.md
+        identifier: TL wrap-up procedure
+        role: defines
+      - file: tests/test_wrapup_injection.py
+        identifier: wrap-up injection tests
+        role: implements
+
 observations:
   - id: OBS1
     name: mid-turn-intervention-only-via-posttooluse-exit-2

@@ -23,6 +23,41 @@ import sys
 import time
 from pathlib import Path
 
+# Bundled wrap-up resource filenames keyed by identity name
+WRAPUP_BUNDLED_RESOURCES: dict[str, str] = {
+    "pm": "pm-wrapup.md",
+    "technical-lead": "tl-wrapup.md",
+}
+
+
+def _load_wrapup_file(identity: str) -> str | None:
+    """Load wrap-up instructions for an identity.
+
+    Checks user-installed first (~/.cwork/identities/<name>/wrap-up.md),
+    falls back to bundled resources for pm and technical-lead.
+    Returns None if no wrap-up file exists for this identity.
+    """
+    if not identity:
+        return None
+    # User-installed wrap-up file
+    user_path = Path.home() / ".cwork" / "identities" / identity / "wrap-up.md"
+    if user_path.exists():
+        try:
+            return user_path.read_text()
+        except OSError:
+            pass
+    # Bundled fallback
+    resource = WRAPUP_BUNDLED_RESOURCES.get(identity)
+    if resource:
+        try:
+            from importlib.resources import files
+
+            return (files("claude_worker") / "identities" / resource).read_text()
+        except Exception:
+            pass
+    return None
+
+
 # Thresholds: (percentage, sentinel_name, message)
 THRESHOLDS: list[tuple[float, str, str]] = [
     (
@@ -89,6 +124,11 @@ def main() -> None:
         required=True,
         help="Directory for the one-shot sentinel files",
     )
+    parser.add_argument(
+        "--identity",
+        default="",
+        help="Worker identity name (for loading wrap-up file at 80%% threshold)",
+    )
     args = parser.parse_args()
 
     # Read hook input from stdin
@@ -139,6 +179,14 @@ def main() -> None:
         # Threshold crossed — echo warning and write sentinel
         pct_display = int(pct * 100)
         print(message_template.format(pct=pct_display))
+
+        # At 80% threshold, inject the full wrap-up procedure
+        if sentinel_name == "wakeup-context-sent":
+            wrapup = _load_wrapup_file(args.identity)
+            if wrapup:
+                print()
+                print("=== WRAP-UP PROCEDURE (auto-injected at 80% threshold) ===")
+                print(wrapup)
 
         try:
             sentinel_dir.mkdir(parents=True, exist_ok=True)
