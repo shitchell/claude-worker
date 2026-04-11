@@ -261,6 +261,24 @@ wasteful. When filing directly:
 4. **Always notify the PM** that you filed tickets. A brief message
    listing what you filed and why is sufficient.
 
+### Post-completion reporting
+
+After completing a ticket assignment:
+
+1. **Update INDEX.md** — set the ticket status to `done` (or `review`
+   if a PM decision is pending).
+2. **Send the PM a completion report** via `claude-worker send` — include:
+   - What was done (summary of changes)
+   - Commit hash
+   - Test count (passed/failed)
+   - Any issues found or follow-up items
+3. **Echo the queue tag** — if the PM's original assignment included a
+   `[queue:<id>]` tag, include it literally in your response so the
+   PM's `wait-for-queue-response` can match it.
+
+This is NOT optional — the PM has no other way to know you finished.
+If you don't report, the PM sits idle waiting.
+
 ### Closing tickets
 
 You can close tickets you own when:

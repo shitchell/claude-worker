@@ -1475,6 +1475,26 @@ decisions:
         identifier: replaceme production failure
         role: defines
 
+  - id: D57
+    name: tl-post-completion-reporting
+    decision: >
+      TL identity must report back to the PM after completing every
+      ticket assignment: update INDEX.md status, send a completion
+      report via claude-worker send (what was done, commit hash, test
+      count, issues found), and echo the [queue:<id>] tag if the
+      assignment had one. Without this, the PM has no signal that
+      work finished and sits idle.
+    origin: >
+      PM directive (2026-04-10). First TL session completed #052 but
+      the PM had to poll for completion status because the TL identity
+      lacked explicit reporting instructions.
+    tags: [identity, process]
+    maps_to: [project:G2, project:V2]
+    refs:
+      - file: claude_worker/identities/technical-lead.md
+        identifier: Post-completion reporting
+        role: defines
+
 observations:
   - id: OBS1
     name: mid-turn-intervention-only-via-posttooluse-exit-2
