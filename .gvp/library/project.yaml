@@ -7,6 +7,8 @@ meta:
         description: Code structure and module organization
       cairn:
         description: GVP/cairn integration decisions
+      context:
+        description: Context window management, budget awareness, compaction resilience
       correctness:
         description: Correctness guarantees and invariants
       craftsmanship:
@@ -57,6 +59,12 @@ meta:
         description: Token accounting and context window tracking
       lifecycle:
         description: Worker lifecycle management (start, stop, wrap-up, compaction)
+    categories:
+      observation:
+        yaml_key: observations
+        id_prefix: OBS
+        primary_field: description
+        is_root: true
 
 goals:
   - id: G1
@@ -80,7 +88,9 @@ goals:
       transition to `dead`, or a test that fails for the right reason.
       A worker that appears alive but is actually broken is worse
       than a dead worker because operators don't know to investigate.
-    tags: [observability, state-awareness]
+      Context disruption (compaction, clear) must also produce an
+      observable signal and trigger a recovery procedure.
+    tags: [observability, state-awareness, lifecycle]
     maps_to: []
 
   - id: G3
@@ -139,9 +149,12 @@ values:
       When the task is "investigate an unfamiliar system" and the
       worker is not already expert, prefer a subagent or sub-worker
       over self-reasoning. Fresh context is faster AND more accurate
-      than loaded context. Memory-based claims about unfamiliar APIs
-      should be verified before stating.
-    tags: [process, efficiency]
+      than loaded context, and consumes dramatically less of the
+      delegating worker's context budget. A delegation message costs
+      ~1% of context; the equivalent direct implementation costs
+      5-10%. Memory-based claims about unfamiliar APIs should be
+      verified before stating.
+    tags: [process, efficiency, context]
     maps_to: []
 
   - id: V5
@@ -151,6 +164,20 @@ values:
       multiple files. If a feature forces changes in 5+ files,
       reconsider the architecture before committing.
     tags: [architecture]
+    maps_to: []
+
+  - id: V6
+    name: context-budget-awareness
+    statement: >
+      Context is a finite, non-renewable resource within a session.
+      Every tool call output, every file read, every inline code
+      change consumes context. Delegation (sending work to a sub-
+      worker) costs ~1% of context; direct implementation costs
+      5-10%. Identity workers (PM, TL) must delegate aggressively
+      to preserve context for coordination, which is their primary
+      value. Context budget warnings at 50%, 65%, and 80% enforce
+      this awareness.
+    tags: [context, delegation]
     maps_to: []
 
 principles:
@@ -242,6 +269,19 @@ principles:
       explicit try/except around potentially-racy operations.
     tags: [durability]
     maps_to: [project:V3, project:G2]
+
+  - id: P10
+    name: survive-context-disruption
+    statement: >
+      When context is disrupted (compaction, clear, crash), the
+      recovery path is: (1) re-read identity guidance, (2) re-read
+      latest handoff, (3) verify current work against files, (4)
+      report status. Identity re-injection hooks provide the
+      behavioral guidance; handoff files provide the work context.
+      The agent must never continue working after disruption without
+      explicitly verifying its understanding.
+    tags: [context, observability, lifecycle]
+    maps_to: [project:G2]
 
 decisions:
   - id: D1
@@ -1381,3 +1421,43 @@ decisions:
       - file: claude_worker/cli.py
         identifier: cmd_send
         role: implements
+
+  - id: D53
+    name: compaction-resilience-design
+    decision: >
+      Compaction resilience uses a layered approach: prevention
+      (context budget warnings at 50%/65%/80% via Stop hook,
+      delegation enforcement for identity workers), detection
+      (SessionStart hook on compact events, compaction_detector.py),
+      recovery (identity re-injection on compact/clear events,
+      handoff file as recovery anchor). Mid-turn intervention uses
+      PostToolUse exit 2 (the only viable mechanism — signals kill
+      the session in -p mode). No identity text truncation on
+      re-injection.
+    origin: >
+      Ticket #048 (2026-04-10). Signal experiment confirmed:
+      SIGUSR1 no effect on claude process, SIGUSR2/SIGINT kill
+      the session. PostToolUse exit 2 is the only mid-turn path.
+    tags: [context, architecture, observability, lifecycle]
+    maps_to: [project:P10, project:V6]
+    refs:
+      - file: claude_worker/compaction_detector.py
+        identifier: compaction detection hook
+        role: implements
+      - file: .cwork/tickets/048-compaction-resilience/TECHNICAL.md
+        identifier: compaction resilience design
+        role: defines
+
+observations:
+  - id: OBS1
+    name: mid-turn-intervention-only-via-posttooluse-exit-2
+    description: >
+      The ONLY mechanism for mid-turn agent communication is
+      PostToolUse hooks exiting with code 2 + stderr message. This
+      produces a blocking error shown to the agent mid-turn. No
+      signal gracefully interrupts a turn in -p mode — SIGUSR1 has
+      no effect, SIGUSR2 and SIGINT both kill the session. Use
+      PostToolUse exit 2 sparingly: only for critical thresholds
+      (context >85%) where waiting for turn end risks compaction.
+      Non-critical warnings should use Stop hooks (between turns).
+      Confirmed via live signal testing (2026-04-10, ticket #048).
