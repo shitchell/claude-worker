@@ -123,8 +123,8 @@ Three files contain persistent state that must survive crashes intact:
 
 - `~/.claude/settings.json` (install-hook writes it; the user's
   sacred Claude Code config)
-- `/tmp/claude-workers/<UID>/.sessions.json` (resume metadata)
-- `/tmp/claude-workers/<UID>/<name>/missing-tags.json` (PM dedup log)
+- `~/.cwork/workers/.sessions.json` (resume metadata)
+- `~/.cwork/workers/<name>/missing-tags.json` (PM dedup log)
 
 All three use `manager._atomic_write_text(path, content)`, which
 writes to a sibling `.tmp` file and `os.replace()`s it into place.
@@ -176,9 +176,9 @@ Don't reimplement token accounting in claude-worker — if a field is
 missing or wrong, fix it in claugs first and bump the version floor
 in `pyproject.toml`. Current floor: `claugs>=0.6.8`.
 
-The worker's own `/tmp/claude-workers/<uid>/<name>/log` contains the
-same `usage` blocks Claude Code writes to its session log, so we pass
-the runtime log directly to `compute_context_window_usage` without
+The worker's own `~/.cwork/workers/<name>/log` contains the same
+`usage` blocks Claude Code writes to its session log, so we pass the
+runtime log directly to `compute_context_window_usage` without
 deriving Claude Code project slugs or cross-referencing paths.
 
 Context window size detection (`_detect_context_window_size`) reads
@@ -196,15 +196,23 @@ claude_worker/
 ├── __main__.py              # `python -m claude_worker` entry
 ├── cli.py                   # all subcommand handlers + helpers
 ├── manager.py               # daemon process + fork wrapper
+├── commit_checker.py        # PostToolUse hook: check commits for tests + GVP
+├── compaction_detector.py   # SessionStart hook: detect + log compaction events
 ├── context_threshold.py     # Stop hook: context window check after each turn
 ├── cwd_guard.py             # PreToolUse hook: deny writes outside worker CWD
+├── identity_reinjector.py   # SessionStart hook: re-inject identity on compact/resume
 ├── permission_grant.py      # PreToolUse hook: apply pre-authorized edits
+├── project_registry.py      # ~/.cwork/projects/registry.yaml management
+├── ticket_lifecycle.py      # ticket directory structural validation
 ├── ticket_watcher.py        # PostToolUse hook: notify PM/TL of ticket changes
+├── token_tracking.py        # session analysis CSV + stats reader
 ├── hooks/
 │   └── session-uuid-env-injection.sh  # pure-bash SessionStart hook
 ├── identities/
 │   ├── pm.md                # PM worker behavioral contract
-│   └── technical-lead.md    # TL worker behavioral contract
+│   ├── pm-wrapup.md         # PM wrap-up procedure
+│   ├── technical-lead.md    # TL worker behavioral contract
+│   └── tl-wrapup.md         # TL wrap-up procedure
 ├── references/
 │   └── ai-driven-development.md  # AI dev guide (bundled)
 └── skills/
@@ -214,7 +222,7 @@ tests/
 ├── conftest.py              # fake_worker, running_worker, helpers
 ├── stub_claude.py           # stub claude binary (canonical + scripted modes)
 ├── stub_claude.sh           # wrapper accepting claude CLI flags
-└── test_*.py                # ~170 tests covering all subcommands
+└── test_*.py                # ~310 tests covering all subcommands
 ```
 
 ## Before merging

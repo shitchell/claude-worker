@@ -84,8 +84,10 @@ Each running worker has one of four statuses, visible in `list`:
 ```
 claude-worker start [--name NAME] [--cwd DIR] [--prompt PROMPT]
                     [--prompt-file FILE] [--agent NAME] [--resume]
-                    [--background] [--show-response | --show-full-response]
-                    [--pm] [-- CLAUDE_ARGS...]
+                    [--background] [--foreground]
+                    [--show-response | --show-full-response]
+                    [--identity NAME | --pm | --team-lead]
+                    [--no-permission-hook] [-- CLAUDE_ARGS...]
 ```
 
 Start a new worker. Forks a background manager process that handles the claude
@@ -105,23 +107,35 @@ subprocess lifecycle.
   Prints a hint with the pre-send marker UUID so a later `wait-for-turn
   --after-uuid X` can target this specific turn without racing against a
   stale `result` message.
+- `--foreground` — run in the foreground without daemonizing. For
+  `systemd Type=simple` or when you want the manager's lifecycle tied
+  to the calling shell.
 - `--show-response` — after the first turn completes, print the assistant's
   response (equivalent to `read --last-turn --exclude-user`).
 - `--show-full-response` — after the first turn completes, print everything
   since the start (equivalent to `read --since <pre-start-marker>
   --exclude-user`).
-- `--pm` — launch as a **Project Manager** worker. Loads the bundled PM
-  identity via `--append-system-prompt-file`, enables chat-tag auto-routing,
-  and tags `[PM]` in `ls` output. See [PM mode](#pm-mode-multi-consumer-workers).
+- `--identity NAME` — launch with a custom identity from
+  `~/.cwork/identities/<name>/identity.md`. See [Identity system](#identity-system).
+- `--pm` — shorthand for `--identity pm`. Loads the bundled PM
+  identity, enables chat-tag auto-routing, and tags `[PM]` in `ls` output.
+  See [PM mode](#pm-mode-multi-consumer-workers).
+- `--team-lead` — shorthand for `--identity technical-lead`. Loads the TL
+  identity for code review and delegation. Tags `[TL]` in `ls` output.
+- `--no-permission-hook` — disable the PreToolUse permission-grant hook
+  (useful for tests or debugging).
 - Extra args after `--` are passed through to `claude` (e.g.
   `claude-worker start --name fast -- --model haiku`).
 
 ### `send`
 
 ```
-claude-worker send [--queue] [--show-response | --show-full-response]
+claude-worker send [--queue] [--broadcast] [--dry-run] [--verbose]
+                   [--show-response | --show-full-response]
                    [--chat ID | --all-chats]
-                   NAME [MESSAGE...]
+                   [--role pm|tl|worker] [--status STATUS]
+                   [--alive] [--cwd PATH]
+                   [NAME] [MESSAGE...]
 ```
 
 Send a user message to a worker. Blocks until the worker responds. Message
@@ -135,6 +149,13 @@ echo "analyze this code" | claude-worker send myworker
   tag in the message and wait for the specific tagged response. Use this when
   multiple senders might be producing responses concurrently, or when you
   need to send to a worker that's still processing a previous turn.
+- `--broadcast` — send the message to all workers matching the filter flags.
+  Worker name is omitted when broadcasting.
+- `--role`, `--status`, `--alive`, `--cwd` — filter targets for broadcast
+  (same filters as `list`).
+- `--dry-run` — print the JSON envelope that would be sent without writing
+  to the FIFO. Zero side effects.
+- `--verbose` — print the JSON envelope to stderr before sending.
 - `--show-response` — after the turn completes, print only the assistant's
   response.
 - `--show-full-response` — after the turn completes, print everything new
@@ -151,7 +172,7 @@ and `CLAUDECODE=1`. See [PM mode](#pm-mode-multi-consumer-workers).
 
 ```
 claude-worker read [--follow] [--since ID_OR_TIMESTAMP] [--until UUID]
-                   [--last-turn] [--exclude-user] [-n N]
+                   [--new] [--mark] [--last-turn] [--exclude-user] [-n N]
                    [--count | --summary] [--verbose]
                    [--color | --no-color] [--chat ID | --all-chats]
                    NAME
@@ -168,6 +189,10 @@ messages are **shown by default** — pass `--exclude-user` to hide them.
   with the marker's content so the user recognizes the reference.
 - `--until UUID` — stop at the given UUID (exclusive). Combine with `--since`
   for a precise window: `read --since abc --until def`.
+- `--new` — show only messages after the last `--mark`. Per-consumer via
+  `CLAUDE_SESSION_UUID` or `--chat`. Mutually exclusive with `--since`.
+- `--mark` — after displaying, save the last-seen UUID as a read marker.
+  Use with `--new` to track "unread" messages per consumer.
 - `--last-turn` — show the most recent conversational exchange. Walks backwards
   from the end of the log until at least one user-input AND one assistant
   message have been seen, then shows everything from the earlier of the two
@@ -247,7 +272,7 @@ Output format per worker:
     context: 77% (776k/1M)
 ```
 
-- `[PM]` appears next to PM workers.
+- `[PM]` / `[TL]` appears next to identity workers.
 - `idle: <duration>` appears for workers in `waiting` or `dead` state.
 - `last:` shows a preview of the most recent assistant text for quick
   "what's the worker doing?" glance.
@@ -330,11 +355,15 @@ one-line version, `claude-worker ls` for a per-worker context line.
 ### `repl`
 
 ```
-claude-worker repl [--chat ID] NAME
+claude-worker repl [--chat ID] [--verbose] [--continuous] NAME
 ```
 
 Interactive turn-by-turn chat with a running worker. Built for humans
 sitting at a terminal — not for orchestrators (use `send` for those).
+
+- `--verbose`, `-v` — show tool calls, thinking, and metadata.
+- `--continuous`, `-c` — continuous output mode: messages flow like
+  `tail -f`, press Enter to type. No prompt shown by default.
 
 The loop:
 
@@ -441,6 +470,97 @@ notification text. Any shell command that accepts a message works
 
 Rate-limited to one notification per 60 seconds per worker. Best-effort:
 failures are logged to stderr, never crash the worker.
+
+### `reply`
+
+```
+claude-worker reply [--sender NAME] NAME [MESSAGE...]
+```
+
+Send a reply to a worker's persistent message queue (no FIFO needed —
+the manager drains the queue periodically). Message reads stdin if
+omitted.
+
+- `--sender` — sender identity. Auto-detected from PID ancestry if
+  running inside a worker.
+
+### `projects`
+
+```
+claude-worker projects
+```
+
+List registered projects with active workers and ticket counts. Projects
+are registered automatically when an identity worker (`--identity`,
+`--pm`, `--team-lead`) is started in a directory. Registry lives at
+`~/.cwork/projects/registry.yaml`.
+
+### `stats`
+
+```
+claude-worker stats
+```
+
+Print summary statistics from session analyses (cost, tokens, per
+identity/project). Reads the `~/.cwork/analyses/summary.csv` populated
+by the analyze-session skill during wrap-up.
+
+### `grant`
+
+```
+claude-worker grant [--path PATH | --glob PATTERN | --tool-use-id ID | --last]
+                    [--tool TOOL] [--persistent] [--reason TEXT] NAME
+```
+
+Pre-authorize a sensitive-file Edit/Write/MultiEdit call for a worker.
+Claude Code's sensitive-file gate blocks edits to certain paths (e.g.
+`.claude/**`) even with `--dangerously-skip-permissions`. This command
+lets you authorize specific edits from outside the worker.
+
+- `--path` — grant for an exact file path.
+- `--glob` — grant for any file matching an fnmatch pattern.
+- `--tool-use-id` — grant for an exact tool_use_id from the log.
+- `--last` — grant the most recent sensitive-file denial in the worker's log.
+- `--tool` — restrict to specific tools (Edit, Write, MultiEdit). Repeatable.
+- `--persistent` — keep the grant active after first use (default: one-shot).
+- `--reason` — optional audit note.
+
+### `grants`
+
+```
+claude-worker grants NAME
+```
+
+List active permission grants for a worker.
+
+### `revoke`
+
+```
+claude-worker revoke [--all] NAME [GRANT_ID]
+```
+
+Revoke a permission grant by ID, or `--all` to remove every grant.
+
+## Identity system
+
+Identity workers are started with `--identity NAME` (or the shorthands
+`--pm` and `--team-lead`). The identity system provides:
+
+- **Behavioral contract** — an `identity.md` file loaded via
+  `--append-system-prompt-file` that defines the worker's role.
+- **Wrap-up procedure** — a `wrap-up.md` file referenced during
+  two-phase shutdown.
+- **Skeleton scaffolding** — a directory tree copied into the project
+  on first start (e.g., `.cwork/pm/` for PM workers).
+- **Custom hooks** — `hooks/hooks.json` merged into the per-worker
+  settings for identity-specific hook wiring.
+- **GVP elements** — `gvp/` directory with identity-specific goals,
+  values, and principles.
+
+Identity directories live at `~/.cwork/identities/<name>/`. Built-in
+identities (`pm`, `technical-lead`) use bundled files from
+`claude_worker/identities/` as defaults, with user-level overrides
+taking precedence.
 
 ## PM mode (multi-consumer workers)
 

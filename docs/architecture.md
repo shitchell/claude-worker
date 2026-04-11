@@ -23,36 +23,37 @@ bridges the FIFO, tees the stdout log, and persists session metadata.
                     │   ┌───────────────┐                        │
                     │   │ session,pid,  │  state sidecar files   │
                     │   │ claude-pid,   │                        │
+                    │   │ settings.json,│                        │
                     │   │ identity.md,  │                        │
-                    │   │ missing-tags  │                        │
+                    │   │ grants.jsonl  │                        │
                     │   └───────────────┘                        │
                     └──────────────────────────────────────────┘
 ```
 
 ## Runtime directory
 
-Each worker gets `/tmp/claude-workers/{UID}/{name}/`:
+Each worker gets `~/.cwork/workers/<name>/`:
 
 ```
-/tmp/claude-workers/1000/my-worker/
+~/.cwork/workers/my-worker/
 ├── in                # named FIFO — accepts stream-json user messages
 ├── log               # regular file — all claude stdout (JSONL)
 ├── pid               # manager process PID
 ├── claude-pid        # claude subprocess PID (test-harness sidecar)
 ├── session           # claude session ID (written after init message)
-├── identity.md       # PM identity markdown (PM workers only)
+├── settings.json     # per-worker hooks (permission, context, CWD guard, etc.)
+├── identity.md       # identity markdown (identity workers only)
+├── grants.jsonl      # pre-authorized edits (permission-grant feature)
 └── missing-tags.json # PM tag monitoring dedup log (PM workers only)
 ```
 
 Persistent metadata (session ID, cwd, claude args, PM flag, agent) lives in
-`/tmp/claude-workers/{UID}/.sessions.json`, keyed by worker name. Writes use
+`~/.cwork/workers/.sessions.json`, keyed by worker name. Writes use
 atomic sibling-file + `os.replace()` so a crash mid-save never truncates the
 file.
 
-### Why UID in the path?
-
-Prevents collisions on shared machines. Multiple users can run workers
-without interfering.
+Workers started under the legacy path (`/tmp/claude-workers/<UID>/`) are
+found via backwards-compatible fallback.
 
 ### Why FIFOs instead of Unix domain sockets?
 
@@ -88,6 +89,14 @@ The manager's main job is:
    - **fifo_to_stdin**: reads the `in` FIFO, forwards to claude's stdin
 4. Forward an initial prompt (if provided) as the first user message
 5. Wait for claude to exit, then clean up
+
+### Foreground mode
+
+`claude-worker start --foreground` skips the `fork()`/`setsid()` dance
+and runs the manager in the calling process. Stdio is NOT redirected to
+`/dev/null`. Intended for `systemd Type=simple` units or cases where the
+manager's lifecycle should be tied to the calling shell. All other
+behavior (FIFO, log, hooks) is identical to daemonized mode.
 
 ### Test-only forkless mode
 
@@ -369,11 +378,52 @@ The `after_uuid` marker protects against sub-millisecond collisions
 and stale matches the same way `_wait_for_turn`'s marker protects the
 normal send path.
 
+## Hook system
+
+Each worker gets a per-worker `settings.json` that wires Claude Code hooks.
+`_build_per_worker_settings` assembles the hook dict at start time:
+
+| Type | Hook | Purpose |
+|------|------|---------|
+| PreToolUse | `permission_grant` | Consult `grants.jsonl` to allow pre-authorized sensitive-file edits |
+| PreToolUse | `cwd_guard` | Deny Write/Edit/MultiEdit outside the worker's CWD |
+| Stop | `context_threshold` | Check context window usage at 50%/65%/70%/80% thresholds |
+| PostToolUse | `ticket_watcher` | Notify PM/TL when ticket files change |
+| PostToolUse | `commit_checker` | Warn on commits missing tests or GVP refs (identity workers) |
+| SessionStart | `compaction_detector` | Detect compaction, log it, fire notify (identity workers) |
+| SessionStart | `identity_reinjector` | Re-inject identity context on compact/clear/resume (identity workers) |
+
+Identity workers additionally merge hooks from
+`~/.cwork/identities/<name>/hooks/hooks.json`.
+
+## Identity system
+
+Identity workers (`--identity NAME`, `--pm`, `--team-lead`) get:
+
+1. **Behavioral contract** loaded via `--append-system-prompt-file`
+2. **Wrap-up procedure** referenced during two-phase shutdown
+3. **Skeleton scaffolding** copied into the project CWD on first start
+4. **Custom hooks** merged from `hooks/hooks.json`
+5. **GVP elements** from the identity's `gvp/` directory
+
+Identity directories live at `~/.cwork/identities/<name>/`. Built-in
+identities (`pm`, `technical-lead`) ship in `claude_worker/identities/`
+as defaults; user-level overrides in `~/.cwork/identities/` take
+precedence.
+
+## Message queue
+
+`reply` and the manager's periodic queue drain provide a persistent
+message path that doesn't require the FIFO. Messages are written as
+JSON files to `~/.cwork/queues/<name>/` and drained every
+`QUEUE_DRAIN_INTERVAL_SECONDS` (5s) by the manager, injected as user
+messages through the FIFO internally.
+
 ## Dependencies
 
 - **`claugs`** (`claude_logs`): JSONL parsing, message type models,
-  rendering/formatting. Used by `cmd_read` to parse and display log
-  output. Installed from the local claude-stream repo (not on PyPI).
+  rendering/formatting, token stats. Used by `cmd_read`, `cmd_list`,
+  `cmd_tokens`, and the REPL. Requires `claugs>=0.6.8`.
 - **`claude` CLI**: the subprocess being wrapped. Must be on PATH.
   Tests override via `CLAUDE_WORKER_CLAUDE_BIN`.
 
@@ -385,6 +435,9 @@ normal send path.
 | `CLAUDECODE`                   | Set by Claude Code; enables PM auto-routing when `=1` |
 | `CLAUDE_SESSION_UUID`          | Set by the install-hook; used for PM auto-routing |
 | `ANTHROPIC_API_KEY`            | **Explicitly unset** by the manager so claude uses subscription auth, not API billing |
+| `CW_WORKER_NAME`              | Set by the manager — the worker's own name      |
+| `CW_IDENTITY`                 | Set by the manager — the worker's identity (empty for plain workers) |
+| `CW_PARENT_WORKER`            | Set by the manager — the parent worker's name (for nested spawns) |
 
 ## Default claude flags
 

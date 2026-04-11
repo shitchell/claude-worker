@@ -1675,3 +1675,26 @@ observations:
       - file: claude_worker/context_threshold.py
         identifier: THRESHOLDS
         role: implements
+
+  - id: D63
+    name: docs-audit-post-session-03
+    decision: >
+      Comprehensive documentation audit of README.md, CLAUDE.md,
+      and docs/architecture.md to reflect all features shipped in
+      session 03: new subcommands, hooks, identity system, foreground
+      mode, and updated runtime directory layout.
+    origin: >
+      Ticket #056 (2026-04-11). 37+ tickets shipped with partial
+      docs updates; consumer flagged documentation debt.
+    tags: [craftsmanship]
+    maps_to: [project:V1, project:D17]
+    refs:
+      - file: README.md
+        identifier: claude-worker documentation
+        role: implements
+      - file: CLAUDE.md
+        identifier: project instructions
+        role: implements
+      - file: docs/architecture.md
+        identifier: architecture documentation
+        role: implements
