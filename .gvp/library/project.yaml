@@ -1547,6 +1547,23 @@ decisions:
         identifier: compaction detection tests
         role: implements
 
+  - id: D60
+    name: claugs-floor-0-6-8
+    decision: >
+      Bump claugs dependency floor from >=0.6.7 to >=0.6.8 for the
+      sub-agent context reporting fix. Context window usage now
+      correctly excludes Task/Agent sub-calls from the main session
+      footprint.
+    origin: >
+      claugs 0.6.8 release (2026-04-11). Fix shipped upstream,
+      bump floor to pick it up.
+    tags: [delegation, tokens]
+    maps_to: [project:V4, project:D6]
+    refs:
+      - file: pyproject.toml
+        identifier: claugs dependency
+        role: implements
+
 observations:
   - id: OBS1
     name: mid-turn-intervention-only-via-posttooluse-exit-2

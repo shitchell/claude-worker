@@ -174,7 +174,7 @@ call through to `claude_logs.compute_context_window_usage()` and
 (which usage fields exist, how to dedupe streaming chunks) lives there.
 Don't reimplement token accounting in claude-worker — if a field is
 missing or wrong, fix it in claugs first and bump the version floor
-in `pyproject.toml`. Current floor: `claugs>=0.6.7`.
+in `pyproject.toml`. Current floor: `claugs>=0.6.8`.
 
 The worker's own `/tmp/claude-workers/<uid>/<name>/log` contains the
 same `usage` blocks Claude Code writes to its session log, so we pass
