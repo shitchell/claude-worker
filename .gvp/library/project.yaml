@@ -1865,3 +1865,26 @@ observations:
       - file: .cwork/tickets/051-designer-artifact-format/TECHNICAL.md
         identifier: Designer Artifact Format
         role: uses
+
+  - id: D71
+    name: s2-design-discussion-protocol
+    decision: >
+      PM-led design discussions follow the S2 protocol: 7-step
+      analytical process with specific lenses. Core steps: formulate
+      position (grounded in GVP), brief TL, DRY lens, anti-realist
+      lens (challenge boundaries), boundary analysis (enumerate break
+      points, classify as handle-now/flex-point/accept-risk),
+      adversarial review (ephemeral agent prompted to find breaks),
+      synthesize into design report. Software-specific extensions
+      add API, backwards-compat, testing, CLI, and performance
+      lenses. Stored as global GVP at ~/.cwork/gvp/library/design/.
+    origin: >
+      Ticket #065 (2026-04-13). Anti-realist lens and boundary
+      analysis are novel additions to PM methodology. RHC + human
+      design session.
+    tags: [process, gvp]
+    maps_to: [project:G2, project:V1]
+    refs:
+      - file: .cwork/tickets/065-design-discussion-protocol/TICKET.md
+        identifier: design discussion protocol
+        role: defines
