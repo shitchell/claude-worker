@@ -1153,6 +1153,23 @@ def _ensure_cwork_dirs(cwd: str, pm: bool, tl: bool) -> None:
         )
 
 
+def _fix_legacy_paths_in_args(
+    args_list: list[str], worker_name: str
+) -> list[str]:
+    """Replace legacy /tmp/claude-workers/ paths with current runtime dir.
+
+    After migration from /tmp/ to ~/.cwork/workers/, saved claude_args
+    may still reference the old path. This fixes them so --resume works.
+    """
+    import re
+
+    old_pattern = re.compile(
+        r"/tmp/claude-workers/\d+/" + re.escape(worker_name) + r"/"
+    )
+    new_base = str(get_runtime_dir(worker_name)) + "/"
+    return [old_pattern.sub(new_base, arg) for arg in args_list]
+
+
 def cmd_start(args: argparse.Namespace) -> None:
     """Start a new claude worker."""
     # --resume requires an explicit --name. Without it, the old code
@@ -1180,16 +1197,39 @@ def cmd_start(args: argparse.Namespace) -> None:
     if args.resume:
         saved = get_saved_worker(name)
         if not saved or not saved.get("session_id"):
-            print(f"Error: no saved session for worker '{name}'", file=sys.stderr)
-            sys.exit(1)
+            # Try to recover session_id from the latest archive (#070)
+            archive = _find_latest_archive(name)
+            if archive:
+                session_file = archive / "session"
+                if session_file.exists():
+                    session_id = session_file.read_text().strip()
+                    if session_id:
+                        print(
+                            f"Recovered session from archive: {archive.name}",
+                            file=sys.stderr,
+                        )
+                        saved = {
+                            "session_id": session_id,
+                            "claude_args": [],
+                            "cwd": "",
+                        }
+            if not saved or not saved.get("session_id"):
+                print(
+                    f"Error: no saved session for worker '{name}'",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
         # Restore saved cwd unless explicitly overridden
         if not args.cwd and saved.get("cwd"):
             args.cwd = saved["cwd"]
         # Restore saved claude_args (which already includes --agent, etc.)
-        # and append any new args the user provided on this invocation
+        # and append any new args the user provided on this invocation.
+        # Fix legacy /tmp/ paths in saved claude_args (#069)
         extra = claude_args
+        saved_claude_args = saved.get("claude_args") or []
+        saved_claude_args = _fix_legacy_paths_in_args(saved_claude_args, name)
         claude_args = (
-            ["--resume", saved["session_id"]] + (saved.get("claude_args") or []) + extra
+            ["--resume", saved["session_id"]] + saved_claude_args + extra
         )
         # Resumed workers inherit identity from saved metadata
         if not identity:
@@ -1256,7 +1296,28 @@ def cmd_start(args: argparse.Namespace) -> None:
 
         register_project(resolved_cwd)
 
-    # Create runtime directory
+    # Create runtime directory.
+    # For --resume: if a stale runtime dir exists (dead worker), archive it
+    # first so create_runtime_dir succeeds. Alive workers still error (#068).
+    runtime_check = get_runtime_dir(name)
+    if args.resume and runtime_check.exists():
+        pid_file = runtime_check / "pid"
+        alive = False
+        if pid_file.exists():
+            try:
+                alive = pid_alive(int(pid_file.read_text().strip()))
+            except (ValueError, OSError):
+                pass
+        if alive:
+            print(
+                f"Error: worker '{name}' is still alive. Stop it first.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # Dead worker with stale dir — archive it
+        archive_runtime_dir(name, reason="stale-resume")
+        print(f"Archived stale runtime dir for '{name}'", file=sys.stderr)
+
     try:
         runtime = create_runtime_dir(name)
     except FileExistsError as e:
@@ -2780,6 +2841,24 @@ def _get_ppid(pid: int) -> int | None:
     except (OSError, ValueError):
         return None
     return None
+
+
+def _find_latest_archive(name: str) -> Path | None:
+    """Find the latest archived runtime dir for a worker name.
+
+    Archives are named ``<name>.<timestamp>[.<session-prefix>]``.
+    Returns the path to the latest archive, or None.
+    """
+    base = get_base_dir()
+    if not base.exists():
+        return None
+    prefix = f"{name}."
+    archives = sorted(
+        [d for d in base.iterdir() if d.is_dir() and d.name.startswith(prefix)],
+        key=lambda d: d.name,
+        reverse=True,
+    )
+    return archives[0] if archives else None
 
 
 def _find_worker_by_ancestry() -> str | None:

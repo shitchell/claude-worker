@@ -2131,3 +2131,61 @@ observations:
       - file: .cwork/tickets/067-remote-control-ccr-implementation/TICKET.md
         identifier: Option C implementation plan
         role: defines
+
+  - id: D82
+    name: resume-archives-stale-dead-workers
+    decision: >
+      start --resume detects dead workers with stale runtime dirs,
+      archives them (reason: stale-resume), and proceeds. Alive
+      workers still error. Fixes the "already exists" error on
+      crash recovery.
+    origin: >
+      Ticket #068 (2026-04-13). Human hit "already exists" when
+      resuming a dead worker after crash.
+    tags: [lifecycle, durability]
+    maps_to: [project:G2, project:V3]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: cmd_start
+        role: extends
+      - file: tests/test_resume_recovery.py
+        identifier: resume recovery tests
+        role: implements
+
+  - id: D83
+    name: fix-legacy-paths-in-saved-args
+    decision: >
+      On --resume, saved claude_args from .sessions.json are scanned
+      for legacy /tmp/claude-workers/ paths and replaced with the
+      current ~/.cwork/workers/ base. Ensures identity.md and
+      settings.json paths resolve after migration.
+    origin: >
+      Ticket #069 (2026-04-13). Migration left stale /tmp/ paths
+      in .sessions.json claude_args.
+    tags: [durability, architecture]
+    maps_to: [project:V3, project:D47]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _fix_legacy_paths_in_args
+        role: implements
+
+  - id: D84
+    name: resume-from-latest-archive
+    decision: >
+      start --resume falls back to the latest archive when
+      .sessions.json has no entry. Scans get_base_dir() for
+      <name>.<timestamp>.* dirs, reads the session file from
+      the newest. Enables the stop → resume workflow even when
+      .sessions.json was not updated.
+    origin: >
+      Ticket #070 (2026-04-13). stop archives runtime dir but
+      --resume couldn't find the session.
+    tags: [lifecycle, durability]
+    maps_to: [project:G2, project:D46]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _find_latest_archive
+        role: implements
+      - file: tests/test_resume_recovery.py
+        identifier: resume recovery tests
+        role: implements
