@@ -2111,7 +2111,7 @@ observations:
         identifier: thread store tests
         role: implements
 
-  - id: D80
+  - id: D81
     name: remote-control-via-ccr-cost-driven
     decision: >
       Remote control uses Claude Code's built-in CCR (Cloud Container
