@@ -1799,3 +1799,24 @@ observations:
       - file: claude_worker/migrations/001-roles-directory-rename.sh
         identifier: first migration script
         role: uses
+
+  - id: D68
+    name: cairn-validate-enforcement-hook
+    decision: >
+      Extend commit_checker.py PostToolUse hook to run cairn validate
+      when a commit touches .gvp/library/ files. Warns if validation
+      fails. Silently skips if cairn is not installed. 10s timeout.
+      This enforces GVP structural integrity at commit time without
+      blocking (PostToolUse fires after execution).
+    origin: >
+      Ticket #063 (2026-04-13). Agents hand-editing GVP YAML
+      bypassed validation. RHC audit identified the gap.
+    tags: [gvp, process, observability]
+    maps_to: [project:G2, project:D45]
+    refs:
+      - file: claude_worker/commit_checker.py
+        identifier: _check_commit
+        role: extends
+      - file: tests/test_commit_checker.py
+        identifier: cairn enforcement tests
+        role: implements

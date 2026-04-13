@@ -20,6 +20,8 @@ import json
 import subprocess
 import sys
 
+CAIRN_VALIDATE_TIMEOUT_SECONDS: int = 10
+
 
 def _check_commit() -> list[str]:
     """Check the most recent commit for compliance. Returns warnings."""
@@ -69,6 +71,32 @@ def _check_commit() -> list[str]:
                     "GVP WARNING: No .gvp/library/ update in this commit. "
                     "Record D<N> in project.yaml with refs for implementation "
                     "changes."
+                )
+
+        # Check 3: If GVP library files were changed, run cairn validate
+        if gvp_files:
+            try:
+                validate_result = subprocess.run(
+                    ["cairn", "validate"],
+                    capture_output=True,
+                    text=True,
+                    timeout=CAIRN_VALIDATE_TIMEOUT_SECONDS,
+                )
+                if validate_result.returncode != 0:
+                    stderr = validate_result.stderr.strip()
+                    stdout = validate_result.stdout.strip()
+                    output = stderr or stdout
+                    warnings.append(
+                        f"CAIRN WARNING: `cairn validate` failed after GVP library "
+                        f"edit. Fix validation errors before pushing.\n{output}"
+                    )
+            except FileNotFoundError:
+                # cairn not installed — skip silently
+                pass
+            except subprocess.TimeoutExpired:
+                warnings.append(
+                    "CAIRN WARNING: `cairn validate` timed out. "
+                    "Run it manually to check GVP integrity."
                 )
 
     except Exception:
