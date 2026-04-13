@@ -308,8 +308,8 @@ The identity tells the PM:
 - Every incoming message may carry a `[chat:<uuid>]` tag
 - The final assistant message of each turn MUST echo the tag back
 - Per-consumer conversation state lives in
-  `.cwork/pm/chats/<uuid>.md` in the PM's working directory
-- A chronological audit log lives in `.cwork/pm/LOG.md`
+  `.cwork/roles/pm/chats/<uuid>.md` in the PM's working directory
+- A chronological audit log lives in `.cwork/roles/pm/LOG.md`
 - On startup, scan the conversation history for prior `[chat:*]` tags
   to recover consumer state
 

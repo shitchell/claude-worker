@@ -1773,3 +1773,29 @@ observations:
       - file: tests/test_migrate.py
         identifier: migration system tests
         role: implements
+
+  - id: D67
+    name: roles-directory-rename
+    decision: >
+      Project-level identity runtime state moves from
+      .cwork/<identity>/ to .cwork/roles/<role>/. The "pm" role
+      dir keeps its name; "technical-lead" shortens to "tl".
+      Global identity definitions at ~/.cwork/identities/ are
+      unchanged. Migration 001 handles existing projects.
+      _identity_role_dir() maps identity names to role dir names.
+    origin: >
+      Ticket #062 (2026-04-13). Separation between identity
+      definitions (identities/) and runtime state (roles/).
+      Human approved rename in RHC design session.
+    tags: [architecture, identity]
+    maps_to: [project:V5, project:G4]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _identity_role_dir
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _ensure_cwork_dirs
+        role: extends
+      - file: claude_worker/migrations/001-roles-directory-rename.sh
+        identifier: first migration script
+        role: uses

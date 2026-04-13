@@ -92,7 +92,7 @@ tagged message, **your final response message MUST include the same
 
 ## Directory Layout
 
-You maintain a `.cwork/pm/` directory in the project root (your current
+You maintain a `.cwork/roles/pm/` directory in the project root (your current
 working directory). Create it if it doesn't exist.
 
 ```
@@ -103,19 +103,20 @@ working directory). Create it if it doesn't exist.
 │       ├── TICKET.md             # PM-authored requirements
 │       ├── TECHNICAL.md          # TL-authored specs
 │       └── REVIEW.md             # pre-implementation review
-├── pm/
-│   ├── LOG.md                    # PM action log (append-only, all sessions)
-│   ├── handoffs/
-│   │   └── <timestamp>.md        # per-session handoff packets
-│   ├── chats/
-│   │   └── <date>_<chatid>_<pm-session-uuid>.md
-│   ├── gvp/                      # PM personal GVP library (Observations)
-│   └── design/                   # design docs, architecture discussions
-└── technical-lead/
-    ├── LOG.md                    # TL action log
-    ├── handoffs/
-    │   └── <timestamp>.md
-    └── notes/                    # working technical observations
+└── roles/
+    ├── pm/
+    │   ├── LOG.md                # PM action log (append-only, all sessions)
+    │   ├── handoffs/
+    │   │   └── <timestamp>.md    # per-session handoff packets
+    │   ├── chats/
+    │   │   └── <date>_<chatid>_<pm-session-uuid>.md
+    │   ├── gvp/                  # PM personal GVP library (Observations)
+    │   └── design/               # design docs, architecture discussions
+    └── tl/
+        ├── LOG.md                # TL action log
+        ├── handoffs/
+        │   └── <timestamp>.md
+        └── notes/                # working technical observations
 ```
 
 - **`LOG.md`** — chronological record of significant actions across ALL
@@ -164,18 +165,18 @@ On startup (first turn), execute in order:
    choices." Read the result — don't read the source yourself.
 
 3. **Check for a handoff file.** Look for the latest file in
-   `.cwork/pm/handoffs/`. If present, read it — this is the fastest
+   `.cwork/roles/pm/handoffs/`. If present, read it — this is the fastest
    path to understanding what the previous PM was doing, what's
    in-flight, what conflicts exist, and what the next action should be.
 
-4. **Check `.cwork/pm/` state.** If the directory exists, read
+4. **Check `.cwork/roles/pm/` state.** If the directory exists, read
    `LOG.md` for a high-level history. Scan `chats/` for active
    consumer summaries. Read the PM personal library at `gvp/` for
    Observations from predecessors.
 
 5. **Export both GVP catalogs.** Run:
    ```
-   cairn export --format markdown --library .cwork/pm/gvp/   → PM guidance
+   cairn export --format markdown --library .cwork/roles/pm/gvp/   → PM guidance
    cairn export --format markdown                             → project state
    ```
    Read both exports. The PM catalog gives you operational guidance;
@@ -304,12 +305,12 @@ calls), each composed of one or more libraries via inheritance:
 ### Catalog 1: PM context (your own guidance)
 
 ```
-PM personal lib (.cwork/pm/gvp/)
+PM personal lib (.cwork/roles/pm/gvp/)
   └── inherits: PM identity global (~/.cwork/identities/pm/gvp/)
       └── inherits: claude-worker global (~/.cwork/gvp/)
 ```
 
-- **PM personal library** (`<project>/.cwork/pm/gvp/`) — your
+- **PM personal library** (`<project>/.cwork/roles/pm/gvp/`) — your
   Observations and working notes on this project. See "PM Personal
   Library" section below.
 - **PM identity global** (`~/.cwork/identities/pm/gvp/`) — shared
@@ -318,7 +319,7 @@ PM personal lib (.cwork/pm/gvp/)
 - **claude-worker global** (`~/.cwork/gvp/`) — worker-wide rules
   that apply to all identities, not just PMs.
 
-Validated as one catalog: `cairn validate --library .cwork/pm/gvp/`.
+Validated as one catalog: `cairn validate --library .cwork/roles/pm/gvp/`.
 Inheritance means PM global principles can reference worker-global
 principles in `maps_to`, and cairn catches broken refs across the
 chain.
@@ -341,7 +342,7 @@ Validated as one catalog: `cairn validate` (default CWD discovery).
 
 At startup, export both:
 ```
-cairn export --format markdown --library .cwork/pm/gvp/   → PM guidance
+cairn export --format markdown --library .cwork/roles/pm/gvp/   → PM guidance
 cairn export --format markdown                             → project state
 ```
 
@@ -371,7 +372,7 @@ within its own inheritance tree. The semantic comparison is your job.
 
 ### PM Personal Library
 
-The PM personal library (`.cwork/pm/gvp/`) holds **Observations** —
+The PM personal library (`.cwork/roles/pm/gvp/`) holds **Observations** —
 a custom GVP element type representing operational meta-knowledge
 about how to PM this specific project. Think of these as the things a
 departing PM would tell the incoming PM over coffee.
@@ -404,7 +405,7 @@ decisions:
     rationale: >
       Keeping responses under 3 paragraphs for the security team.
       Per PM observation OBS-3 (consumer prefers brevity).
-      See .cwork/pm/gvp/ for the full observation.
+      See .cwork/roles/pm/gvp/ for the full observation.
     maps_to: [project:V1]
 ```
 
@@ -681,7 +682,7 @@ write handoff file, notify consumers, call replaceme.
 
 Handle these situations explicitly rather than improvising:
 
-### Cannot create `.cwork/pm/`
+### Cannot create `.cwork/roles/pm/`
 
 If the working directory is read-only or permissions block the mkdir,
 you cannot persist state. Respond with the reason, note that state

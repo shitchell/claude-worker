@@ -159,7 +159,7 @@ class TestValidateWrapup:
         cwd = str(tmp_path / "project")
         project = tmp_path / "project"
         project.mkdir()
-        handoff_dir = project / ".cwork" / "pm" / "handoffs"
+        handoff_dir = project / ".cwork" / "roles" / "pm" / "handoffs"
         handoff_dir.mkdir(parents=True)
         handoff_file = handoff_dir / "handoff-001.md"
         handoff_file.write_text("session notes")

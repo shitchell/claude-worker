@@ -551,7 +551,7 @@ Identity workers are started with `--identity NAME` (or the shorthands
 - **Wrap-up procedure** — a `wrap-up.md` file referenced during
   two-phase shutdown.
 - **Skeleton scaffolding** — a directory tree copied into the project
-  on first start (e.g., `.cwork/pm/` for PM workers).
+  on first start (e.g., `.cwork/roles/pm/` for PM workers).
 - **Custom hooks** — `hooks/hooks.json` merged into the per-worker
   settings for identity-specific hook wiring.
 - **GVP elements** — `gvp/` directory with identity-specific goals,
@@ -582,7 +582,7 @@ claude-worker start --pm --name pm-myproject --cwd /path/to/project
 The PM is launched with the bundled PM identity loaded via
 `--append-system-prompt-file`. On startup, it scans its own conversation
 history for any prior `[chat:*]` tags, reads `MEMORY.md` and `PROJECT.md`
-for project context, and creates a `.cwork/pm/` state directory.
+for project context, and creates a `.cwork/roles/pm/` state directory.
 
 ### Sending as a consumer
 
@@ -618,8 +618,8 @@ Override with:
   consumer B's work.
 - Detects conflicts: if two consumers want to modify the same resource, the
   PM surfaces the conflict in both responses.
-- Logs everything: `.cwork/pm/LOG.md` has a chronological audit trail;
-  `.cwork/pm/chats/<uuid>.md` has per-consumer histories.
+- Logs everything: `.cwork/roles/pm/LOG.md` has a chronological audit trail;
+  `.cwork/roles/pm/chats/<uuid>.md` has per-consumer histories.
 
 ### Missing-tag monitoring
 

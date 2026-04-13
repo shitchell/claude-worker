@@ -4,13 +4,13 @@ dist/
 build/
 *.pyc
 
-# Project Manager worker state (runtime audit trail, per-environment).
-# Any project that hosts a PM worker via `claude-worker start --pm --cwd .`
+# Identity runtime state (runtime audit trail, per-environment).
+# Any project that hosts identity workers via `claude-worker start --pm/--team-lead`
 # ends up with this directory. Contents are logs of chats and actions
-# the PM observed — environment-specific, potentially sensitive, and
+# the worker observed — environment-specific, potentially sensitive, and
 # not something that should travel in git.
-# .cwork/pm/ is the newer canonical name; .claude-worker-pm/ is kept
-# for backwards compatibility until the rename lands (see project
-# decision D9).
+# .cwork/roles/ is the canonical name (see D62, D67).
+# .claude-worker-pm/ and .cwork/pm/ are legacy names kept for compat.
 .claude-worker-pm/
 .cwork/pm/
+.cwork/roles/

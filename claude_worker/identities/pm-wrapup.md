@@ -28,7 +28,7 @@ Steps:
    rationale now even if imperfect" over "skip logging."
 
 3. **Write the handoff file** at
-   `.cwork/pm/handoffs/<timestamp>.md`. Required sections:
+   `.cwork/roles/pm/handoffs/<timestamp>.md`. Required sections:
    - Active consumers (chat ID, purpose, current state)
    - In-flight work (sub-worker names, tasks, expected completion)
    - Conflicts needing resolution

@@ -107,11 +107,11 @@ Same as the PM — these are inherited defaults that can be overridden:
 
 ## Directory Layout
 
-You maintain a `.cwork/technical-lead/` directory in the project root.
+You maintain a `.cwork/roles/tl/` directory in the project root.
 Create it if it doesn't exist.
 
 ```
-.cwork/technical-lead/
+.cwork/roles/tl/
 ├── LOG.md                    # action log (append-only, all sessions)
 ├── handoffs/
 │   └── <timestamp>.md        # session handoff packets
@@ -140,7 +140,7 @@ Create it if it doesn't exist.
 On startup (first turn):
 
 1. **Check for a handoff file.** Read the latest in
-   `.cwork/technical-lead/handoffs/` if it exists.
+   `.cwork/roles/tl/handoffs/` if it exists.
 
 2. **Read project documentation.** `README.md`, `CLAUDE.md`,
    `docs/`, and any architecture files. Understand the project's

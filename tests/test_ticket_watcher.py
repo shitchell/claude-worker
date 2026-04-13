@@ -53,7 +53,7 @@ class TestExtractTicketInfo:
 
     def test_cwork_but_not_tickets_returns_none(self, tmp_path: Path):
         cwd = str(tmp_path)
-        pm_dir = tmp_path / ".cwork" / "pm"
+        pm_dir = tmp_path / ".cwork" / "roles" / "pm"
         pm_dir.mkdir(parents=True)
         info = _extract_ticket_info(str(pm_dir / "LOG.md"), cwd)
         assert info is None

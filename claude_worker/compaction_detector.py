@@ -3,7 +3,7 @@
 When Claude Code compacts, it fires a SessionStart event with
 matcher value "compact". This hook:
 1. Echoes a re-bootstrap instruction to stdout
-2. Logs the event to .cwork/<identity>/LOG.md
+2. Logs the event to .cwork/roles/<role>/LOG.md
 3. Fires claude-worker notify if configured
 4. Notes that analyze-session and wrap-up were SKIPPED
 
@@ -32,10 +32,20 @@ import sys
 import time
 from pathlib import Path
 
+# Role directory names — mirrors IDENTITY_ROLE_DIRS in cli.py.
+# Duplicated here to avoid circular imports (compaction_detector is a
+# standalone hook entry point that cannot import from cli).
+_ROLE_DIRS: dict[str, str] = {"technical-lead": "tl"}
+
+
+def _role_dir(identity: str) -> str:
+    """Map an identity name to its role directory name."""
+    return _ROLE_DIRS.get(identity, identity)
+
 
 def _log_compaction(cwd: str, identity: str) -> None:
     """Append compaction event to the identity's LOG.md."""
-    log_file = Path(cwd) / ".cwork" / identity / "LOG.md"
+    log_file = Path(cwd) / ".cwork" / "roles" / _role_dir(identity) / "LOG.md"
     if not log_file.parent.exists():
         return
     try:
@@ -97,7 +107,7 @@ def main() -> None:
         f"IMPORTANT: analyze-session and wrap-up were SKIPPED — they cannot "
         f"run retroactively on compacted context. "
         f"To recover: (1) re-read your identity file, (2) re-read the "
-        f"latest handoff at .cwork/{identity}/handoffs/, (3) verify your "
+        f"latest handoff at .cwork/roles/{_role_dir(identity)}/handoffs/, (3) verify your "
         f"current work by reading ticket files, (4) report status to confirm "
         f"you've re-bootstrapped successfully."
     )

@@ -122,6 +122,18 @@ TL_INTERNALIZE_MESSAGE: str = (
     "baseline state. Then report your readiness to the PM."
 )
 
+# Role directory names — maps identity names to their .cwork/roles/<dir> name.
+# "technical-lead" → "tl" (shorter), all others keep their identity name.
+IDENTITY_ROLE_DIRS: dict[str, str] = {
+    "technical-lead": "tl",
+}
+
+
+def _identity_role_dir(identity: str) -> str:
+    """Map an identity name to its role directory name."""
+    return IDENTITY_ROLE_DIRS.get(identity, identity)
+
+
 # REPL
 REPL_IDLE_POLL_INTERVAL_SECONDS: float = 0.25
 REPL_INPUT_PROMPT: str = "you> "
@@ -1109,7 +1121,7 @@ def _ensure_cwork_dirs(cwd: str, pm: bool, tl: bool) -> None:
     # Project skeleton: scaffold from ~/.cwork/identities/<identity>/skeleton/
     project_cwork = Path(cwd) / ".cwork"
     skeleton_dir = home_cwork / "identities" / identity / "skeleton"
-    target_dir = project_cwork / identity
+    target_dir = project_cwork / "roles" / _identity_role_dir(identity)
 
     if skeleton_dir.exists():
         _scaffold_from_skeleton(skeleton_dir, target_dir)
@@ -2830,9 +2842,9 @@ def _validate_wrapup(name: str, runtime: Path) -> str | None:
     handoff_dirs: list[Path] = []
     wid = _get_worker_identity(name)
     if wid == "pm":
-        handoff_dirs.append(Path(cwd) / ".cwork" / "pm" / "handoffs")
+        handoff_dirs.append(Path(cwd) / ".cwork" / "roles" / "pm" / "handoffs")
     if wid == "technical-lead":
-        handoff_dirs.append(Path(cwd) / ".cwork" / "technical-lead" / "handoffs")
+        handoff_dirs.append(Path(cwd) / ".cwork" / "roles" / "tl" / "handoffs")
 
     for handoff_dir in handoff_dirs:
         if not handoff_dir.exists():
