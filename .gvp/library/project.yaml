@@ -283,6 +283,34 @@ principles:
     tags: [context, observability, lifecycle]
     maps_to: [project:G2]
 
+  - id: P11
+    name: prefer-clean-jump-migration-when-state-is-empty
+    statement: >
+      When migrating between architectures, prefer a clean A→B jump
+      over incremental A→A+B→B when: (a) no live state needs
+      preservation during transition, (b) the intermediate dual-state
+      is itself a complexity source, (c) the surface area is bounded
+      enough to cut over in one commit. Incremental migration is
+      better when live state exists or the surface is too large for
+      atomic cutover. Three-factor decision table: live state? dual-
+      state complexity? surface area? All point clean-jump → clean.
+      Any point incremental → incremental. Mixed → human decides.
+    tags: [architecture, process]
+    maps_to: [project:V1, project:P5]
+
+  - id: P12
+    name: consistent-lightweight-notifications-with-read-on-demand
+    statement: >
+      When notifying agents of events, always use the same lightweight
+      format regardless of agent state (idle vs working). The agent
+      reads full content when ready to act on it. Grounded in two
+      observations: (1) interrupting agent flow causes step-dropping
+      (main:OBS3), (2) token-distance recall is lossy — information
+      delivered far from point of use degrades (main:OBS4). Consistent
+      format + read-on-demand addresses both.
+    tags: [coordination, architecture]
+    maps_to: [project:V1, project:V2]
+
 decisions:
   - id: D1
     name: status-idle-threshold-seconds-unified
@@ -1928,4 +1956,111 @@ observations:
         role: defines
       - file: claude_worker/identities/technical-lead.md
         identifier: Task Tracking (TodoWrite)
+        role: defines
+
+  - id: D74
+    name: unified-thread-data-model
+    decision: >
+      Replace six ad-hoc messaging mechanisms (FIFO direct write,
+      queue dir, chat transcripts, per-consumer chat files, missing-
+      tag monitoring, broadcast) with one thread primitive. Thread =
+      append-only JSONL file + atomic index.json for metadata.
+      Project-scoped at .cwork/threads/.
+    origin: >
+      Inbox/threads S2 design (2026-04-13). Human-approved after
+      anti-realist analysis dissolved four concepts into one.
+    tags: [architecture, fifo]
+    maps_to: [project:V1, project:V5, project:G4, project:P5]
+    refs:
+      - file: .cwork/pm/ideas/inbox-threads-redesign-s2.md
+        identifier: Inbox Threads Redesign S2 Analysis
+        role: defines
+
+  - id: D75
+    name: n-party-thread-participants
+    decision: >
+      Thread data model supports N participants from day one.
+      Schema: participants list on every thread. The N-party use
+      case (design discussions, RHC cross-project visibility) is
+      identified, not speculative. One extra field now vs schema
+      migration later.
+    origin: >
+      Inbox/threads S2 design (2026-04-13). Grounded in main:P8
+      (implement known future needs at low marginal cost).
+    tags: [architecture]
+    maps_to: [project:G4, project:V2]
+    refs:
+      - file: .cwork/pm/ideas/inbox-threads-redesign-s2.md
+        identifier: Inbox Threads Redesign S2 Analysis
+        role: defines
+
+  - id: D76
+    name: clean-jump-thread-migration
+    decision: >
+      Migrate from FIFO/queue to thread model via clean A→B jump,
+      not incremental dual-write. No live threads exist to preserve.
+      Dual-write intermediate state is its own complexity source.
+      Surface area is bounded (send/read/reply callers).
+    origin: >
+      Inbox/threads S2 design (2026-04-13). Human explicitly
+      rejected incremental approach.
+    tags: [architecture, process]
+    maps_to: [project:P11]
+    refs:
+      - file: .cwork/pm/ideas/inbox-threads-redesign-s2.md
+        identifier: Inbox Threads Redesign S2 Analysis
+        role: defines
+
+  - id: D77
+    name: tickets-compose-with-threads
+    decision: >
+      Tickets are structured project metadata (INDEX.md + TICKET.md).
+      Threads are the conversation primitive. A ticket references a
+      thread for its discussion; threads don't replace tickets.
+      The anti-realist analysis partially dissolved this boundary —
+      tickets are threads WITH metadata — but the INDEX.md query
+      interface justifies keeping them as a separate view.
+    origin: >
+      Inbox/threads S2 design (2026-04-13). Boundary analysis
+      confirmed tickets have relational metadata that threads lack.
+    tags: [architecture]
+    maps_to: [project:V5]
+    refs:
+      - file: .cwork/pm/ideas/inbox-threads-redesign-s2.md
+        identifier: Inbox Threads Redesign S2 Analysis
+        role: defines
+
+  - id: D78
+    name: thread-files-project-scoped
+    decision: >
+      Thread files live at .cwork/threads/ within each project.
+      Project-scoped because thread participants are project-scoped
+      workers. Cross-project threads (FP-2) deferred until RHC
+      needs them.
+    origin: >
+      Inbox/threads S2 design (2026-04-13).
+    tags: [architecture]
+    maps_to: [project:V2]
+    refs:
+      - file: .cwork/pm/ideas/inbox-threads-redesign-s2.md
+        identifier: Inbox Threads Redesign S2 Analysis
+        role: defines
+
+  - id: D79
+    name: always-lightweight-thread-notifications
+    decision: >
+      Thread notifications use consistent lightweight format:
+      [system:new-message] Thread <id> from <sender>: <preview>.
+      Same format regardless of agent state (idle vs working).
+      Agent reads full thread content when ready to act.
+      Grounded in OBS3 (flow interruption causes step-dropping)
+      and OBS4 (token-distance recall is lossy).
+    origin: >
+      Inbox/threads S2 design (2026-04-13). Human approved
+      always-lightweight over context-dependent.
+    tags: [architecture, coordination]
+    maps_to: [project:P12]
+    refs:
+      - file: .cwork/pm/ideas/inbox-threads-redesign-s2.md
+        identifier: Inbox Threads Redesign S2 Analysis
         role: defines
