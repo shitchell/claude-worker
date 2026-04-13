@@ -65,6 +65,27 @@ meta:
         id_prefix: OBS
         primary_field: description
         is_root: true
+      constraint:
+        yaml_key: constraints
+        id_prefix: C
+        primary_field: description
+        is_root: true
+
+constraints:
+  - id: C1
+    name: max-subscription-tokens-only-via-claude-code
+    description: >
+      Anthropic Max subscription tokens ($200/mo for thousands of
+      dollars worth of API usage) are only usable through Claude Code,
+      not via direct API calls or LangChain/LangGraph. This is an
+      external constraint we don't control. It forces all agent
+      orchestration through Claude Code's execution model rather than
+      the architecturally preferred approach of deterministic workflow
+      engines with direct API access. When/if this constraint is
+      lifted (Max tokens via API, or project migrates to paid API),
+      the CCR remote control layer and other CC-coupled decisions
+      should be re-evaluated.
+    tags: [architecture]
 
 goals:
   - id: G1
@@ -2063,4 +2084,50 @@ observations:
     refs:
       - file: .cwork/pm/ideas/inbox-threads-redesign-s2.md
         identifier: Inbox Threads Redesign S2 Analysis
+        role: defines
+  - id: D80
+    name: thread-store-module
+    decision: >
+      Thread primitive implemented in claude_worker/thread_store.py.
+      Append-only JSONL per thread (.cwork/threads/<id>.jsonl) +
+      atomic index.json for metadata. CLI via claude-worker thread
+      {create|send|read|list|close}. N-party participant list on
+      every thread. Messages have unique IDs for since-marker
+      pagination. Index uses atomic sibling-tmp write.
+    origin: >
+      Phase 1 implementation of the inbox/threads S2 design
+      (2026-04-13). Clean-jump: new module, not incremental
+      modification of existing send/reply.
+    tags: [architecture, fifo]
+    maps_to: [project:D74, project:D75, project:D76]
+    refs:
+      - file: claude_worker/thread_store.py
+        identifier: thread store module
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_thread
+        role: implements
+      - file: tests/test_thread_store.py
+        identifier: thread store tests
+        role: implements
+
+  - id: D80
+    name: remote-control-via-ccr-cost-driven
+    decision: >
+      Remote control uses Claude Code's built-in CCR (Cloud Container
+      Runtime) via the -p mode control_request stdin message. This
+      enables the Claude mobile app as the UI. This is a cost-driven
+      architectural compromise (C1: Max subscription tokens only via
+      CC), not a preference. The preferred architecture would be
+      LangChain/LangGraph with deterministic flows and direct API.
+      CCR gets replaced when C1 is lifted.
+    origin: >
+      Human decision via RHC (2026-04-13). Option C from #057
+      research. "I'm already leveraging Anthropic's infra and
+      dependent on it. This lets me use the Claude mobile app."
+    tags: [architecture]
+    maps_to: [project:C1, project:G4]
+    refs:
+      - file: .cwork/tickets/067-remote-control-ccr-implementation/TICKET.md
+        identifier: Option C implementation plan
         role: defines
