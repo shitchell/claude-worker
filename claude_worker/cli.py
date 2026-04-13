@@ -4625,6 +4625,83 @@ def cmd_migrate(args: argparse.Namespace) -> None:
             _update_version_anchor(proj_path)
 
 
+def cmd_thread(args: argparse.Namespace) -> None:
+    """Manage conversation threads."""
+    from claude_worker.thread_store import (
+        append_message,
+        close_thread,
+        create_thread,
+        list_threads,
+        read_messages,
+    )
+
+    cwd = os.getcwd()
+    action = args.thread_action
+
+    if action == "create":
+        participants = [p.strip() for p in args.participants.split(",") if p.strip()]
+        tid = create_thread(
+            cwd,
+            participants=participants,
+            thread_type=args.thread_type,
+            thread_id=getattr(args, "thread_id", None),
+        )
+        print(f"Thread created: {tid}")
+        if participants:
+            print(f"  participants: {', '.join(participants)}")
+
+    elif action == "send":
+        content = " ".join(args.message) if args.message else sys.stdin.read().strip()
+        if not content:
+            print("Error: no message content", file=sys.stderr)
+            sys.exit(1)
+        # Determine sender from env
+        sender = os.environ.get("CW_WORKER_NAME", "unknown")
+        msg = append_message(cwd, args.thread_id, sender, content)
+        print(f"[{msg['timestamp']}] {sender}: {content[:80]}")
+
+    elif action == "read":
+        messages = read_messages(
+            cwd,
+            args.thread_id,
+            since_id=args.since,
+            limit=args.n,
+        )
+        if not messages:
+            print("No messages.")
+            return
+        for msg in messages:
+            ts = msg.get("timestamp", "?")
+            sender = msg.get("sender", "?")
+            content = msg.get("content", "")
+            mid = msg.get("id", "?")[:8]
+            print(f"[{ts} {mid}] {sender}: {content}")
+
+    elif action == "list":
+        threads = list_threads(cwd, status=getattr(args, "status", None))
+        if not threads:
+            print("No threads.")
+            return
+        for t in threads:
+            tid = t["thread_id"]
+            status = t.get("status", "?")
+            participants = ", ".join(t.get("participants", []))
+            thread_type = t.get("type", "chat")
+            last = t.get("last_message", "?")
+            print(f"  {tid}  [{thread_type}:{status}]  {participants}  last: {last}")
+
+    elif action == "close":
+        close_thread(cwd, args.thread_id)
+        print(f"Thread {args.thread_id} closed.")
+
+    else:
+        print(
+            "Usage: claude-worker thread {create|send|read|list|close}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 EXAMPLES = """\
 examples:
   # Start a worker — blocks until claude responds, then prints status
@@ -5216,6 +5293,54 @@ def main():
         help="List available migrations and project versions",
     )
 
+    # -- thread --
+    p_thread = sub.add_parser("thread", help="Manage conversation threads")
+    thread_sub = p_thread.add_subparsers(dest="thread_action")
+
+    p_thread_create = thread_sub.add_parser("create", help="Create a new thread")
+    p_thread_create.add_argument(
+        "--participants",
+        "-p",
+        help="Comma-separated participant names",
+        default="",
+    )
+    p_thread_create.add_argument(
+        "--type",
+        dest="thread_type",
+        default="chat",
+        help="Thread type (chat, request, design)",
+    )
+    p_thread_create.add_argument(
+        "--id",
+        dest="thread_id",
+        help="Explicit thread ID (auto-generated if omitted)",
+    )
+
+    p_thread_send = thread_sub.add_parser(
+        "send", help="Send a message to a thread"
+    )
+    p_thread_send.add_argument("thread_id", help="Thread ID")
+    p_thread_send.add_argument("message", nargs="*", help="Message text")
+
+    p_thread_read = thread_sub.add_parser(
+        "read", help="Read messages from a thread"
+    )
+    p_thread_read.add_argument("thread_id", help="Thread ID")
+    p_thread_read.add_argument(
+        "--since", help="Show messages after this message ID"
+    )
+    p_thread_read.add_argument("-n", type=int, help="Show last N messages")
+
+    p_thread_list = thread_sub.add_parser("list", help="List all threads")
+    p_thread_list.add_argument(
+        "--status", help="Filter by status (open, closed)"
+    )
+
+    p_thread_close = thread_sub.add_parser("close", help="Close a thread")
+    p_thread_close.add_argument("thread_id", help="Thread ID")
+
+    p_thread.set_defaults(func=cmd_thread)
+
     args = parser.parse_args()
 
     handlers = {
@@ -5238,5 +5363,6 @@ def main():
         "grants": cmd_grants,
         "revoke": cmd_revoke,
         "migrate": cmd_migrate,
+        "thread": cmd_thread,
     }
     handlers[args.command](args)
