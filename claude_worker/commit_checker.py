@@ -19,8 +19,11 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
+from pathlib import Path
 
 CAIRN_VALIDATE_TIMEOUT_SECONDS: int = 10
+COMMIT_LOG_NAME: str = "commits.log"
 
 
 def _check_commit() -> list[str]:
@@ -105,6 +108,34 @@ def _check_commit() -> list[str]:
     return warnings
 
 
+def _log_commit() -> None:
+    """Append the latest commit to .cwork/commits.log (best-effort).
+
+    Gives the .cwork/ monitor a file change to detect when commits
+    happen. One line per commit: timestamp, short hash, subject.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%h %s"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return
+        commit_info = result.stdout.strip()
+        if not commit_info:
+            return
+        log_path = Path(".cwork") / COMMIT_LOG_NAME
+        if not log_path.parent.exists():
+            return
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with open(log_path, "a") as f:
+            f.write(f"{timestamp} | {commit_info}\n")
+    except Exception:
+        pass
+
+
 def main() -> None:
     """PostToolUse hook entry point."""
     try:
@@ -122,6 +153,9 @@ def main() -> None:
     command = tool_input.get("command", "")
     if "git commit" not in command:
         sys.exit(0)
+
+    # Log the commit to .cwork/commits.log
+    _log_commit()
 
     # Check the commit
     warnings = _check_commit()

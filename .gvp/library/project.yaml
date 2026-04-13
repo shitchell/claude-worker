@@ -1888,3 +1888,44 @@ observations:
       - file: .cwork/tickets/065-design-discussion-protocol/TICKET.md
         identifier: design discussion protocol
         role: defines
+
+  - id: D72
+    name: commit-log-in-cwork
+    decision: >
+      The commit_checker PostToolUse hook appends each commit to
+      .cwork/commits.log (timestamp + short hash + subject). Gives
+      the .cwork/ monitor a file change to detect when commits
+      happen. Best-effort, no crash on failure.
+    origin: >
+      TL idea triage (2026-04-13). Small extension of existing
+      commit_checker with immediate observability value.
+    tags: [observability]
+    maps_to: [project:G2, project:D15]
+    refs:
+      - file: claude_worker/commit_checker.py
+        identifier: _log_commit
+        role: implements
+      - file: tests/test_commit_checker.py
+        identifier: TestCommitLog
+        role: implements
+
+  - id: D73
+    name: todowrite-workflow-instructions
+    decision: >
+      PM and TL identity files instruct agents to use TodoWrite
+      at key workflow points: ticket assignment, multi-step tasks,
+      and wrap-up. Lightweight enforcement via prose guidance
+      rather than hooks. Adds visibility into work-in-progress
+      without additional infrastructure.
+    origin: >
+      TL idea triage (2026-04-13). TodoWrite was available but
+      identities didn't instruct when to use it.
+    tags: [identity, process]
+    maps_to: [project:G2, project:V1]
+    refs:
+      - file: claude_worker/identities/pm.md
+        identifier: Task Tracking (TodoWrite)
+        role: defines
+      - file: claude_worker/identities/technical-lead.md
+        identifier: Task Tracking (TodoWrite)
+        role: defines

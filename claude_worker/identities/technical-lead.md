@@ -172,6 +172,18 @@ If the file doesn't exist, the system will inject the bundled
 wrap-up instructions automatically at the 80% context threshold.
 The key steps are: record findings, write handoff file, report to PM.
 
+## Task Tracking (TodoWrite)
+
+Use TodoWrite at these key workflow points:
+
+- **Ticket work**: when assigned a ticket, create todos for
+  investigation, delegation, review, commit, and report-back.
+  Mark each as completed when done.
+- **Multi-step tasks**: any task with 3+ steps gets a todo list.
+- **Wrap-up**: track each wrap-up step as a todo.
+
+Keep the list current — remove completed items promptly.
+
 ## Ticket System
 
 The PM and TL share a lightweight file-based ticket system at

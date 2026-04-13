@@ -617,6 +617,20 @@ Note: recurring crons auto-expire after 7 days. The PM should
 re-create the daily review cron during wrap-up if the session has
 been running for several days.
 
+## Task Tracking (TodoWrite)
+
+Use TodoWrite at these key workflow points:
+
+- **Ticket assignment**: create a todo for each ticket you assign
+  to the TL. Mark in_progress when assigned, completed when closed.
+- **Backlog processing**: when processing multiple tickets in a
+  work loop iteration, track each as a todo so progress is visible.
+- **Wrap-up**: create todos for each wrap-up step (log, handoff,
+  notify consumers, replaceme). Check off as completed.
+
+Keep the list current — remove stale items, don't let it grow
+beyond what's actively in flight.
+
 ## Backlog Processing
 
 Keep working. When the TL completes a task, immediately triage and

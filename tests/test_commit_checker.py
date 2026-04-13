@@ -7,7 +7,12 @@ import subprocess
 
 import pytest
 
-from claude_worker.commit_checker import _check_commit, CAIRN_VALIDATE_TIMEOUT_SECONDS
+from claude_worker.commit_checker import (
+    _check_commit,
+    _log_commit,
+    CAIRN_VALIDATE_TIMEOUT_SECONDS,
+    COMMIT_LOG_NAME,
+)
 
 
 class TestCheckCommit:
@@ -210,3 +215,58 @@ class TestCairnValidate:
         # never for cairn validate
         assert mock_run.call_count == 1
         assert mock_run.call_args[0][0][0] == "git"
+
+
+class TestCommitLog:
+    """Tests for _log_commit writing to .cwork/commits.log."""
+
+    def test_log_commit_appends(self, tmp_path, monkeypatch):
+        """_log_commit appends a line to .cwork/commits.log."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".cwork").mkdir()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "abc1234 Fix the thing"
+
+        with patch(
+            "claude_worker.commit_checker.subprocess.run", return_value=mock_result
+        ):
+            _log_commit()
+
+        log_file = tmp_path / ".cwork" / COMMIT_LOG_NAME
+        assert log_file.exists()
+        content = log_file.read_text()
+        assert "abc1234 Fix the thing" in content
+        assert "|" in content  # timestamp | hash subject
+
+    def test_log_commit_no_cwork_dir(self, tmp_path, monkeypatch):
+        """_log_commit silently skips when .cwork/ doesn't exist."""
+        monkeypatch.chdir(tmp_path)
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "abc1234 Fix the thing"
+
+        with patch(
+            "claude_worker.commit_checker.subprocess.run", return_value=mock_result
+        ):
+            _log_commit()  # should not crash
+
+        assert not (tmp_path / ".cwork" / COMMIT_LOG_NAME).exists()
+
+    def test_log_commit_git_failure(self, tmp_path, monkeypatch):
+        """_log_commit silently skips on git failure."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".cwork").mkdir()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = ""
+
+        with patch(
+            "claude_worker.commit_checker.subprocess.run", return_value=mock_result
+        ):
+            _log_commit()
+
+        assert not (tmp_path / ".cwork" / COMMIT_LOG_NAME).exists()
