@@ -1748,3 +1748,28 @@ observations:
       - file: claude_worker/cli.py
         identifier: PM_INTERNALIZE_MESSAGE
         role: extends
+
+  - id: D66
+    name: deterministic-migration-system
+    decision: >
+      Versioned migration scripts at ~/.cwork/migrations/NNN-description.sh
+      applied deterministically across registered projects. Per-project
+      .cwork/.migration-version tracks applied level. claude-worker migrate
+      discovers projects via registry, syncs bundled scripts from the
+      package, runs pending migrations in order. Scripts must be idempotent.
+      First migration: 001-roles-directory-rename (D62 prerequisite).
+    origin: >
+      Ticket #061 (2026-04-13). Convention changes don't propagate to
+      existing projects. RHC + human design session identified the need.
+    tags: [architecture, durability]
+    maps_to: [project:G4, project:V3, project:G2]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: cmd_migrate
+        role: implements
+      - file: claude_worker/migrations/001-roles-directory-rename.sh
+        identifier: first migration script
+        role: implements
+      - file: tests/test_migrate.py
+        identifier: migration system tests
+        role: implements

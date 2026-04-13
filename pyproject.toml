@@ -19,7 +19,7 @@ test = ["pytest>=7.0"]
 claude-worker = "claude_worker.cli:main"
 
 [tool.setuptools.package-data]
-claude_worker = ["hooks/*.sh", "identities/*.md", "references/*.md", "skills/*.md"]
+claude_worker = ["hooks/*.sh", "identities/*.md", "references/*.md", "skills/*.md", "migrations/*.sh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

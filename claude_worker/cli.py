@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -153,6 +155,11 @@ PERMISSION_HOOK_TOOLS: tuple[str, ...] = ("Edit", "Write", "MultiEdit")
 # Substring that identifies a sensitive-file denial in a tool_result.
 # Used by `grant --last` to locate the most recent denied tool call.
 SENSITIVE_DENIAL_MARKER: str = "which is a sensitive file"
+
+# Migration system
+MIGRATIONS_DIR: Path = Path.home() / ".cwork" / "migrations"
+MIGRATION_VERSION_FILE: str = ".migration-version"
+CWORK_VERSION_FILE: str = "version"
 
 from claude_worker.manager import (
     _atomic_write_text,
@@ -4424,6 +4431,187 @@ def cmd_repl(args: argparse.Namespace) -> None:
         print()  # blank line before next prompt for readability
 
 
+# ---------------------------------------------------------------------------
+# Migration system — deterministic versioned scripts across projects
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class Migration:
+    """A versioned migration script."""
+
+    number: int
+    name: str
+    path: Path
+
+
+def _discover_migrations(migrations_dir: Path | None = None) -> list[Migration]:
+    """Find all NNN-*.sh files in the migrations directory, sorted by number."""
+    d = migrations_dir or MIGRATIONS_DIR
+    if not d.exists():
+        return []
+    migrations: list[Migration] = []
+    for f in sorted(d.iterdir()):
+        if f.suffix == ".sh" and f.name[0:3].isdigit():
+            try:
+                number = int(f.name.split("-", 1)[0])
+            except ValueError:
+                continue
+            migrations.append(Migration(number=number, name=f.name, path=f))
+    return migrations
+
+
+def _sync_bundled_migrations(migrations_dir: Path | None = None) -> int:
+    """Copy bundled migration scripts to ~/.cwork/migrations/.
+
+    Only copies scripts that don't already exist (won't overwrite
+    user-modified scripts). Returns count of scripts synced.
+    """
+    d = migrations_dir or MIGRATIONS_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    synced = 0
+    try:
+        from importlib.resources import files
+
+        bundled = files("claude_worker") / "migrations"
+        for resource in bundled.iterdir():
+            if hasattr(resource, "name") and resource.name.endswith(".sh"):
+                target = d / resource.name
+                if not target.exists():
+                    target.write_text(resource.read_text())
+                    target.chmod(0o755)
+                    synced += 1
+    except Exception:
+        pass
+    return synced
+
+
+def _read_migration_version(project_path: str) -> int:
+    """Read the current migration version for a project. Returns 0 if missing."""
+    version_file = Path(project_path) / ".cwork" / MIGRATION_VERSION_FILE
+    if not version_file.exists():
+        return 0
+    try:
+        return int(version_file.read_text().strip())
+    except (ValueError, OSError):
+        return 0
+
+
+def _write_migration_version(project_path: str, version: int) -> None:
+    """Write the migration version for a project."""
+    cwork = Path(project_path) / ".cwork"
+    cwork.mkdir(parents=True, exist_ok=True)
+    (cwork / MIGRATION_VERSION_FILE).write_text(str(version) + "\n")
+
+
+def _update_version_anchor(project_path: str) -> None:
+    """Update the .cwork/version anchor after migration."""
+    from claude_worker import __init__ as _pkg
+
+    version = getattr(_pkg, "__version__", "unknown")
+    cwork = Path(project_path) / ".cwork"
+    cwork.mkdir(parents=True, exist_ok=True)
+    (cwork / CWORK_VERSION_FILE).write_text(f"claude-worker {version}\n")
+
+
+def _run_migration(migration: Migration, project_path: str) -> int:
+    """Run a migration script against a project. Returns exit code."""
+    try:
+        result = subprocess.run(
+            ["bash", str(migration.path), project_path],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            print(
+                f"    stderr: {result.stderr.strip()}" if result.stderr else "",
+                file=sys.stderr,
+            )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        print("    timeout after 60s", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"    error: {exc}", file=sys.stderr)
+        return 1
+
+
+def cmd_migrate(args: argparse.Namespace) -> None:
+    """Run pending migrations on registered projects."""
+    from claude_worker.project_registry import load_registry
+
+    # Sync bundled migrations first
+    synced = _sync_bundled_migrations()
+    if synced > 0:
+        print(f"Synced {synced} new migration(s) from bundle.")
+
+    migrations = _discover_migrations()
+    if not migrations:
+        print("No migrations found.")
+        return
+
+    if args.list_migrations:
+        print(f"Available migrations ({len(migrations)}):")
+        for m in migrations:
+            print(f"  {m.name}")
+        print()
+
+    # Determine target projects
+    if args.project:
+        projects = [
+            {
+                "slug": Path(args.project).name,
+                "path": os.path.realpath(args.project),
+            }
+        ]
+    else:
+        projects = load_registry()
+
+    if not projects:
+        print(
+            "No registered projects. Use --project PATH or register projects first."
+        )
+        return
+
+    if args.list_migrations:
+        print(f"Project status ({len(projects)}):")
+        for proj in projects:
+            v = _read_migration_version(proj["path"])
+            latest = migrations[-1].number if migrations else 0
+            status = "up to date" if v >= latest else f"{latest - v} pending"
+            print(f"  {proj.get('slug', '?')}: v{v} ({status})")
+        return
+
+    # Run pending migrations
+    for proj in projects:
+        slug = proj.get("slug", "?")
+        proj_path = proj["path"]
+        current = _read_migration_version(proj_path)
+        pending = [m for m in migrations if m.number > current]
+
+        if not pending:
+            print(f"  {slug}: up to date (v{current})")
+            continue
+
+        for migration in pending:
+            if args.dry_run:
+                print(f"  {slug}: would apply {migration.name}")
+                continue
+
+            print(f"  {slug}: applying {migration.name}...", end=" ")
+            rc = _run_migration(migration, proj_path)
+            if rc != 0:
+                print(f"FAILED (exit {rc})")
+                print(f"  Migration halted for {slug}.", file=sys.stderr)
+                break
+            print("ok")
+            _write_migration_version(proj_path, migration.number)
+
+        if not args.dry_run:
+            _update_version_anchor(proj_path)
+
+
 EXAMPLES = """\
 examples:
   # Start a worker — blocks until claude responds, then prints status
@@ -4994,6 +5182,27 @@ def main():
         help="Remove every grant for this worker (active and consumed)",
     )
 
+    # -- migrate --
+    p_migrate = sub.add_parser(
+        "migrate", help="Run pending migrations on registered projects"
+    )
+    p_migrate.add_argument(
+        "--project",
+        metavar="PATH",
+        help="Run migrations on this project only (default: all registered)",
+    )
+    p_migrate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show pending migrations without running them",
+    )
+    p_migrate.add_argument(
+        "--list",
+        dest="list_migrations",
+        action="store_true",
+        help="List available migrations and project versions",
+    )
+
     args = parser.parse_args()
 
     handlers = {
@@ -5015,5 +5224,6 @@ def main():
         "grant": cmd_grant,
         "grants": cmd_grants,
         "revoke": cmd_revoke,
+        "migrate": cmd_migrate,
     }
     handlers[args.command](args)
