@@ -1698,3 +1698,25 @@ observations:
       - file: docs/architecture.md
         identifier: architecture documentation
         role: implements
+
+  - id: D64
+    name: send-flag-reparse-trailing
+    decision: >
+      Fix send CLI flag ordering by extracting trailing flags from
+      the message positional. When argparse absorbs flags into
+      nargs="*", _reparse_send_flags scans from the end backwards
+      and extracts recognized flags. Message content is preserved
+      even if it contains flag-like words (only trailing flags
+      are extracted).
+    origin: >
+      Ticket #058 (2026-04-10). High hit rate — RHC, PM, and human
+      all tripped on send NAME "msg" --flag failing.
+    tags: [architecture, craftsmanship]
+    maps_to: [project:G4, project:V1]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _reparse_send_flags
+        role: implements
+      - file: tests/test_send_flag_ordering.py
+        identifier: send flag ordering tests
+        role: implements

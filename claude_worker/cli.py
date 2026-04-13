@@ -1468,6 +1468,70 @@ def _send_to_single_worker(
     return rc
 
 
+# -- send flag reparse --
+# Maps trailing flags that argparse may absorb into the message positional
+# back to their args namespace attribute. Bool flags set True; value flags
+# consume the next word as the value.
+
+_SEND_BOOL_FLAGS: dict[str, str] = {
+    "--queue": "queue",
+    "--dry-run": "dry_run",
+    "--verbose": "verbose",
+    "--show-response": "show_response",
+    "--show-full-response": "show_full_response",
+    "--broadcast": "broadcast",
+    "--alive": "alive",
+    "--all-chats": "all_chats",
+}
+
+_SEND_VALUE_FLAGS: dict[str, str] = {
+    "--chat": "chat",
+    "--role": "role",
+    "--status": "status",
+    "--cwd": "cwd_filter",
+}
+
+
+def _reparse_send_flags(args: argparse.Namespace) -> argparse.Namespace:
+    """Extract trailing flags that argparse absorbed into the message positional.
+
+    When flags appear after the message body (``send NAME "msg" --queue``),
+    argparse's ``nargs="*"`` absorbs them into the message list.  This
+    function scans ``args.message`` from the end backwards: any trailing
+    sequence of recognized send flags is extracted and applied to the
+    *args* namespace.  Everything before that trailing sequence is kept as
+    the message, so flag-like words inside the message text are preserved.
+    """
+    if not args.message:
+        return args
+
+    words = args.message[:]
+
+    # Scan backwards: peel off trailing flags until we hit a non-flag word.
+    extracted: list[tuple[str, str | None]] = []  # (flag, value_or_None)
+    while words:
+        last = words[-1]
+        if last in _SEND_BOOL_FLAGS:
+            words.pop()
+            extracted.append((last, None))
+        elif len(words) >= 2 and words[-2] in _SEND_VALUE_FLAGS:
+            value = words.pop()
+            flag = words.pop()
+            extracted.append((flag, value))
+        else:
+            break
+
+    # Apply extracted flags to the namespace
+    for flag, value in extracted:
+        if flag in _SEND_BOOL_FLAGS:
+            setattr(args, _SEND_BOOL_FLAGS[flag], True)
+        elif flag in _SEND_VALUE_FLAGS:
+            setattr(args, _SEND_VALUE_FLAGS[flag], value)
+
+    args.message = words
+    return args
+
+
 def cmd_send(args: argparse.Namespace) -> None:
     """Send a message to a worker, or broadcast to multiple workers.
 
@@ -1476,6 +1540,9 @@ def cmd_send(args: argparse.Namespace) -> None:
     correlation ID embedded in the message. Use ``--broadcast`` with filter
     flags to send to multiple workers matching a filter.
     """
+    # Fix flag ordering: extract flags that argparse absorbed into message
+    args = _reparse_send_flags(args)
+
     if args.show_response and args.show_full_response:
         print(
             "Error: --show-response and --show-full-response are mutually exclusive",
