@@ -100,6 +100,7 @@ PM_INTERNALIZE_MESSAGE: str = (
     "prior [chat:*] messages to recover ongoing consumer state. If this is "
     "a fresh worker, acknowledge readiness. Check for MEMORY.md and "
     "PROJECT.md in the current directory for project context. "
+    "Enter Mode 1 (continuous work): read INDEX.md, process the backlog. "
     "Report your initialization status."
 )
 MISSING_TAG_LOG_NAME: str = "missing-tags.json"

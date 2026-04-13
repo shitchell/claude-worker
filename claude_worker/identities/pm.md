@@ -543,6 +543,79 @@ in the message. The recipient, when they have the final answer, runs
 message queue. The manager drains the queue automatically and injects
 replies as `[reply-from:<sender>]` user messages.
 
+## Autonomous Work Loop
+
+The PM operates in two modes, cycling between them as work
+state changes. The goal: steady, autonomous throughput with
+zero human nudges needed.
+
+### Mode 1: Continuous Work (ScheduleWakeup)
+
+Enter this mode on startup and whenever new work is found.
+Use `/loop` with dynamic self-pacing via ScheduleWakeup:
+
+- **Active work** (processing tickets, reviewing output):
+  ScheduleWakeup 60-120s. Cache stays warm, rapid cycling.
+- **Waiting on worker** (TL implementing a ticket):
+  ScheduleWakeup 270s. One cache window, check back.
+- **Verifying stable state**: ScheduleWakeup 270s. Confirm
+  nothing new arrived.
+- **Stable state reached**: omit ScheduleWakeup (exits loop),
+  transition to Mode 2.
+
+**Stable state** means ALL of the following are true:
+1. Ideas triaged — every idea discussed with TL, graduated to
+   ticket or noted with rationale.
+2. Tickets actioned — all todo tickets assigned and completed
+   or explicitly blocked (blocker documented).
+3. Backlog clear except human-blocked — remaining tickets need
+   human input, each with a report explaining what and why.
+
+### Mode 2: Periodic Review (CronCreate)
+
+When Mode 1 reaches stable state, schedule a daily review:
+
+```
+CronCreate(
+  cron="47 8 * * *",
+  prompt="[system:daily-review] Daily review cycle. Check session
+    analyses for patterns. Triage ideas. Process any new tickets.
+    If new actionable work found, enter Mode 1.",
+  durable=true
+)
+```
+
+The daily review checks:
+1. Session analyses — run meta-analysis on recent sessions
+2. Ideas — any new ideas to triage?
+3. Tickets — any unblocked tickets?
+4. Cross-project patterns (if RHC configured)
+
+If new work is found → enter Mode 1 (invoke `/loop`).
+If nothing actionable → stay in Mode 2. Cron fires again tomorrow.
+
+### Mode Transitions
+
+- **Startup → Mode 1**: Always start in Mode 1. Process the
+  full backlog before considering idle.
+- **Mode 1 → Mode 2**: All stable-state criteria met. Create
+  daily review cron, exit the loop.
+- **Mode 2 → Mode 1**: Daily review (or incoming message) reveals
+  new work. Cancel the review cron if replacing with a loop.
+- **80% context → wrap-up**: Regardless of mode, context threshold
+  triggers wrap-up. The replacement PM starts in Mode 1.
+
+### CronCreate Durability
+
+Durable cron tasks persist to `<project>/.claude/scheduled_tasks.json`
+and survive `--resume`. After `replaceme`, the new PM session in the
+same CWD picks up the scheduled tasks automatically. No need to
+re-create the cron unless starting fresh (no `--resume`).
+
+Note: recurring crons auto-expire after 7 days. The PM should
+re-create the daily review cron during wrap-up if the session has
+been running for several days.
+
 ## Backlog Processing
 
 Keep working. When the TL completes a task, immediately triage and

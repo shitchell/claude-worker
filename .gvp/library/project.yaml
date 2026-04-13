@@ -1202,7 +1202,8 @@ decisions:
       elapsed since its last run (timestamps in runtime/periodic/).
       Due tasks are executed and output injected as [system:cron]
       via the FIFO. Only runs for identity workers (not plain).
-      Best-effort: failures silently skipped.
+      Best-effort: failures silently skipped. Partially superseded
+      by D65 (PM autonomous work loop via CC native scheduling).
     origin: >
       Ticket E of identity directory incremental plan (#042/043).
       ~40 LOE. Completes the full identity directory system:
@@ -1247,7 +1248,8 @@ decisions:
       (configurable via CW_IDLE_THRESHOLD), (c) open todo tickets
       exist. Rate-limited to once per calendar day via sentinel file.
       Configured in periodic.yaml at 30-minute check interval; the
-      script self-gates on conditions.
+      script self-gates on conditions. Superseded by D65 (PM
+      autonomous work loop via CC native scheduling).
     origin: >
       Ticket #045 (2026-04-10). Human: "i wonder if we should have
       a cron sort of system whereby PMs get a ping at 3am saying
@@ -1720,3 +1722,29 @@ observations:
       - file: tests/test_send_flag_ordering.py
         identifier: send flag ordering tests
         role: implements
+
+  - id: D65
+    name: pm-autonomous-work-loop
+    decision: >
+      PM operates in two modes via CC native scheduling. Mode 1
+      (continuous work): ScheduleWakeup for adaptive pacing through
+      the backlog (60-270s intervals, cache-aware). Mode 2 (periodic
+      review): CronCreate with durable=true for daily wake-ups
+      (47 8 * * *). Stable state = ideas triaged + tickets actioned
+      + blockers reported. Supersedes D42 (homegrown periodic tasks)
+      and D44 (off-hours cron shell script). CronCreate durable
+      tasks persist across --resume via per-project
+      .claude/scheduled_tasks.json.
+    origin: >
+      Ticket #064 (2026-04-13). PM needed autonomous work loop
+      without human nudges. CC native scheduling (ScheduleWakeup,
+      CronCreate) replaces homegrown periodic task system.
+    tags: [pm, process, lifecycle]
+    maps_to: [project:G2, project:D18, project:V6]
+    refs:
+      - file: claude_worker/identities/pm.md
+        identifier: Autonomous Work Loop
+        role: defines
+      - file: claude_worker/cli.py
+        identifier: PM_INTERNALIZE_MESSAGE
+        role: extends
