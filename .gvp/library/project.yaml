@@ -1842,3 +1842,26 @@ observations:
       - file: tests/test_archive_metadata.py
         identifier: archive metadata tests
         role: implements
+
+  - id: D70
+    name: designer-identity
+    decision: >
+      Designer identity for upstream requirements gathering.
+      Socratic proposal-and-refine approach — proposes options
+      with trade-offs, never asks open-ended questions. Tracks
+      flex points (FP-N) and assumptions (A-N). Produces
+      structured prose design docs per #051 format. Never
+      touches code. Hands off locked design docs to PM for
+      mechanical GVP translation. Helper agent protocol uses
+      delta-based vocabulary for rendering tasks.
+    origin: >
+      Ticket #049 (2026-04-13). TAStest Director identified
+      the gap — no identity for the upstream design stage.
+      Dependencies #050 (flex-point) and #051 (artifact format)
+      completed first.
+    tags: [identity, architecture]
+    maps_to: [project:G4, project:V5, project:D29]
+    refs:
+      - file: .cwork/tickets/051-designer-artifact-format/TECHNICAL.md
+        identifier: Designer Artifact Format
+        role: uses
