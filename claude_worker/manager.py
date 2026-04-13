@@ -377,13 +377,33 @@ def _atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
-def archive_runtime_dir(name: str) -> Path | None:
+def _read_identity_from_sessions(name: str) -> str:
+    """Read identity from .sessions.json for a worker. Returns '' if unavailable."""
+    try:
+        sessions_path = get_base_dir() / ".sessions.json"
+        if sessions_path.exists():
+            data = json.loads(sessions_path.read_text())
+            return data.get(name, {}).get("identity", "")
+    except (json.JSONDecodeError, OSError):
+        pass
+    return ""
+
+
+def archive_runtime_dir(
+    name: str,
+    reason: str = "unknown",
+    successor: str = "",
+) -> Path | None:
     """Rename runtime directory to a timestamped archive path.
 
     Used by the SIGUSR1 (graceful replace) handler to preserve the
     runtime dir for the replacement manager to read session metadata
     from. The archive path is deterministic from the name + timestamp +
     session ID prefix.
+
+    Writes a ``metadata.json`` to the archive with audit trail info
+    (worker name, reason, timestamp, session ID, identity, successor).
+    The metadata write is best-effort — failure does not prevent archival.
 
     Returns the archive path, or None if the runtime dir doesn't exist.
     """
@@ -403,13 +423,29 @@ def archive_runtime_dir(name: str) -> Path | None:
         os.rename(runtime, archive_path)
     except OSError:
         return None
+
+    # Write archive metadata for audit trail
+    metadata = {
+        "worker_name": name,
+        "archive_reason": reason,
+        "archive_timestamp": timestamp,
+        "session_id": session_id,
+        "identity": _read_identity_from_sessions(name),
+        "successor": successor,
+    }
+    try:
+        metadata_path = archive_path / "metadata.json"
+        metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
+    except OSError:
+        pass  # best-effort
+
     return archive_path
 
 
 ARCHIVE_RETENTION_DAYS: int = 30
 
 
-def cleanup_runtime_dir(name: str) -> None:
+def cleanup_runtime_dir(name: str, reason: str = "stop") -> None:
     """Archive and then remove the runtime directory.
 
     Archives the log and metadata to a timestamped directory under the
@@ -422,7 +458,7 @@ def cleanup_runtime_dir(name: str) -> None:
     """
     # Try to archive before deleting (best-effort)
     try:
-        archive_runtime_dir(name)
+        archive_runtime_dir(name, reason=reason)
     except Exception:
         pass
     # Clean up in both possible locations (archive may have moved the
@@ -721,7 +757,7 @@ def _run_manager_forkless(
         try:
             _kill_claude()
         finally:
-            archive_runtime_dir(name)
+            archive_runtime_dir(name, reason="replaceme")
             sys.exit(0)
 
     if install_signals:
@@ -843,4 +879,4 @@ def _run_manager_forkless(
     # Wait for claude to exit
     proc.wait()
     log_thread.join(timeout=LOG_THREAD_JOIN_TIMEOUT_SECONDS)
-    cleanup_runtime_dir(name)
+    cleanup_runtime_dir(name, reason="exit")

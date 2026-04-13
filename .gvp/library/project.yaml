@@ -1820,3 +1820,25 @@ observations:
       - file: tests/test_commit_checker.py
         identifier: cairn enforcement tests
         role: implements
+
+  - id: D69
+    name: archive-metadata-preservation
+    decision: >
+      Archived worker directories include metadata.json with audit
+      trail: worker_name, archive_reason (stop/replaceme/exit/unknown),
+      archive_timestamp, session_id, identity, and successor name.
+      archive_runtime_dir accepts reason and successor params.
+      cleanup_runtime_dir forwards the reason. Best-effort write —
+      metadata failure doesn't prevent archival.
+    origin: >
+      Ticket #060 (2026-04-13). Archived dirs had no context about
+      why they were archived. RHC audit identified the gap.
+    tags: [observability, durability]
+    maps_to: [project:G2, project:V3, project:D46]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: archive_runtime_dir
+        role: extends
+      - file: tests/test_archive_metadata.py
+        identifier: archive metadata tests
+        role: implements

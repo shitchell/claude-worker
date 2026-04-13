@@ -2662,14 +2662,14 @@ def cmd_stop(args: argparse.Namespace) -> None:
 
     if not pid_file.exists():
         print(f"No PID file for worker '{args.name}'", file=sys.stderr)
-        cleanup_runtime_dir(args.name)
+        cleanup_runtime_dir(args.name, reason="stop")
         return
 
     try:
         pid = int(pid_file.read_text().strip())
     except (ValueError, OSError):
         print("Error: invalid PID file", file=sys.stderr)
-        cleanup_runtime_dir(args.name)
+        cleanup_runtime_dir(args.name, reason="stop")
         sys.exit(1)
 
     # Two-phase wrap-up: if the worker is alive and wrap-up is enabled,
@@ -2740,7 +2740,8 @@ def cmd_stop(args: argparse.Namespace) -> None:
     # Wait briefly for cleanup, then force-clean if needed
     time.sleep(STOP_CLEANUP_DELAY_SECONDS)
     if runtime.exists():
-        cleanup_runtime_dir(args.name)
+        reason = "force-stop" if args.force else "stop"
+        cleanup_runtime_dir(args.name, reason=reason)
         print(f"Cleaned up {runtime}")
 
 
