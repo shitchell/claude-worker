@@ -5532,7 +5532,7 @@ def main():
     # -- reply --
     p_reply = sub.add_parser(
         "reply",
-        help="Send a reply to a worker's message queue (persistent, no FIFO needed)",
+        help="Send a reply to a worker via the thread primitive (persistent)",
     )
     p_reply.add_argument("name", help="Recipient worker name")
     p_reply.add_argument(

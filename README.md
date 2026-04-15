@@ -1,6 +1,6 @@
 # claude-worker
 
-Launch and communicate with Claude Code subprocess workers via named FIFOs and
+Launch and communicate with Claude Code subprocess workers via threads and
 stream-json.
 
 ## Why
@@ -154,7 +154,7 @@ echo "analyze this code" | claude-worker send myworker
 - `--role`, `--status`, `--alive`, `--cwd` — filter targets for broadcast
   (same filters as `list`).
 - `--dry-run` — print the JSON envelope that would be sent without writing
-  to the FIFO. Zero side effects.
+  to the thread. Zero side effects.
 - `--verbose` — print the JSON envelope to stderr before sending.
 - `--show-response` — after the turn completes, print only the assistant's
   response.
@@ -477,9 +477,10 @@ failures are logged to stderr, never crash the worker.
 claude-worker reply [--sender NAME] NAME [MESSAGE...]
 ```
 
-Send a reply to a worker's persistent message queue (no FIFO needed —
-the manager drains the queue periodically). Message reads stdin if
-omitted.
+Send a reply to a worker via the thread primitive. The reply appends to
+the pair thread between sender and recipient; the recipient gets a
+lightweight notification and reads the full message on demand. Message
+reads stdin if omitted.
 
 - `--sender` — sender identity. Auto-detected from PID ancestry if
   running inside a worker.
@@ -634,7 +635,7 @@ Each worker has a runtime directory at `~/.cwork/workers/<name>/`:
 
 ```
 ~/.cwork/workers/my-worker/
-├── in              # named FIFO, accepts stream-json user messages
+├── in              # internal FIFO (manager → claude stdin; not user-facing)
 ├── log             # all claude stdout, newline-delimited JSONL
 ├── pid             # manager process PID
 ├── claude-pid      # claude subprocess PID (used by test harness)
@@ -678,5 +679,5 @@ claude-worker start --pm --name pm-backend --cwd ~/projects/backend \
 
 ## Architecture
 
-See `docs/architecture.md` for the internal design: fork/manager model, FIFO
-plumbing, stream-json protocol notes, and the PM/chat routing pipeline.
+See `docs/architecture.md` for the internal design: fork/manager model, thread
+primitive, stream-json protocol notes, and the PM/chat routing pipeline.

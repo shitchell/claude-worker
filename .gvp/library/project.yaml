@@ -2342,3 +2342,25 @@ observations:
       - file: tests/test_thread_migration.py
         identifier: migration tests
         role: implements
+
+  - id: D89
+    name: thread-phase-4-fifo-internal-only
+    decision: >
+      Phase 4 of inbox/threads: user-facing references to "FIFO"
+      removed from README.md and CLI help text. "Thread" is the
+      only communication concept users see. FIFO stays as internal
+      plumbing (manager writes to claude's stdin). Internal docs
+      (CLAUDE.md, docs/architecture.md) retain FIFO mentions — they
+      describe the architecture, not the user model.
+    origin: >
+      Phase 4 of inbox/threads (2026-04-15). Finalizes D74 anti-
+      realist unification — users see one concept, not six.
+    tags: [observability, craftsmanship]
+    maps_to: [project:D74, project:D88, project:V1]
+    refs:
+      - file: README.md
+        identifier: claude-worker documentation
+        role: extends
+      - file: claude_worker/cli.py
+        identifier: reply help text
+        role: extends
