@@ -242,13 +242,22 @@ class TestCmdSendEndToEnd:
             show_full_response=False,
             chat=None,
             all_chats=False,
+            dry_run=False,
+            verbose=False,
+            broadcast=False,
         )
         with pytest.raises(SystemExit) as exc_info:
             cmd_send(args)
         assert exc_info.value.code == 0
 
-        # Verify the stub's echo landed in the log
-        assert handle.wait_for_log("stub response to: hello from cmd_send", timeout=5.0)
+        # Post-D88 the user content is delivered to claude via a
+        # [system:new-message] notification (the thread primitive is the
+        # canonical delivery path). The stub's echo therefore wraps the
+        # notification envelope. Verify the notification reached the stub.
+        assert handle.wait_for_log(
+            "[system:new-message] Thread pair-cmd-send-1",
+            timeout=10.0,
+        )
         handle.stop()
 
 

@@ -100,14 +100,30 @@ class TestDrainQueue:
 
 
 class TestCmdReply:
-    """cmd_reply must enqueue a message without needing a FIFO."""
+    """cmd_reply appends to the pair thread (post-D88).
 
-    def test_reply_creates_queue_file(self, tmp_path: Path, monkeypatch):
+    Legacy (pre-D88) cmd_reply wrote to a queue directory. Phase 3 of the
+    thread migration routes replies through the same thread primitive as
+    ``send``, so this test verifies the JSONL thread file instead.
+    """
+
+    def test_reply_appends_to_pair_thread(self, tmp_path: Path, monkeypatch):
         from claude_worker.cli import cmd_reply
+        from claude_worker.thread_store import pair_thread_id, read_messages
 
         monkeypatch.setattr("claude_worker.manager.Path.home", lambda: tmp_path)
-        # Patch _find_worker_by_ancestry to return None (not inside a worker)
         monkeypatch.setattr("claude_worker.cli._find_worker_by_ancestry", lambda: None)
+
+        # Saved session gives the recipient a cwd; threads live there
+        base_dir = tmp_path / ".cwork" / "workers"
+        base_dir.mkdir(parents=True)
+        project_cwd = tmp_path / "project"
+        project_cwd.mkdir()
+        (base_dir / ".sessions.json").write_text(
+            json.dumps(
+                {"target-worker": {"cwd": str(project_cwd), "identity": "worker"}}
+            )
+        )
 
         args = argparse.Namespace(
             name="target-worker",
@@ -116,9 +132,9 @@ class TestCmdReply:
         )
         cmd_reply(args)
 
-        queue_dir = get_queue_dir("target-worker")
-        files = list(queue_dir.iterdir())
-        assert len(files) == 1
-        data = json.loads(files[0].read_text())
-        assert data["sender"] == "test-sender"
-        assert data["content"] == "hello from reply"
+        tid = pair_thread_id("test-sender", "target-worker")
+        messages = read_messages(str(project_cwd), tid)
+        assert len(messages) == 1
+        assert messages[0]["sender"] == "test-sender"
+        assert messages[0]["content"] == "hello from reply"
+        assert "reply" in (messages[0].get("tags") or [])

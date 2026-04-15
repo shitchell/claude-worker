@@ -202,3 +202,53 @@ def get_thread_participants(cwd: str, thread_id: str) -> list[str]:
     if thread_id not in index:
         return []
     return index[thread_id].get("participants", [])
+
+
+# -- Active-thread routing helpers (Phase 3) -------------------------------
+
+
+def pair_thread_id(sender: str, recipient: str) -> str:
+    """Deterministic thread ID for a sender-recipient pair.
+
+    Sorted so the ID is symmetric: ``pair_thread_id(A, B) ==
+    pair_thread_id(B, A)``. Gives every pair of workers exactly one
+    shared thread for direct messaging.
+    """
+    a, b = sorted([sender or "?", recipient or "?"])
+    return f"pair-{a}-{b}"
+
+
+def chat_thread_id(chat_id: str) -> str:
+    """Thread ID for a PM chat tag (multi-consumer routing)."""
+    return f"chat-{chat_id}"
+
+
+def ensure_thread(
+    cwd: str,
+    thread_id: str,
+    participants: list[str],
+    thread_type: str = "chat",
+) -> str:
+    """Create a thread if missing, else extend participants if new.
+
+    Idempotent — safe to call on every send. Returns the thread ID.
+    When the thread already exists, any participants not already in
+    the stored list are appended (order-preserving).
+    """
+    index = load_index(cwd)
+    if thread_id in index:
+        existing = index[thread_id].get("participants") or []
+        updated = list(existing)
+        for p in participants:
+            if p not in updated:
+                updated.append(p)
+        if updated != existing:
+            index[thread_id]["participants"] = updated
+            _save_index(cwd, index)
+        return thread_id
+    return create_thread(
+        cwd,
+        participants=participants,
+        thread_type=thread_type,
+        thread_id=thread_id,
+    )

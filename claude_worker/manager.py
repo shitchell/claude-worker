@@ -31,6 +31,11 @@ PERIODIC_SUBPROCESS_TIMEOUT_SECONDS: float = 10.0
 REMOTE_CONTROL_TIMEOUT_SECONDS: float = 30.0
 REMOTE_CONTROL_POLL_INTERVAL: float = 0.2
 
+# Active-thread sidecar (Phase 3): records the thread ID of the most
+# recent inbound notification so the response tee knows where to append
+# the worker's assistant reply. Lives under <runtime>/active-thread.
+ACTIVE_THREAD_FILE: str = "active-thread"
+
 # Env var override for the claude binary path. Tests set this to point at
 # a stub-claude script that emits canned JSONL output; production leaves
 # it unset and defaults to the literal "claude" on PATH.
@@ -42,6 +47,88 @@ def _resolve_claude_bin() -> str:
     """Return the claude binary path, honoring the CLAUDE_WORKER_CLAUDE_BIN
     env var for test injection. Defaults to ``"claude"`` (PATH lookup)."""
     return os.environ.get(CLAUDE_BIN_ENV_VAR) or DEFAULT_CLAUDE_BIN
+
+
+def _set_active_thread(runtime: Path, thread_id: str) -> None:
+    """Record the worker's active thread (last inbound thread).
+
+    Phase 3 response tee uses this to know where to append assistant
+    replies. Best-effort: runtime may briefly not exist during startup
+    or shutdown, so OSError is swallowed.
+    """
+    try:
+        (runtime / ACTIVE_THREAD_FILE).write_text(thread_id)
+    except OSError:
+        pass
+
+
+def _get_active_thread(runtime: Path) -> str | None:
+    """Return the worker's active thread ID, or None if not set."""
+    p = runtime / ACTIVE_THREAD_FILE
+    if not p.exists():
+        return None
+    try:
+        text = p.read_text().strip()
+        return text or None
+    except OSError:
+        return None
+
+
+def _tee_assistant_to_thread(
+    line: str,
+    runtime: Path,
+    cwd: str,
+    worker_name: str,
+) -> bool:
+    """Parse a raw JSONL line; if it's a final-turn assistant text message,
+    append its text to the worker's active thread.
+
+    Only tees messages where ``stop_reason == "end_turn"`` so one assistant
+    text per turn is appended (mid-turn streaming chunks and tool-use
+    pauses are skipped). Text is the concatenation of all ``text`` blocks
+    in the message's content list; non-text blocks (tool_use, thinking)
+    are ignored.
+
+    Returns True if a message was teed, False otherwise. Best-effort:
+    parse errors and missing active thread both silently return False.
+    """
+    try:
+        data = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if data.get("type") != "assistant":
+        return False
+    message = data.get("message") or {}
+    if message.get("stop_reason") != "end_turn":
+        return False
+    contents = message.get("content") or []
+    if not isinstance(contents, list):
+        return False
+    text_parts: list[str] = []
+    for c in contents:
+        if isinstance(c, dict) and c.get("type") == "text":
+            text_parts.append(c.get("text", ""))
+    if not text_parts:
+        return False
+    combined = "\n".join(text_parts).strip()
+    if not combined:
+        return False
+    active_thread = _get_active_thread(runtime)
+    if not active_thread:
+        return False
+    try:
+        from claude_worker.thread_store import append_message as _append
+
+        _append(
+            cwd=cwd,
+            thread_id=active_thread,
+            sender=worker_name,
+            content=combined,
+            tags=["assistant"],
+        )
+        return True
+    except Exception:
+        return False
 
 
 def get_base_dir() -> Path:
@@ -275,6 +362,8 @@ def check_thread_changes(
     worker_name: str,
     in_fifo: Path,
     prev_snapshot: dict[str, tuple[float, int]],
+    runtime: Path | None = None,
+    seeded: bool = False,
 ) -> dict[str, tuple[float, int]]:
     """Check for new messages in threads the worker participates in.
 
@@ -288,11 +377,24 @@ def check_thread_changes(
 
     The worker reads the full thread on demand. Messages where the
     sender is the worker itself are ignored to avoid self-notification
-    loops. Best-effort: never crashes the caller.
+    loops.
+
+    ``seeded=False`` (default) preserves the defensive first-scan
+    behaviour: an empty ``prev_snapshot`` skips notifications so a
+    freshly-started caller doesn't flood the worker with history.
+    ``seeded=True`` declares "the baseline was already taken" and lets
+    new threads trigger notifications even when the prior snapshot was
+    empty — used by the manager, which pre-seeds a snapshot at startup
+    so writes that land before the first 5s poll are still delivered.
+
+    When ``runtime`` is provided, records the most recent inbound
+    thread ID to ``<runtime>/active-thread`` so the response tee knows
+    where to append the worker's assistant reply (Phase 3). Best-effort:
+    never crashes the caller.
     """
     try:
         new_snapshot = snapshot_threads(cwd)
-        if not prev_snapshot:
+        if not seeded and not prev_snapshot:
             return new_snapshot  # first scan, no diff
 
         if not worker_name:
@@ -352,6 +454,11 @@ def check_thread_changes(
                         os.write(wr, (notification + "\n").encode())
                     finally:
                         os.close(wr)
+                    # Record this thread as active so the response tee
+                    # appends the worker's reply here. Only updates on
+                    # successful FIFO writes (genuine new-message events).
+                    if runtime is not None:
+                        _set_active_thread(runtime, thread_id)
                 except OSError:
                     # FIFO not writable (no reader, etc.) — skip,
                     # snapshot still advances so we don't re-notify.
@@ -1016,6 +1123,13 @@ def _run_manager_forkless(
                             session_captured.set()
                     except (json.JSONDecodeError, KeyError):
                         pass
+                # Phase 3 response tee: append end_turn assistant text
+                # to the active thread, if one is set. Best-effort — any
+                # parse or I/O error is swallowed by the helper.
+                try:
+                    _tee_assistant_to_thread(line, runtime, resolved_cwd, name)
+                except Exception:
+                    pass
 
     log_thread = threading.Thread(
         target=_run_manager_thread,
@@ -1038,7 +1152,17 @@ def _run_manager_forkless(
         last_thread_check = time.monotonic()
         last_periodic_check = time.monotonic()
         cwork_snapshot: dict[str, tuple[float, int]] = {}
-        thread_snapshot: dict[str, tuple[float, int]] = {}
+        # Seed the thread snapshot synchronously at startup so existing
+        # threads form the baseline — any file growth from this moment on
+        # triggers notifications. Without the pre-seed, writes that land
+        # between manager start and the first 5s poll would be absorbed
+        # into the baseline and never notify (a genuine delivery bug
+        # for tests and fresh workers that are sent to immediately).
+        thread_snapshot: dict[str, tuple[float, int]] = snapshot_threads(resolved_cwd)
+        # Flag: the manager has already taken a baseline snapshot. Passed
+        # to check_thread_changes so it doesn't short-circuit on the
+        # defensive "empty prev_snapshot → skip notifications" branch.
+        thread_baseline_seeded = True
 
         try:
             while proc.poll() is None:
@@ -1071,10 +1195,19 @@ def _run_manager_forkless(
 
                 # Periodic thread monitoring — inject new-message
                 # notifications for threads the worker participates in.
+                # Pass runtime so the active-thread sidecar is updated for
+                # Phase 3's response tee. ``seeded=True`` tells
+                # check_thread_changes the baseline is already established,
+                # so it should not skip notifications on an empty snapshot.
                 if now - last_thread_check >= THREAD_MONITOR_INTERVAL_SECONDS:
                     last_thread_check = now
                     thread_snapshot = check_thread_changes(
-                        resolved_cwd, name, in_fifo, thread_snapshot
+                        resolved_cwd,
+                        name,
+                        in_fifo,
+                        thread_snapshot,
+                        runtime,
+                        seeded=thread_baseline_seeded,
                     )
 
                 # Periodic identity tasks (cron)

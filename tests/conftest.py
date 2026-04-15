@@ -152,6 +152,11 @@ def running_worker(tmp_path: Path, monkeypatch):
     ) -> "RunningWorkerHandle":
         # Create runtime dir + FIFO (normally done by cmd_start)
         runtime_dir = cw_manager.create_runtime_dir(name)
+        # Record the worker's cwd so helpers that resolve the thread
+        # location (thread_store, cmd_send) find the same directory the
+        # manager is watching. Normally cmd_start writes this before
+        # forking the manager; the test fixture mirrors that step.
+        cw_manager.save_worker(name, cwd=cwd or str(tmp_path))
 
         # Per-call stub configuration lives on the manager's env, which
         # is copied from os.environ — so monkeypatch.setenv is sufficient.

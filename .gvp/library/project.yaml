@@ -2277,3 +2277,68 @@ observations:
       - file: tests/test_thread_notifications.py
         identifier: thread notification tests
         role: implements
+
+  - id: D88
+    name: thread-migration-phase-3-with-response-tee
+    decision: >
+      send/reply/read migrated from FIFO/queue/log to the thread
+      primitive (D74) via clean-jump (D76). Per-pair thread IDs
+      (pair-<a>-<b>, sorted/symmetric) and per-chat IDs
+      (chat-<id>) provide deterministic routing; ensure_thread is
+      idempotent and extends participants when new senders join.
+      The manager's stdout_to_log thread tees assistant responses
+      with stop_reason=end_turn to the active thread
+      (runtime/active-thread tracks the most recent inbound
+      thread, updated by check_thread_changes on successful FIFO
+      writes). check_thread_changes gained a `seeded` flag so the
+      manager's startup-time pre-seed doesn't get absorbed as
+      "first scan, no diff" — fixes a genuine delivery race where
+      writes landing before the first 5s poll were silently
+      dropped. `read --log` retains raw log access. `read`
+      auto-detects the pair thread and silently falls back to the
+      log when no saved cwd exists (tests, fresh workers). Phase 2
+      notifications remain lightweight (P12, OBS4) — full content
+      read on demand via thread read.
+    origin: >
+      Phase 3 of inbox/threads (2026-04-15). Human approved
+      Option B (full migration with response tee) over storage-
+      only or user-side-only alternatives.
+    tags: [architecture, fifo, coordination]
+    maps_to: [project:D74, project:D76, project:D77, project:D79, project:P12]
+    refs:
+      - file: claude_worker/thread_store.py
+        identifier: pair_thread_id
+        role: implements
+      - file: claude_worker/thread_store.py
+        identifier: chat_thread_id
+        role: implements
+      - file: claude_worker/thread_store.py
+        identifier: ensure_thread
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _send_to_single_worker
+        role: extends
+      - file: claude_worker/cli.py
+        identifier: cmd_read
+        role: extends
+      - file: claude_worker/cli.py
+        identifier: _read_from_thread
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_reply
+        role: extends
+      - file: claude_worker/cli.py
+        identifier: _resolve_sender
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: _tee_assistant_to_thread
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: _set_active_thread
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: check_thread_changes
+        role: extends
+      - file: tests/test_thread_migration.py
+        identifier: migration tests
+        role: implements

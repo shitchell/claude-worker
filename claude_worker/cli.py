@@ -615,6 +615,21 @@ def _env_chat_id() -> str | None:
     return uuid or None
 
 
+def _resolve_sender() -> str:
+    """Determine the sender name for thread messaging (D75 participants).
+
+    Priority:
+      1. ``CW_WORKER_NAME`` (worker -> worker send, set by the manager)
+      2. ``CLAUDE_SESSION_UUID`` (human interactive claude shell)
+      3. ``"human"`` (plain terminal)
+    """
+    return (
+        os.environ.get("CW_WORKER_NAME")
+        or os.environ.get("CLAUDE_SESSION_UUID")
+        or "human"
+    )
+
+
 def _resolve_chat_id(
     worker_name: str,
     explicit_chat: str | None,
@@ -1155,9 +1170,7 @@ def _ensure_cwork_dirs(cwd: str, pm: bool, tl: bool) -> None:
         )
 
 
-def _fix_legacy_paths_in_args(
-    args_list: list[str], worker_name: str
-) -> list[str]:
+def _fix_legacy_paths_in_args(args_list: list[str], worker_name: str) -> list[str]:
     """Replace legacy /tmp/claude-workers/ paths with current runtime dir.
 
     After migration from /tmp/ to ~/.cwork/workers/, saved claude_args
@@ -1230,9 +1243,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         extra = claude_args
         saved_claude_args = saved.get("claude_args") or []
         saved_claude_args = _fix_legacy_paths_in_args(saved_claude_args, name)
-        claude_args = (
-            ["--resume", saved["session_id"]] + saved_claude_args + extra
-        )
+        claude_args = ["--resume", saved["session_id"]] + saved_claude_args + extra
         # Resumed workers inherit identity from saved metadata
         if not identity:
             identity = _get_worker_identity(name)
@@ -1463,11 +1474,27 @@ def _send_to_single_worker(
 ) -> int:
     """Send a message to a single worker. Returns exit code.
 
+    Post-Phase-3 (D88): writes the message to a thread (via thread_store)
+    instead of the FIFO. The manager's thread monitor notices the append
+    within THREAD_MONITOR_INTERVAL_SECONDS and delivers a lightweight
+    ``[system:new-message]`` notification to claude via the FIFO. The
+    worker reads the full thread on demand.
+
+    Thread selection:
+      - ``--chat <id>`` (PM workers) → ``chat-<id>`` (multi-consumer)
+      - Else → ``pair-<sender>-<recipient>`` (symmetric, deterministic)
+
     Extracted from cmd_send so broadcast can reuse the core send logic
-    per target without duplicating the FIFO write + wait sequence.
+    per target without duplicating the thread write + wait sequence.
     """
+    from claude_worker.thread_store import (
+        append_message,
+        chat_thread_id,
+        ensure_thread,
+        pair_thread_id,
+    )
+
     runtime = get_runtime_dir(name)
-    in_fifo = runtime / "in"
     log_file = runtime / "log"
 
     if not runtime.exists():
@@ -1502,10 +1529,13 @@ def _send_to_single_worker(
 
     marker_uuid = _get_last_uuid(log_file)
 
-    # Chat routing
+    # Chat routing (PM workers) / sender resolution
     chat_id = _resolve_chat_id(name, args.chat, args.all_chats)
+    sender = _resolve_sender()
     tagged_content = content
     if chat_id is not None:
+        # Keep the [chat:<id>] prefix in the content for PM parsing /
+        # downstream filters that look for the literal tag.
         tagged_content = f"[{CHAT_TAG_PREFIX}{chat_id}] {tagged_content}"
 
     # Queue correlation
@@ -1517,20 +1547,56 @@ def _send_to_single_worker(
             + f"\n\n[Please include [{QUEUE_TAG_PREFIX}{queue_id}] literally in your response so the sender can identify it.]"
         )
 
-    msg = json.dumps(
-        {"type": "user", "message": {"role": "user", "content": tagged_content}}
-    )
+    # Resolve thread ID + participants
+    if chat_id is not None:
+        thread_id = chat_thread_id(chat_id)
+        participants = [name, chat_id]
+    else:
+        thread_id = pair_thread_id(sender, name)
+        participants = sorted([sender, name])
+
+    # Resolve the target worker's cwd — threads live under <cwd>/.cwork/threads/
+    saved = get_saved_worker(name)
+    target_cwd = (saved or {}).get("cwd") or os.getcwd()
 
     if getattr(args, "dry_run", False):
-        print(json.dumps(json.loads(msg), indent=2))
+        print(
+            json.dumps(
+                {
+                    "thread_id": thread_id,
+                    "sender": sender,
+                    "recipient": name,
+                    "participants": participants,
+                    "content": tagged_content,
+                    "cwd": target_cwd,
+                },
+                indent=2,
+            )
+        )
         return 0
 
     if getattr(args, "verbose", False):
-        print(json.dumps(json.loads(msg), indent=2), file=sys.stderr)
+        print(
+            f"[verbose] thread={thread_id} sender={sender} recipient={name} "
+            f"cwd={target_cwd}",
+            file=sys.stderr,
+        )
+        print(tagged_content, file=sys.stderr)
 
-    with open(in_fifo, "w") as f:
-        f.write(msg + "\n")
-        f.flush()
+    try:
+        ensure_thread(target_cwd, thread_id, participants)
+        append_message(
+            target_cwd,
+            thread_id,
+            sender=sender,
+            content=tagged_content,
+        )
+    except Exception as exc:
+        print(
+            f"Error: could not write to thread '{thread_id}': {exc}",
+            file=sys.stderr,
+        )
+        return 1
 
     # For broadcast fire-and-forget, don't wait
     if (
@@ -1689,12 +1755,140 @@ def cmd_send(args: argparse.Namespace) -> None:
     sys.exit(rc)
 
 
+def _resolve_read_thread_id(args: argparse.Namespace) -> str:
+    """Determine the thread ID ``cmd_read`` should read from.
+
+    Priority:
+      1. ``--thread ID`` explicit override
+      2. ``--chat ID`` / auto-detected chat (PM workers) → ``chat-<id>``
+      3. ``pair-<sender>-<target>`` where sender is ``_resolve_sender()``
+    """
+    from claude_worker.thread_store import chat_thread_id, pair_thread_id
+
+    override = getattr(args, "thread", None)
+    if override:
+        return override
+
+    chat_id = _resolve_chat_id(
+        args.name,
+        getattr(args, "chat", None),
+        getattr(args, "all_chats", False),
+    )
+    if chat_id is not None:
+        return chat_thread_id(chat_id)
+
+    sender = _resolve_sender()
+    return pair_thread_id(sender, args.name)
+
+
+def _format_thread_message(msg: dict) -> str:
+    """Render a thread message for ``cmd_read`` output.
+
+    Format::
+
+        [<id> <timestamp> <sender>]
+        <content>
+
+    Matches the visual rhythm of claude_logs' rendering: a bracketed
+    header on its own line, blank-line separated, then the body.
+    """
+    mid = str(msg.get("id", ""))[:UUID_SHORT_LENGTH]
+    ts = msg.get("timestamp", "")
+    sender = msg.get("sender", "?")
+    content = msg.get("content", "")
+    header = f"[{mid} {ts} {sender}]"
+    return f"{header}\n{content}"
+
+
+def _read_from_thread(
+    args: argparse.Namespace,
+    fallback_to_log: bool = False,
+) -> tuple[str | None, str | None] | None:
+    """Read messages from the active thread (post-D88 default).
+
+    When ``fallback_to_log=True``, returns ``None`` to signal the caller
+    should continue with the log-based read path whenever the thread
+    isn't usable yet. Specifically: ``None`` is returned if the auto-
+    detected pair thread is missing OR empty AND no explicit ``--thread``
+    was provided. An explicit override always reads the thread (and
+    prints "No messages" if it's empty).
+    """
+    from claude_worker.thread_store import read_messages
+
+    thread_id = _resolve_read_thread_id(args)
+    explicit_thread = bool(getattr(args, "thread", None))
+
+    # Resolve target worker's cwd — threads live under <cwd>/.cwork/threads/.
+    # If the worker has no saved session (test harness, or a worker that
+    # never ran), there's no meaningful thread location. Fall back to the
+    # log path when auto-detecting so tests and fresh workers Just Work.
+    saved = get_saved_worker(args.name)
+    target_cwd = (saved or {}).get("cwd")
+    if not target_cwd:
+        if fallback_to_log and not explicit_thread:
+            return None
+        target_cwd = os.getcwd()
+
+    since_id: str | None = None
+    if getattr(args, "since", None):
+        since_id = str(args.since).strip() or None
+
+    limit: int | None = None
+    if getattr(args, "n", None) is not None:
+        limit = int(args.n)
+
+    try:
+        messages = read_messages(
+            target_cwd,
+            thread_id,
+            since_id=since_id,
+            limit=limit,
+        )
+    except FileNotFoundError:
+        if fallback_to_log and not explicit_thread:
+            return None
+        print(
+            f"No messages. (Thread '{thread_id}' does not exist yet. "
+            f"Use --log for the raw session log.)",
+            file=sys.stderr,
+        )
+        return None, None
+
+    if not messages:
+        if fallback_to_log and not explicit_thread:
+            return None
+        if getattr(args, "count", False):
+            print(0)
+        else:
+            print("No messages.", file=sys.stderr)
+        return None, None
+
+    if getattr(args, "count", False):
+        print(len(messages))
+        return None, None
+
+    for msg in messages:
+        print(_format_thread_message(msg))
+        print()
+
+    first_id = str(messages[0].get("id", "")) or None
+    last_id = str(messages[-1].get("id", "")) or None
+    return first_id, last_id
+
+
 def cmd_read(args: argparse.Namespace) -> tuple[str | None, str | None]:
-    """Read worker output, formatted via claude_logs.
+    """Read worker output.
+
+    Post-Phase-3 (D88): reads from the active thread by default (auto-
+    detected as ``pair-<sender>-<target>`` or overridden via ``--thread``).
+    Legacy ``--log`` reads the raw claude session log — the debugging
+    escape hatch. ``--context`` and ``--follow`` always read the log
+    since they're about claude's session state, not messaging.
 
     Returns (first_uuid, last_uuid) for the messages that were actually
     rendered, which programmatic callers (like --show-response) use to
-    display a range hint. The normal CLI invocation ignores the return value.
+    display a range hint. The normal CLI invocation ignores the return
+    value. For thread reads the "UUIDs" are thread message IDs.
     """
     runtime = resolve_worker(args.name)
     log_file = runtime / "log"
@@ -1713,6 +1907,25 @@ def cmd_read(args: argparse.Namespace) -> tuple[str | None, str | None]:
         else:
             print(label)
         return None, None
+
+    # Thread-first read (default). Falls back to log when:
+    #   --log       : explicit opt-out (debugging)
+    #   --follow    : live tailing still targets the session log
+    #   --verbose   : users want tools/thinking → log has them
+    # When no explicit thread override is set, the thread read path
+    # gracefully falls back to the session log if the auto-detected
+    # pair thread has no messages yet (or doesn't exist). This keeps
+    # the CLI useful for brand-new workers before any peer has sent.
+    use_log = (
+        getattr(args, "log", False)
+        or getattr(args, "follow", False)
+        or getattr(args, "verbose", False)
+    )
+    if not use_log:
+        thread_result = _read_from_thread(args, fallback_to_log=True)
+        if thread_result is not None:
+            return thread_result
+        # Fell through — continue into log rendering below.
 
     from claude_logs import (
         ANSIFormatter,
@@ -1961,11 +2174,13 @@ def _count_compactions(log_file: Path) -> list[dict]:
                     and data.get("subtype") == "compact_boundary"
                 ):
                     metadata = data.get("compactMetadata", {})
-                    compactions.append({
-                        "line": line_num,
-                        "trigger": metadata.get("trigger", "unknown"),
-                        "pre_tokens": metadata.get("preTokens", 0),
-                    })
+                    compactions.append(
+                        {
+                            "line": line_num,
+                            "trigger": metadata.get("trigger", "unknown"),
+                            "pre_tokens": metadata.get("preTokens", 0),
+                        }
+                    )
     except OSError:
         pass
     return compactions
@@ -3165,17 +3380,25 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
 
 
 def cmd_reply(args: argparse.Namespace) -> None:
-    """Send a reply to a worker's message queue.
+    """Send a reply to a worker by appending to the pair thread (D88).
 
-    Unlike ``send``, this writes to a persistent queue directory, not a
-    FIFO. The recipient's manager drains the queue on each poll cycle and
-    injects replies as synthetic user messages. No status gate — the reply
-    is stored even if the worker is busy or temporarily dead.
+    Post-Phase-3, reply writes to the shared pair thread (``pair-<a>-<b>``)
+    between sender and recipient. The recipient's manager thread monitor
+    notices the append and delivers a ``[system:new-message]`` notification
+    via FIFO. No status gate — the thread append persists even if the
+    worker is busy or temporarily dead, so the notification fires once the
+    worker's next poll cycle sees the new message.
 
     Designed for the callback pattern: a worker sends a question with
     ``[reply-to:<name>]``, the recipient calls ``claude-worker reply
     <name> "answer"`` when ready.
     """
+    from claude_worker.thread_store import (
+        append_message,
+        ensure_thread,
+        pair_thread_id,
+    )
+
     if args.message:
         content = " ".join(args.message)
     else:
@@ -3185,10 +3408,32 @@ def cmd_reply(args: argparse.Namespace) -> None:
         print("Error: empty reply message", file=sys.stderr)
         sys.exit(1)
 
-    sender = args.sender or _find_worker_by_ancestry() or "unknown"
+    sender = args.sender or _find_worker_by_ancestry() or _resolve_sender()
+    recipient = args.name
 
-    msg_path = enqueue_message(args.name, sender, content)
-    print(f"Reply queued for '{args.name}' (from: {sender})")
+    # Resolve recipient's cwd for the thread write
+    saved = get_saved_worker(recipient)
+    target_cwd = (saved or {}).get("cwd") or os.getcwd()
+
+    thread_id = pair_thread_id(sender, recipient)
+    participants = sorted([sender, recipient])
+    try:
+        ensure_thread(target_cwd, thread_id, participants)
+        append_message(
+            target_cwd,
+            thread_id,
+            sender=sender,
+            content=content,
+            tags=["reply"],
+        )
+    except Exception as exc:
+        print(
+            f"Error: could not write reply to thread '{thread_id}': {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(f"Reply appended to thread '{thread_id}' (from: {sender})")
 
 
 def cmd_notify(args: argparse.Namespace) -> None:
@@ -4747,9 +4992,7 @@ def cmd_migrate(args: argparse.Namespace) -> None:
         projects = load_registry()
 
     if not projects:
-        print(
-            "No registered projects. Use --project PATH or register projects first."
-        )
+        print("No registered projects. Use --project PATH or register projects first.")
         return
 
     if args.list_migrations:
@@ -5090,6 +5333,23 @@ def main():
     p_read.add_argument("name", help="Worker name")
     p_read.add_argument("--follow", "-f", action="store_true", help="Tail the log")
     p_read.add_argument("--since", help="Show messages after this UUID or timestamp")
+    p_read.add_argument(
+        "--log",
+        action="store_true",
+        help=(
+            "Read the raw claude session log instead of the thread. "
+            "Debugging escape hatch — threads are the default (post-D88)."
+        ),
+    )
+    p_read.add_argument(
+        "--thread",
+        metavar="ID",
+        help=(
+            "Override auto-detected thread ID (e.g. 'pair-pm-tl' or "
+            "'chat-abc'). Without this, read auto-detects the pair thread "
+            "between the invoker and the target worker."
+        ),
+    )
     p_read.add_argument(
         "--until", help="Stop showing messages at this UUID (exclusive)"
     )
@@ -5471,9 +5731,7 @@ def main():
     )
 
     # -- Discoverability commands (#071, D86, main:P10) --
-    p_version = sub.add_parser(
-        "version", help="Print the claude-worker version"
-    )
+    p_version = sub.add_parser("version", help="Print the claude-worker version")
     p_version.set_defaults(func=cmd_version)
 
     p_changelog = sub.add_parser("changelog", help="Print the changelog")
@@ -5515,25 +5773,17 @@ def main():
         help="Explicit thread ID (auto-generated if omitted)",
     )
 
-    p_thread_send = thread_sub.add_parser(
-        "send", help="Send a message to a thread"
-    )
+    p_thread_send = thread_sub.add_parser("send", help="Send a message to a thread")
     p_thread_send.add_argument("thread_id", help="Thread ID")
     p_thread_send.add_argument("message", nargs="*", help="Message text")
 
-    p_thread_read = thread_sub.add_parser(
-        "read", help="Read messages from a thread"
-    )
+    p_thread_read = thread_sub.add_parser("read", help="Read messages from a thread")
     p_thread_read.add_argument("thread_id", help="Thread ID")
-    p_thread_read.add_argument(
-        "--since", help="Show messages after this message ID"
-    )
+    p_thread_read.add_argument("--since", help="Show messages after this message ID")
     p_thread_read.add_argument("-n", type=int, help="Show last N messages")
 
     p_thread_list = thread_sub.add_parser("list", help="List all threads")
-    p_thread_list.add_argument(
-        "--status", help="Filter by status (open, closed)"
-    )
+    p_thread_list.add_argument("--status", help="Filter by status (open, closed)")
 
     p_thread_close = thread_sub.add_parser("close", help="Close a thread")
     p_thread_close.add_argument("thread_id", help="Thread ID")
