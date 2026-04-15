@@ -1395,6 +1395,7 @@ def cmd_start(args: argparse.Namespace) -> None:
             initial_message=initial_message,
             identity=identity or "worker",
             extra_env=identity_config.get("env"),
+            remote=getattr(args, "remote", False),
         )
         sys.exit(0)
 
@@ -1448,6 +1449,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         initial_message=initial_message,
         identity=identity or "worker",
         extra_env=identity_config.get("env"),
+        remote=getattr(args, "remote", False),
     )
     os._exit(0)
 
@@ -3136,6 +3138,7 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
                 initial_message,
                 identity=replace_identity,
                 extra_env=identity_config.get("env"),
+                remote=False,
             )
             sys.exit(0)
         # Replacer: wait for the new manager's PID file, then exit
@@ -4860,6 +4863,13 @@ def main():
         "--foreground",
         action="store_true",
         help="Run in the foreground (no daemonize). For systemd Type=simple.",
+    )
+    p_start.add_argument(
+        "--remote",
+        action="store_true",
+        help="Enable CCR remote control. Injects a control_request after "
+        "startup, prints session URL for connecting via the Claude mobile app. "
+        "Composes with --foreground for systemd deployment.",
     )
     p_start.add_argument(
         "--show-response",

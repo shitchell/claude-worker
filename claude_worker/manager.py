@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 # -- Named constants --
@@ -25,6 +26,8 @@ QUEUE_DRAIN_INTERVAL_SECONDS: float = 5.0
 CWORK_MONITOR_INTERVAL_SECONDS: float = 30.0
 PERIODIC_CHECK_INTERVAL_SECONDS: float = 30.0
 PERIODIC_SUBPROCESS_TIMEOUT_SECONDS: float = 10.0
+REMOTE_CONTROL_TIMEOUT_SECONDS: float = 30.0
+REMOTE_CONTROL_POLL_INTERVAL: float = 0.2
 
 # Env var override for the claude binary path. Tests set this to point at
 # a stub-claude script that emits canned JSONL output; production leaves
@@ -616,6 +619,82 @@ def get_saved_worker(name: str) -> dict | None:
     return entry
 
 
+def _enable_remote_control(proc: subprocess.Popen, log_path: Path) -> None:
+    """Send a control_request to enable CCR remote control.
+
+    Injects a control_request message on claude's stdin, then polls
+    the log for the matching control_response containing session_url
+    and connect_url. Prints the URLs to stderr.
+
+    Non-fatal: if the request fails or times out, logs a warning
+    but lets the worker continue without remote control.
+    """
+    request_id = f"rc-{uuid.uuid4().hex[:12]}"
+    control_req = {
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {
+            "subtype": "remote_control",
+            "enabled": True,
+        },
+    }
+    try:
+        proc.stdin.write((json.dumps(control_req) + "\n").encode())
+        proc.stdin.flush()
+    except (OSError, BrokenPipeError) as exc:
+        sys.stderr.write(
+            f"[remote-control] Failed to send control_request: {exc}\n"
+        )
+        return
+
+    # Poll log for control_response matching our request_id
+    deadline = time.monotonic() + REMOTE_CONTROL_TIMEOUT_SECONDS
+    seen_pos = 0
+    while time.monotonic() < deadline:
+        time.sleep(REMOTE_CONTROL_POLL_INTERVAL)
+        if not log_path.exists():
+            continue
+        try:
+            with open(log_path) as f:
+                f.seek(seen_pos)
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        data.get("type") == "control_response"
+                        and data.get("request_id") == request_id
+                    ):
+                        response = data.get("response", {}) or {}
+                        session_url = response.get("session_url")
+                        connect_url = response.get("connect_url")
+                        env_id = response.get("environment_id", "")
+                        sys.stderr.write(
+                            "[remote-control] Enabled. Connect via Claude mobile app:\n"
+                        )
+                        if session_url:
+                            sys.stderr.write(f"  session: {session_url}\n")
+                        if connect_url:
+                            sys.stderr.write(f"  connect: {connect_url}\n")
+                        if env_id:
+                            sys.stderr.write(f"  env: {env_id}\n")
+                        sys.stderr.flush()
+                        return
+                seen_pos = f.tell()
+        except OSError:
+            pass
+
+    sys.stderr.write(
+        "[remote-control] Timed out waiting for control_response. "
+        "Worker continues without remote control.\n"
+    )
+    sys.stderr.flush()
+
+
 def run_manager(
     name: str,
     cwd: str | None,
@@ -623,6 +702,7 @@ def run_manager(
     initial_message: str | None,
     identity: str = "worker",
     extra_env: dict[str, str] | None = None,
+    remote: bool = False,
 ) -> None:
     """Run the manager process (called after fork).
 
@@ -641,6 +721,7 @@ def run_manager(
         install_signals=True,
         identity=identity,
         extra_env=extra_env,
+        remote=remote,
     )
 
 
@@ -652,6 +733,7 @@ def _run_manager_forkless(
     install_signals: bool = True,
     identity: str = "worker",
     extra_env: dict[str, str] | None = None,
+    remote: bool = False,
 ) -> None:
     """Run the manager lifecycle WITHOUT the fork wrapper.
 
@@ -864,6 +946,10 @@ def _run_manager_forkless(
         daemon=True,
     )
     fifo_thread.start()
+
+    # Enable CCR remote control if requested
+    if remote and proc.stdin:
+        _enable_remote_control(proc, log_path)
 
     # Send initial prompt if provided
     if initial_message and proc.stdin:

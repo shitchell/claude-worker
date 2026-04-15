@@ -2189,3 +2189,31 @@ observations:
       - file: tests/test_resume_recovery.py
         identifier: resume recovery tests
         role: implements
+
+  - id: D85
+    name: ccr-remote-control-implementation
+    decision: >
+      Implement remote control via CCR control_request (Option C
+      from #057 research). --remote flag on start injects a
+      control_request message on claude's stdin after startup,
+      polls the log for the matching control_response, and prints
+      session_url/connect_url to stderr for connecting via the
+      Claude mobile app. Composes with --foreground for systemd
+      deployment. Non-fatal: timeout or error prints warning but
+      lets the worker continue without remote control.
+    origin: >
+      Ticket #067 (2026-04-14). Max subscription tokens only
+      usable via Claude Code; CCR bridge enables mobile app UI.
+      Cost-driven architectural compromise (not preferred arch).
+    tags: [architecture, observability]
+    maps_to: [project:G4, project:D81]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: _enable_remote_control
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_start
+        role: extends
+      - file: tests/test_remote_control.py
+        identifier: remote control tests
+        role: implements
