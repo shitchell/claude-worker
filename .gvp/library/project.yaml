@@ -2428,3 +2428,23 @@ observations:
       - file: tests/test_identity_drift.py
         identifier: drift detection tests
         role: implements
+
+  - id: D92
+    name: clear-worker-env-in-tests
+    rationale: >
+      Worker env vars (CW_WORKER_NAME, CW_IDENTITY, CW_PARENT_WORKER)
+      leak into test processes when pytest runs inside a worker context,
+      changing _resolve_sender() output and producing non-deterministic
+      thread pair names. An autouse session-scoped fixture clears these
+      vars for the entire suite and restores on teardown.
+    alternatives: >
+      1. Function-scoped monkeypatch.delenv in each affected fixture —
+      rejected: only protects tests using that fixture (violates P5).
+      2. Hardcode dynamic pair names in assertions — rejected: papers
+      over the real problem (env contamination).
+    tags: [testing]
+    maps_to: [project:G3, project:P4, project:P5]
+    refs:
+      - file: tests/conftest.py
+        identifier: _clear_worker_env
+        role: implements

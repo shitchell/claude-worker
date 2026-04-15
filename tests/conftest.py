@@ -15,6 +15,22 @@ import pytest
 STUB_CLAUDE_SCRIPT = Path(__file__).resolve().parent / "stub_claude.sh"
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _clear_worker_env():
+    """Prevent worker env vars from leaking into test processes (D92).
+
+    When the test suite runs inside a worker (e.g., PM running pytest),
+    CW_WORKER_NAME/CW_IDENTITY/CW_PARENT_WORKER are set. These change
+    sender resolution in _resolve_sender(), producing non-deterministic
+    thread pair names. Clear them for the entire suite and restore on
+    teardown.
+    """
+    env_vars = ("CW_WORKER_NAME", "CW_IDENTITY", "CW_PARENT_WORKER")
+    saved = {k: os.environ.pop(k) for k in env_vars if k in os.environ}
+    yield
+    os.environ.update(saved)
+
+
 def _write_jsonl(path: Path, entries: list[dict[str, Any]]) -> None:
     """Write a list of dicts as JSONL to the given path."""
     with path.open("w") as f:
