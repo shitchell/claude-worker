@@ -24,6 +24,8 @@ SIGTERM_WAIT_TIMEOUT_SECONDS: float = 10.0
 LOG_THREAD_JOIN_TIMEOUT_SECONDS: float = 5.0
 QUEUE_DRAIN_INTERVAL_SECONDS: float = 5.0
 CWORK_MONITOR_INTERVAL_SECONDS: float = 30.0
+THREAD_MONITOR_INTERVAL_SECONDS: float = 5.0
+THREAD_NOTIFICATION_PREVIEW_LENGTH: int = 80
 PERIODIC_CHECK_INTERVAL_SECONDS: float = 30.0
 PERIODIC_SUBPROCESS_TIMEOUT_SECONDS: float = 10.0
 REMOTE_CONTROL_TIMEOUT_SECONDS: float = 30.0
@@ -213,6 +215,151 @@ def check_cwork_changes(
         return new_snapshot
     except Exception:
         return prev_snapshot
+
+
+def snapshot_threads(cwd: str) -> dict[str, tuple[float, int]]:
+    """Snapshot .cwork/threads/*.jsonl files: {thread_id: (mtime, size)}.
+
+    Returns {} if the threads dir doesn't exist. Non-JSONL files (e.g.
+    the index.json) are ignored so the snapshot tracks only message
+    streams.
+    """
+    threads_dir = Path(cwd) / ".cwork" / "threads"
+    if not threads_dir.exists():
+        return {}
+    result: dict[str, tuple[float, int]] = {}
+    try:
+        for f in threads_dir.glob("*.jsonl"):
+            try:
+                st = f.stat()
+                result[f.stem] = (st.st_mtime, st.st_size)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return result
+
+
+def _read_new_messages_since_size(
+    cwd: str, thread_id: str, old_size: int
+) -> list[dict]:
+    """Read messages that appeared after the given file size.
+
+    Reads the JSONL file, skips the first ``old_size`` bytes, parses
+    the rest as new messages. Returns a list of message dicts.
+    Best-effort: corrupt lines are skipped silently.
+    """
+    thread_file = Path(cwd) / ".cwork" / "threads" / f"{thread_id}.jsonl"
+    if not thread_file.exists():
+        return []
+    messages: list[dict] = []
+    try:
+        with open(thread_file, "rb") as f:
+            f.seek(old_size)
+            remainder = f.read().decode("utf-8", errors="replace")
+        for line in remainder.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                messages.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        pass
+    return messages
+
+
+def check_thread_changes(
+    cwd: str,
+    worker_name: str,
+    in_fifo: Path,
+    prev_snapshot: dict[str, tuple[float, int]],
+) -> dict[str, tuple[float, int]]:
+    """Check for new messages in threads the worker participates in.
+
+    For each new message, inject a ``[system:new-message]`` notification
+    to the worker's FIFO. Returns the new snapshot (to be cached by the
+    caller for the next cycle).
+
+    Notification format (always-lightweight, per D79/P12)::
+
+        [system:new-message] Thread <id> from <sender>: <first 80 chars>
+
+    The worker reads the full thread on demand. Messages where the
+    sender is the worker itself are ignored to avoid self-notification
+    loops. Best-effort: never crashes the caller.
+    """
+    try:
+        new_snapshot = snapshot_threads(cwd)
+        if not prev_snapshot:
+            return new_snapshot  # first scan, no diff
+
+        if not worker_name:
+            return new_snapshot  # no worker name, can't filter participation
+
+        # Load the thread index to check participants
+        try:
+            from claude_worker.thread_store import load_index
+
+            index = load_index(cwd)
+        except Exception:
+            return new_snapshot
+
+        for thread_id, (_mtime, size) in new_snapshot.items():
+            old_entry = prev_snapshot.get(thread_id)
+            old_size = old_entry[1] if old_entry else 0
+
+            # Only notify if the file grew. For threads present in
+            # prev_snapshot, this means new messages were appended.
+            # For threads first seen this cycle, old_size defaults to
+            # 0 so their initial messages (if any) are delivered.
+            if old_entry is not None and size <= old_size:
+                continue
+
+            # Check participation — skip threads the worker isn't in
+            thread_meta = index.get(thread_id, {})
+            participants = thread_meta.get("participants") or []
+            if worker_name not in participants:
+                continue
+
+            # Read the new messages and notify for each
+            new_messages = _read_new_messages_since_size(cwd, thread_id, old_size)
+            for msg in new_messages:
+                sender = msg.get("sender", "?")
+                if sender == worker_name:
+                    # Don't notify the sender about their own message
+                    continue
+                content = msg.get("content", "") or ""
+                preview = content[:THREAD_NOTIFICATION_PREVIEW_LENGTH]
+                if len(content) > THREAD_NOTIFICATION_PREVIEW_LENGTH:
+                    preview += "..."
+                notification = json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": (
+                                f"[system:new-message] Thread {thread_id} "
+                                f"from {sender}: {preview}"
+                            ),
+                        },
+                    }
+                )
+                try:
+                    wr = os.open(str(in_fifo), os.O_WRONLY | os.O_NONBLOCK)
+                    try:
+                        os.write(wr, (notification + "\n").encode())
+                    finally:
+                        os.close(wr)
+                except OSError:
+                    # FIFO not writable (no reader, etc.) — skip,
+                    # snapshot still advances so we don't re-notify.
+                    pass
+
+        return new_snapshot
+    except Exception:
+        return prev_snapshot  # be safe, don't replace on error
 
 
 def load_periodic_config(identity: str) -> dict[str, float]:
@@ -642,9 +789,7 @@ def _enable_remote_control(proc: subprocess.Popen, log_path: Path) -> None:
         proc.stdin.write((json.dumps(control_req) + "\n").encode())
         proc.stdin.flush()
     except (OSError, BrokenPipeError) as exc:
-        sys.stderr.write(
-            f"[remote-control] Failed to send control_request: {exc}\n"
-        )
+        sys.stderr.write(f"[remote-control] Failed to send control_request: {exc}\n")
         return
 
     # Poll log for control_response matching our request_id
@@ -890,8 +1035,10 @@ def _run_manager_forkless(
 
         last_queue_drain = time.monotonic()
         last_cwork_check = time.monotonic()
+        last_thread_check = time.monotonic()
         last_periodic_check = time.monotonic()
         cwork_snapshot: dict[str, tuple[float, int]] = {}
+        thread_snapshot: dict[str, tuple[float, int]] = {}
 
         try:
             while proc.poll() is None:
@@ -920,6 +1067,14 @@ def _run_manager_forkless(
                     last_cwork_check = now
                     cwork_snapshot = check_cwork_changes(
                         resolved_cwd, in_fifo, cwork_snapshot
+                    )
+
+                # Periodic thread monitoring — inject new-message
+                # notifications for threads the worker participates in.
+                if now - last_thread_check >= THREAD_MONITOR_INTERVAL_SECONDS:
+                    last_thread_check = now
+                    thread_snapshot = check_thread_changes(
+                        resolved_cwd, name, in_fifo, thread_snapshot
                     )
 
                 # Periodic identity tasks (cron)

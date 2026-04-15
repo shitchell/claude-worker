@@ -2253,3 +2253,27 @@ observations:
       - file: tests/test_discoverability.py
         identifier: discoverability tests
         role: implements
+
+  - id: D87
+    name: thread-notifications-via-file-watcher
+    decision: >
+      The manager polls .cwork/threads/ every 5s (THREAD_MONITOR_
+      INTERVAL_SECONDS) and compares snapshots. On new messages in
+      threads where the worker is a participant, injects a
+      lightweight [system:new-message] notification via FIFO:
+      "Thread <id> from <sender>: <first 80 chars>". Does not
+      notify the sender about their own messages. Worker reads the
+      full thread on demand. Participants checked via thread index.
+    origin: >
+      Phase 2 of inbox/threads (2026-04-15). Implements the
+      notification side of the thread primitive per D79, P12,
+      main:OBS3, main:OBS4.
+    tags: [fifo, coordination, observability]
+    maps_to: [project:D74, project:D79, project:P12]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: check_thread_changes
+        role: implements
+      - file: tests/test_thread_notifications.py
+        identifier: thread notification tests
+        role: implements
