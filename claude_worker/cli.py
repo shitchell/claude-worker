@@ -13,6 +13,8 @@ import threading
 import time
 from pathlib import Path
 
+from claude_worker import __version__
+
 # -- Named constants --
 
 # Timeouts (seconds)
@@ -4183,6 +4185,87 @@ def cmd_stats(args: argparse.Namespace) -> None:
     print(format_stats(rows))
 
 
+# -- Discoverability commands (#071, D86) --
+# Every custom CLI utility should expose:
+#   version / --version      → semver
+#   changelog [--since V]    → CHANGELOG.md (optionally filtered)
+#   docs                     → path to README.md
+#   skill                    → path to installed skill
+# See main:P10.
+
+# Where the installed skill file lives.
+SKILL_INSTALL_PATH: Path = (
+    Path.home() / ".claude" / "skills" / "claude-worker" / "SKILL.md"
+)
+
+
+def _find_project_file(filename: str) -> Path | None:
+    """Return the path to a project-root file (CHANGELOG.md, README.md) or None.
+
+    Searches first the current working directory (useful for editable
+    installs where the user runs inside the repo) and falls back to the
+    package's parent directory (editable install: points back at the
+    repo root; wheel install: usually absent).
+    """
+    candidates = [
+        Path.cwd() / filename,
+        Path(__file__).parent.parent / filename,
+    ]
+    return next((p for p in candidates if p.exists()), None)
+
+
+def cmd_version(args: argparse.Namespace) -> None:
+    """Print the claude-worker version."""
+    print(__version__)
+
+
+def cmd_changelog(args: argparse.Namespace) -> None:
+    """Print CHANGELOG.md, optionally filtered by --since version.
+
+    --since V prints everything up to (but not including) the `## V (...)`
+    heading — i.e., the entries newer than V.
+    """
+    changelog_path = _find_project_file("CHANGELOG.md")
+    if changelog_path is None:
+        print("No CHANGELOG.md found.", file=sys.stderr)
+        sys.exit(1)
+
+    content = changelog_path.read_text()
+    since = getattr(args, "since", None)
+    if not since:
+        print(content, end="")
+        return
+
+    lines = content.splitlines(keepends=True)
+    output: list[str] = []
+    for line in lines:
+        if line.startswith(f"## {since} ") or line.startswith(f"## {since}\n"):
+            break
+        output.append(line)
+    print("".join(output), end="")
+
+
+def cmd_docs(args: argparse.Namespace) -> None:
+    """Print path to README.md."""
+    readme_path = _find_project_file("README.md")
+    if readme_path is None:
+        print("README.md not found.", file=sys.stderr)
+        sys.exit(1)
+    print(readme_path)
+
+
+def cmd_skill(args: argparse.Namespace) -> None:
+    """Print path to the installed claude-worker skill."""
+    if not SKILL_INSTALL_PATH.exists():
+        print(
+            f"Skill not installed at {SKILL_INSTALL_PATH}. "
+            "Install it from the project repo.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(SKILL_INSTALL_PATH)
+
+
 def _repl_continuous(
     name: str,
     log_file: Path,
@@ -4838,6 +4921,11 @@ def main():
         epilog=EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"claude-worker {__version__}",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # -- start --
@@ -5382,6 +5470,28 @@ def main():
         help="List available migrations and project versions",
     )
 
+    # -- Discoverability commands (#071, D86, main:P10) --
+    p_version = sub.add_parser(
+        "version", help="Print the claude-worker version"
+    )
+    p_version.set_defaults(func=cmd_version)
+
+    p_changelog = sub.add_parser("changelog", help="Print the changelog")
+    p_changelog.add_argument(
+        "--since",
+        metavar="VERSION",
+        help="Only show entries newer than this version",
+    )
+    p_changelog.set_defaults(func=cmd_changelog)
+
+    p_docs = sub.add_parser("docs", help="Print path to README.md")
+    p_docs.set_defaults(func=cmd_docs)
+
+    p_skill = sub.add_parser(
+        "skill", help="Print path to the installed claude-worker skill"
+    )
+    p_skill.set_defaults(func=cmd_skill)
+
     # -- thread --
     p_thread = sub.add_parser("thread", help="Manage conversation threads")
     thread_sub = p_thread.add_subparsers(dest="thread_action")
@@ -5453,5 +5563,9 @@ def main():
         "revoke": cmd_revoke,
         "migrate": cmd_migrate,
         "thread": cmd_thread,
+        "version": cmd_version,
+        "changelog": cmd_changelog,
+        "docs": cmd_docs,
+        "skill": cmd_skill,
     }
     handlers[args.command](args)

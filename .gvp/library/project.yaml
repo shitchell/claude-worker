@@ -2217,3 +2217,39 @@ observations:
       - file: tests/test_remote_control.py
         identifier: remote control tests
         role: implements
+
+  - id: D86
+    name: discoverability-commands
+    decision: >
+      claude-worker provides 4 standard discoverability commands:
+      `version`/`--version` prints semver, `changelog [--since V]`
+      prints CHANGELOG.md filtered by version, `docs` prints path
+      to README.md, `skill` prints path to installed skill
+      (~/.claude/skills/claude-worker/SKILL.md). CHANGELOG.md
+      created at project root, maintained per-release. Implements
+      the global P10 discoverability principle.
+    origin: >
+      Ticket #071 (2026-04-15). RHC identified friction: no
+      canonical way to discover tool state, changes, docs, or
+      skill sync status.
+    tags: [observability, architecture]
+    maps_to: [project:V2, main:P10]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: cmd_version
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_changelog
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_docs
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_skill
+        role: implements
+      - file: CHANGELOG.md
+        identifier: changelog
+        role: defines
+      - file: tests/test_discoverability.py
+        identifier: discoverability tests
+        role: implements
