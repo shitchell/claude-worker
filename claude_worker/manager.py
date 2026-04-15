@@ -1085,8 +1085,11 @@ def _run_manager_forkless(
     def handle_replace(signum, frame):
         """Graceful replace: kill claude, archive runtime dir, exit.
 
-        Unlike handle_term, does NOT delete the runtime dir. The
-        replacement manager needs the session file for --resume.
+        Unlike handle_term, does NOT delete the runtime dir — the
+        archive preserves the prior session's log and metadata for
+        audit / debugging. The replacement manager starts a fresh
+        session (replaceme is fresh-start by design — see D90); the
+        handoff file carries work state forward, not --resume.
         """
         try:
             _kill_claude()

@@ -209,7 +209,11 @@ class TestReplacemeErrorLog:
 
 
 class TestSavedArgsDedup:
-    """Test that --append-system-prompt-file is deduplicated."""
+    """Test that --append-system-prompt-file is deduplicated.
+
+    Post-#072, replaceme NEVER adds --resume to claude_args. These tests
+    reflect that: claude_args is built from saved_args alone.
+    """
 
     def test_strip_from_saved_args(self):
         """saved_args with --append-system-prompt-file should be stripped
@@ -221,11 +225,14 @@ class TestSavedArgsDedup:
             "worker",
         ]
         cleaned = _strip_flag_with_value(saved_args, "--append-system-prompt-file")
-        claude_args = ["--resume", "sess-123"] + cleaned
+        # replaceme starts fresh — claude_args is saved_args (stripped), no --resume
+        claude_args = list(cleaned)
 
         # Verify no --append-system-prompt-file in the base claude_args
         assert "--append-system-prompt-file" not in claude_args
-        assert claude_args == ["--resume", "sess-123", "--agent", "worker"]
+        # And no --resume either — replaceme is fresh-start
+        assert "--resume" not in claude_args
+        assert claude_args == ["--agent", "worker"]
 
     def test_no_duplicate_after_identity_prepend(self):
         """After stripping and re-prepending, exactly one occurrence."""
@@ -236,7 +243,7 @@ class TestSavedArgsDedup:
             "worker",
         ]
         cleaned = _strip_flag_with_value(saved_args, "--append-system-prompt-file")
-        claude_args = ["--resume", "sess-123"] + cleaned
+        claude_args = list(cleaned)
 
         # Simulate the identity file prepend (step 6e in cmd_replaceme)
         identity_path = "/new/runtime/identity.md"
@@ -251,3 +258,5 @@ class TestSavedArgsDedup:
         # And it points to the new path
         idx = claude_args.index("--append-system-prompt-file")
         assert claude_args[idx + 1] == identity_path
+        # And no --resume — replaceme is fresh-start
+        assert "--resume" not in claude_args

@@ -2364,3 +2364,33 @@ observations:
       - file: claude_worker/cli.py
         identifier: reply help text
         role: extends
+
+  - id: D90
+    name: replaceme-always-fresh-never-resumes
+    decision: >
+      replaceme ALWAYS starts a fresh session. Zero conversation
+      carryover from the prior worker. No --resume flag, no
+      configurable preservation. The replacement PM reads the
+      latest handoff file as its continuity mechanism — the handoff
+      is the design, conversation preservation is not. cmd_replaceme
+      code path must NEVER produce --resume in claude_args. start
+      --resume is a separate command, separate verb, separate
+      intent; implementations must NOT share code that could leak
+      --resume into replaceme.
+    origin: >
+      Ticket #072 (2026-04-15). RHC identified the bug: replaceme
+      at cli.py:3230 used --resume, silently preserving 6 days
+      of conversation across "replacements". The 85% → 65%
+      context drop was ephemeral cache expiry, not fresh context.
+    tags: [architecture, lifecycle, context]
+    maps_to: [project:V2, project:V6, project:D51]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: cmd_replaceme
+        role: extends
+      - file: claude_worker/cli.py
+        identifier: _build_replaceme_initial_message
+        role: implements
+      - file: tests/test_replaceme_fresh.py
+        identifier: fresh-start tests
+        role: implements

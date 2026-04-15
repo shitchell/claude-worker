@@ -609,9 +609,12 @@ If nothing actionable → stay in Mode 2. Cron fires again tomorrow.
 ### CronCreate Durability
 
 Durable cron tasks persist to `<project>/.claude/scheduled_tasks.json`
-and survive `--resume`. After `replaceme`, the new PM session in the
-same CWD picks up the scheduled tasks automatically. No need to
-re-create the cron unless starting fresh (no `--resume`).
+and survive worker replacement. After `replaceme`, the new PM session
+in the same CWD picks up the scheduled tasks automatically because
+the file is keyed on CWD, not session. Note that `replaceme` always
+starts a fresh session (no conversation carryover); the handoff file
+is the continuity mechanism, and the scheduled_tasks.json file lets
+crons survive the reset.
 
 Note: recurring crons auto-expire after 7 days. The PM should
 re-create the daily review cron during wrap-up if the session has

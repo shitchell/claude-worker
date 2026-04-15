@@ -544,6 +544,41 @@ def _get_internalize_message(identity: str) -> str | None:
     return None
 
 
+def _build_replaceme_initial_message(identity: str, cwd: str) -> str | None:
+    """Build the initial prompt for a fresh replacement worker.
+
+    Extends the internalize message with a pointer to the most recent
+    handoff file, which is the continuity mechanism (replaceme gives
+    clean context; handoff files carry work state forward).
+    """
+    internalize = _get_internalize_message(identity)
+
+    # Find the latest handoff file for this identity
+    role_dir = _identity_role_dir(identity)
+    handoff_dir = Path(cwd) / ".cwork" / "roles" / role_dir / "handoffs"
+    handoff_hint = ""
+    if handoff_dir.exists():
+        try:
+            handoffs = sorted(
+                [f for f in handoff_dir.iterdir() if f.is_file()],
+                key=lambda f: f.name,
+                reverse=True,
+            )
+            if handoffs:
+                handoff_hint = (
+                    f"\n\nIMPORTANT: You are a fresh replacement. Read the most "
+                    f"recent handoff file for your work context: {handoffs[0]}. "
+                    f"The prior session's conversation is NOT available — the "
+                    f"handoff file is the continuity mechanism."
+                )
+        except OSError:
+            pass
+
+    if internalize:
+        return internalize + handoff_hint
+    return handoff_hint or None
+
+
 def _load_identity_config(identity: str) -> dict:
     """Load per-identity config from ~/.cwork/identities/<name>/config.yaml.
 
@@ -3196,11 +3231,6 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
         print(f"Error: no saved metadata for worker '{worker_name}'", file=sys.stderr)
         sys.exit(1)
 
-    session_id = saved.get("session_id")
-    if not session_id:
-        print(f"Error: no session_id for worker '{worker_name}'", file=sys.stderr)
-        sys.exit(1)
-
     # 3. Validate wrap-up (unless --skip-validation)
     if not args.skip_validation:
         error = _validate_wrapup(worker_name, runtime)
@@ -3227,7 +3257,9 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
     # Strip --append-system-prompt-file from saved_args to avoid duplicates —
     # the identity file is re-written to the new runtime dir below.
     saved_args = _strip_flag_with_value(saved_args, "--append-system-prompt-file")
-    claude_args = ["--resume", session_id] + saved_args
+    # replaceme ALWAYS starts fresh — no --resume. Clean context is the point.
+    # Continuity mechanism is the handoff file, NOT Claude Code's --resume.
+    claude_args = list(saved_args)
     replace_identity = _get_worker_identity(worker_name)
     identity_mode = replace_identity and replace_identity != "worker"
     pm_mode = replace_identity == "pm"
@@ -3341,8 +3373,12 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
             team_lead=tl_mode,
         )
 
-        # 6h. Determine initial message for the new session
-        initial_message = _get_internalize_message(replace_identity)
+        # 6h. Determine initial message for the new session.
+        # Fresh session needs to know about the handoff file — that's the
+        # continuity mechanism, not conversation preservation.
+        initial_message = _build_replaceme_initial_message(
+            replace_identity, resolved_cwd
+        )
 
         # 6i. Fork the new manager daemon (same pattern as cmd_start)
         manager_pid = os.fork()
@@ -5519,8 +5555,10 @@ def main():
     # -- replaceme --
     p_replace = sub.add_parser(
         "replaceme",
-        help="Replace the current worker with a fresh instance. "
-        "Auto-detects which worker is calling via PID ancestry.",
+        help="Replace the current worker with a fresh instance "
+        "(clean context, no conversation carryover). Auto-detects "
+        "which worker is calling via PID ancestry. Continuity is "
+        "via the handoff file, not Claude Code --resume.",
     )
     p_replace.add_argument(
         "--skip-validation",

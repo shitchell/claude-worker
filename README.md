@@ -437,6 +437,12 @@ worker is calling by walking the process ancestry and matching against
 `claude-pid` files. Used by PM and TL workers to self-replace when
 approaching context limits.
 
+`replaceme` always starts fresh: zero conversation carryover from the
+prior worker. The continuity mechanism is the handoff file, not
+Claude Code's `--resume`. This is the whole point of replaceme —
+getting a clean context window with work state carried via the
+handoff.
+
 The command validates wrap-up completion (turn is idle, handoff file
 exists for PM/TL workers), then forks a detached replacer process that:
 
@@ -444,7 +450,8 @@ exists for PM/TL workers), then forks a detached replacer process that:
    deleting it)
 2. Waits for the old manager to exit
 3. Creates a new runtime dir with the same name
-4. Starts a fresh manager with `--resume` pointing at the old session
+4. Starts a fresh manager (no `--resume`), with an initial prompt
+   pointing the new worker at the most recent handoff file
 
 - `--skip-validation` — skip wrap-up checks (for stuck workers or
   human-supervised replacements).
