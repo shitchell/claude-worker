@@ -188,6 +188,7 @@ from claude_worker.manager import (
     prune_archives,
     run_manager,
     save_worker,
+    write_identity_hash,
 )
 
 
@@ -1395,6 +1396,9 @@ def cmd_start(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
         identity_path.write_text(identity_content)
+        # Record the source hash so the manager's drift check has a
+        # baseline to compare against (#066).
+        write_identity_hash(get_runtime_dir(name), identity_content)
 
     # Write the per-worker settings.json that wires the PreToolUse
     # permission-grant hook. Must happen BEFORE the fork so the manager
@@ -3341,6 +3345,9 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
                     f"Identity '{replace_identity}' not found at {user_identity}"
                 )
             identity_path.write_text(identity_content)
+            # Record the source hash so the manager's drift check has a
+            # baseline to compare against (#066).
+            write_identity_hash(new_runtime, identity_content)
             # Prepend --append-system-prompt-file to claude_args
             claude_args = [
                 "--append-system-prompt-file",

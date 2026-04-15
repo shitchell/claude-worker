@@ -2394,3 +2394,37 @@ observations:
       - file: tests/test_replaceme_fresh.py
         identifier: fresh-start tests
         role: implements
+
+  - id: D91
+    name: identity-drift-detection
+    decision: >
+      Identity files (pm.md, technical-lead.md, custom identities)
+      are hashed at copy time during cmd_start and cmd_replaceme.
+      Hash stored in runtime/identity.hash. Manager's poll loop
+      compares stored hash against current source hash every 30s
+      (IDENTITY_DRIFT_CHECK_INTERVAL_SECONDS); on drift, injects
+      a [system:identity-drift] notification (lightweight per P12).
+      Worker takes action via replaceme — no auto-update. Notification
+      deduped per divergence (one warning per divergence cycle).
+    origin: >
+      Ticket #066 (2026-04-15). TL filed after manually copying
+      stale identity files to claugs/playlite workers. Drift was
+      previously discovered only by manual inspection.
+    tags: [observability, identity, lifecycle]
+    maps_to: [project:G2, project:V2, project:P12]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: check_identity_drift
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: write_identity_hash
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_start
+        role: extends
+      - file: claude_worker/cli.py
+        identifier: cmd_replaceme
+        role: extends
+      - file: tests/test_identity_drift.py
+        identifier: drift detection tests
+        role: implements

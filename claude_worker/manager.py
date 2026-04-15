@@ -30,6 +30,13 @@ PERIODIC_CHECK_INTERVAL_SECONDS: float = 30.0
 PERIODIC_SUBPROCESS_TIMEOUT_SECONDS: float = 10.0
 REMOTE_CONTROL_TIMEOUT_SECONDS: float = 30.0
 REMOTE_CONTROL_POLL_INTERVAL: float = 0.2
+IDENTITY_DRIFT_CHECK_INTERVAL_SECONDS: float = 30.0
+
+# Identity drift detection (#066): hash of the source identity.md, written
+# to runtime/identity.hash at copy time. The manager's poll loop compares
+# the stored hash against the current source hash and injects a
+# [system:identity-drift] notification if they diverge.
+IDENTITY_HASH_FILE: str = "identity.hash"
 
 # Active-thread sidecar (Phase 3): records the thread ID of the most
 # recent inbound notification so the response tee knows where to append
@@ -570,6 +577,147 @@ def check_periodic_tasks(
             ts_file.write_text(str(now))
         except Exception:
             pass  # best-effort
+
+
+# -- Identity drift detection (#066) -------------------------------------
+#
+# The source identity file (`~/.cwork/identities/<name>/identity.md` or
+# bundled) is hashed at copy time and the hash is stored in
+# `runtime/identity.hash`. The manager's poll loop periodically re-hashes
+# the source and compares; on divergence it injects a one-shot
+# [system:identity-drift] notification so the worker can decide whether
+# to `replaceme` and pick up the change. No automatic update.
+
+
+def hash_identity_content(content: str) -> str:
+    """Return a short stable hash of identity content.
+
+    Uses the first 16 hex chars of sha256 — long enough to be collision-
+    resistant for this domain (small text files), short enough to keep
+    the notification message human-readable.
+    """
+    import hashlib
+
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
+
+def write_identity_hash(runtime: Path, content: str) -> None:
+    """Write the source content hash to ``runtime/identity.hash``.
+
+    Best-effort: a filesystem failure here should never break cmd_start
+    or cmd_replaceme. Worst case: no baseline is written and the drift
+    check silently no-ops (see ``read_identity_hash``).
+    """
+    try:
+        (runtime / IDENTITY_HASH_FILE).write_text(
+            hash_identity_content(content) + "\n"
+        )
+    except OSError:
+        pass
+
+
+def read_identity_hash(runtime: Path) -> str | None:
+    """Read the stored identity hash. Returns None if missing or unreadable."""
+    p = runtime / IDENTITY_HASH_FILE
+    if not p.exists():
+        return None
+    try:
+        return p.read_text().strip() or None
+    except OSError:
+        return None
+
+
+def _read_source_identity(identity: str) -> str | None:
+    """Read the current source identity content. Returns None if not found.
+
+    Mirrors ``cmd_start``'s resolution order: user-installed
+    (``~/.cwork/identities/<name>/identity.md``) takes precedence over
+    the bundled fallback, which is only defined for ``pm`` and
+    ``technical-lead``.
+    """
+    if not identity or identity == "worker":
+        return None
+    user_path = Path.home() / ".cwork" / "identities" / identity / "identity.md"
+    if user_path.exists():
+        try:
+            return user_path.read_text()
+        except OSError:
+            pass
+    # Bundled fallback (only pm and technical-lead)
+    bundled = {"pm": "pm.md", "technical-lead": "technical-lead.md"}
+    resource = bundled.get(identity)
+    if resource:
+        try:
+            from importlib.resources import files
+
+            return (
+                (files("claude_worker") / "identities" / resource)
+                .read_text()
+            )
+        except Exception:
+            pass
+    return None
+
+
+def check_identity_drift(
+    identity: str,
+    runtime: Path,
+    in_fifo: Path,
+    notified: bool,
+) -> bool:
+    """Compare runtime identity hash to current source hash; notify on drift.
+
+    Returns the new "notified" flag — True if a drift notification has
+    already been sent for the CURRENT divergence (prevents spamming the
+    worker on every poll). When the source matches the stored hash again
+    (e.g. the user reverted the edit), the flag clears so the next
+    divergence re-notifies.
+
+    Best-effort throughout: no exception escapes. Failures at any step
+    (missing baseline, unreachable source, FIFO write failure) leave the
+    caller's state unchanged so the next cycle can retry cleanly.
+    """
+    try:
+        stored = read_identity_hash(runtime)
+        if stored is None:
+            return notified  # no baseline — nothing to compare
+        source_content = _read_source_identity(identity)
+        if source_content is None:
+            return notified  # source unavailable — can't check
+        current = hash_identity_content(source_content)
+        if current == stored:
+            # Match: clear notified flag for the next divergence cycle
+            return False
+        if notified:
+            # Already notified about this divergence; don't spam
+            return True
+        # Drift detected — inject one [system:identity-drift] notification
+        msg = json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": (
+                        f"[system:identity-drift] Source identity "
+                        f"'{identity}' has changed since this worker "
+                        f"started (stored hash: {stored}, source hash: "
+                        f"{current}). Consider replaceme to pick up "
+                        f"the new identity."
+                    ),
+                },
+            }
+        )
+        try:
+            wr = os.open(str(in_fifo), os.O_WRONLY | os.O_NONBLOCK)
+            try:
+                os.write(wr, (msg + "\n").encode())
+            finally:
+                os.close(wr)
+        except OSError:
+            return notified  # FIFO write failed; try again next cycle
+        return True
+    except Exception:
+        return notified
 
 
 def get_runtime_dir(name: str) -> Path:
@@ -1154,6 +1302,11 @@ def _run_manager_forkless(
         last_cwork_check = time.monotonic()
         last_thread_check = time.monotonic()
         last_periodic_check = time.monotonic()
+        last_identity_drift_check = time.monotonic()
+        # One-shot dedup flag: set when a drift notification has been
+        # delivered for the current divergence, cleared when the source
+        # hash matches the stored hash again.
+        identity_drift_notified: bool = False
         cwork_snapshot: dict[str, tuple[float, int]] = {}
         # Seed the thread snapshot synchronously at startup so existing
         # threads form the baseline — any file growth from this moment on
@@ -1223,6 +1376,18 @@ def _run_manager_forkless(
                         check_periodic_tasks(identity, runtime, in_fifo)
                     except Exception:
                         pass
+
+                # Identity drift detection (#066) — compare runtime hash
+                # to current source hash; notify once per divergence.
+                if (
+                    identity != "worker"
+                    and now - last_identity_drift_check
+                    >= IDENTITY_DRIFT_CHECK_INTERVAL_SECONDS
+                ):
+                    last_identity_drift_check = now
+                    identity_drift_notified = check_identity_drift(
+                        identity, runtime, in_fifo, identity_drift_notified
+                    )
         except (OSError, BrokenPipeError):
             # These are EXPECTED during normal shutdown (claude exits,
             # FIFO closes). Not a panic condition.
