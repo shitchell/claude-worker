@@ -144,6 +144,10 @@ REPL_EXIT_COMMANDS: frozenset[str] = frozenset({"/exit", "/quit"})
 # Thread-watch — blocking tail for interactive thread observers (#076)
 THREAD_WATCH_POLL_INTERVAL_SECONDS: float = 0.5
 
+# TUI REPL — async log-tailer poll interval (#077, D96)
+REPL_TUI_POLL_INTERVAL_SECONDS: float = 0.1
+REPL_TUI_MAX_OUTPUT_LINES: int = 5000
+
 # Notifications — human escalation channel
 NOTIFY_COOLDOWN_SECONDS: float = 60.0
 NOTIFY_SUBPROCESS_TIMEOUT_SECONDS: float = 10.0
@@ -4714,6 +4718,258 @@ def _repl_continuous(
             pass
 
 
+def _tui_classify_line(data: dict, msg) -> str:
+    """Classify a parsed log line for TUI display styling.
+
+    Returns one of:
+      - 'assistant' (agent output)
+      - 'user-input' (our own typed input, echoed back)
+      - 'inbound' (message from another sender via thread notification)
+      - 'system' (notifications, [system:*] markers)
+      - 'skip' (don't display)
+
+    Extracted for testability — no prompt_toolkit dependency.
+    """
+    msg_type = data.get("type", "")
+    role = ""
+    try:
+        role = getattr(msg, "role", "") or ""
+    except AttributeError:
+        role = ""
+
+    if msg_type == "assistant" or role == "assistant":
+        return "assistant"
+
+    if msg_type == "user" or role == "user":
+        content = ""
+        try:
+            content = getattr(msg, "content", "") or ""
+        except AttributeError:
+            content = ""
+        content_str = str(content)
+        if content_str.startswith("[system:"):
+            return "system"
+        if content_str.startswith("[") and "]" in content_str:
+            # "[sender] body" pattern from thread inbound notifications
+            return "inbound"
+        return "user-input"
+
+    return "skip"
+
+
+def _tui_format_prefix(kind: str, sender: str | None = None) -> str:
+    """Return the display prefix for a TUI line given its classification.
+
+    Extracted for testability.
+    """
+    if kind == "assistant":
+        return ""
+    if kind == "user-input":
+        return "> "
+    if kind == "inbound":
+        return f"[{sender}] " if sender else "[inbound] "
+    if kind == "system":
+        return "· "
+    return ""
+
+
+def _repl_tui(
+    name: str,
+    log_file: Path,
+    chat_id: str | None,
+    verbose: bool,
+) -> None:
+    """Non-blocking TUI REPL (#077, D96).
+
+    Uses prompt_toolkit.Application with:
+      - Scrollable read-only output region pinned to the top
+      - Single-line input pinned to the bottom
+      - Async log tailer: new messages stream into the output region
+        without disrupting the input field
+
+    Input is available at all times — the user can type while the worker
+    is processing, and incoming messages scroll above without clobbering
+    the input buffer. Ctrl-D / /exit / /quit cleanly exits the app.
+
+    TTY-only. Non-TTY callers should use the turn-based REPL.
+    """
+    import asyncio
+
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import HSplit, Layout, Window
+    from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+    from prompt_toolkit.layout.dimension import Dimension
+
+    from claude_logs import (
+        ANSIFormatter,
+        FilterConfig,
+        PlainFormatter,
+        RenderConfig,
+        parse_message,
+        should_show_message,
+    )
+
+    if verbose:
+        hidden = {"timestamps", "metadata", "progress", "file-history-snapshot"}
+        config = RenderConfig(filters=FilterConfig(hidden=hidden))
+    else:
+        hidden = {"timestamps", "metadata", "thinking", "tools"}
+        show_only = {"user", "user-input", "assistant"}
+        config = RenderConfig(filters=FilterConfig(show_only=show_only, hidden=hidden))
+    formatter = PlainFormatter()  # keep buffer clean; ANSI in Window style
+
+    output_buffer = Buffer(read_only=False, multiline=True)
+    input_buffer = Buffer(multiline=False)
+
+    def _append_output(text: str) -> None:
+        """Append a line to the output buffer, preserving scroll."""
+        if not text:
+            return
+        current = output_buffer.text
+        if current and not current.endswith("\n"):
+            current += "\n"
+        new_text = current + text
+        # Trim to the tail so the buffer doesn't grow unbounded.
+        lines = new_text.splitlines()
+        if len(lines) > REPL_TUI_MAX_OUTPUT_LINES:
+            new_text = "\n".join(lines[-REPL_TUI_MAX_OUTPUT_LINES:])
+        output_buffer.set_document(
+            Document(new_text, cursor_position=len(new_text)),
+            bypass_readonly=True,
+        )
+
+    # Layout
+    output_window = Window(
+        content=BufferControl(buffer=output_buffer, focusable=False),
+        wrap_lines=True,
+    )
+    separator = Window(
+        content=FormattedTextControl(text="─" * 80),
+        height=Dimension.exact(1),
+        style="class:separator",
+    )
+    input_window = Window(
+        content=BufferControl(buffer=input_buffer),
+        height=Dimension.exact(1),
+        style="class:input",
+    )
+    root = HSplit([output_window, separator, input_window])
+
+    kb = KeyBindings()
+
+    @kb.add("c-d")
+    def _(event):
+        event.app.exit()
+
+    @kb.add("c-c")
+    def _(event):
+        # Clear input on Ctrl-C; don't exit (avoids accidental termination)
+        input_buffer.reset()
+
+    @kb.add("enter")
+    def _(event):
+        text = input_buffer.text.strip()
+        input_buffer.reset()
+        if not text:
+            return
+        if text in REPL_EXIT_COMMANDS:
+            event.app.exit()
+            return
+        _append_output(_tui_format_prefix("user-input") + text)
+        # Submit via the send path — thread store handles persistence.
+        send_args = argparse.Namespace(
+            name=name,
+            message=[text],
+            queue=False,
+            broadcast=False,
+            dry_run=False,
+            verbose=False,
+            show_response=False,
+            show_full_response=False,
+            chat=chat_id,
+            all_chats=False,
+        )
+        try:
+            _send_to_single_worker(name, text, send_args)
+        except SystemExit:
+            # _send_to_single_worker uses sys.exit on some failures; surface
+            # as an inline error rather than killing the TUI.
+            _append_output("· (send failed — see stderr)")
+        except Exception as exc:  # noqa: BLE001
+            _append_output(f"· send error: {exc}")
+
+    application = Application(
+        layout=Layout(root, focused_element=input_window),
+        key_bindings=kb,
+        full_screen=True,
+        mouse_support=False,
+    )
+
+    # Start position: only show messages that arrive after TUI starts.
+    try:
+        stream_pos = log_file.stat().st_size
+    except OSError:
+        stream_pos = 0
+
+    async def _log_tailer() -> None:
+        pos = stream_pos
+        while True:
+            try:
+                with open(log_file) as f:
+                    f.seek(pos)
+                    for raw in f:
+                        pos = f.tell()
+                        stripped = raw.strip()
+                        if not stripped:
+                            continue
+                        try:
+                            data = json.loads(stripped)
+                        except json.JSONDecodeError:
+                            continue
+                        msg = parse_message(data)
+                        if not should_show_message(msg, data, config):
+                            continue
+                        kind = _tui_classify_line(data, msg)
+                        if kind == "skip" or kind == "user-input":
+                            # user-input is echoed synchronously on Enter;
+                            # skip the log-echo to avoid duplicate lines.
+                            continue
+                        rendered = _render_one_message(data, msg, config, formatter)
+                        if not rendered:
+                            continue
+                        prefix = _tui_format_prefix(kind)
+                        _append_output(prefix + rendered)
+                        application.invalidate()
+            except OSError:
+                pass
+            await asyncio.sleep(REPL_TUI_POLL_INTERVAL_SECONDS)
+
+    banner = f"=== claude-worker TUI REPL: {name} ==="
+    if chat_id:
+        banner += f" (chat: {chat_id})"
+    _append_output(banner)
+    _append_output("Type below. Enter to send, /exit or Ctrl-D to quit.\n")
+
+    async def _run() -> None:
+        tailer_task = asyncio.create_task(_log_tailer())
+        try:
+            await application.run_async()
+        finally:
+            tailer_task.cancel()
+            try:
+                await tailer_task
+            except asyncio.CancelledError:
+                pass
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        pass
+
+
 def cmd_repl(args: argparse.Namespace) -> None:
     """Interactive human-facing REPL for a claude worker.
 
@@ -4794,6 +5050,18 @@ def cmd_repl(args: argparse.Namespace) -> None:
         f"Type your message at the prompt. /exit or Ctrl-D to quit.\n"
         f"The worker stays running after you exit.\n"
     )
+
+    # TUI mode: non-blocking full-screen layout (D96, #077)
+    if getattr(args, "tui", False):
+        if not sys.stdout.isatty():
+            print(
+                "Error: --tui requires a TTY. Omit --tui for the "
+                "turn-based REPL on non-interactive stdout.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _repl_tui(args.name, log_file, chat_id, verbose)
+        return
 
     # Entry context: last turn, if any
     _repl_print_last_turn(args.name)
@@ -5587,6 +5855,13 @@ def main():
         action="store_true",
         help="Continuous output mode: messages flow like tail -f, press Enter to type. "
         "No prompt shown by default — input appears on demand.",
+    )
+    p_repl.add_argument(
+        "--tui",
+        action="store_true",
+        help="Non-blocking TUI mode: input pinned at the bottom, output "
+        "scrolls above, messages stream while input stays editable. "
+        "Requires a TTY. Mutually exclusive with --continuous.",
     )
 
     # -- tokens --

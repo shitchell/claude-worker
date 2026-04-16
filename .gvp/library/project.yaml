@@ -2151,3 +2151,71 @@ observations:
       - file: README.md
         identifier: broadcast
         role: documents
+  - id: D96
+    name: non-blocking-tui-repl
+    rationale: >
+      Added a non-blocking TUI REPL mode (`claude-worker repl --tui`)
+      using prompt_toolkit 3.x. The TUI provides a full-screen layout
+      with a scrollable output region on top and a single-line input
+      field pinned at the bottom. An async log tailer streams new
+      messages into the output buffer while the input buffer remains
+      editable — the user can type while the agent is processing, and
+      inbound messages from other senders appear without disrupting
+      what they're composing.
+
+      Implementation uses prompt_toolkit.Application + asyncio for the
+      event loop, with an `HSplit([output_window, separator,
+      input_window])` layout. The log tailer runs as a concurrent
+      asyncio task that polls the worker log at 0.1s intervals and
+      appends classified lines (assistant, inbound, system) to the
+      output buffer with distinguishing prefixes.
+
+      Opt-in via `--tui` flag (not default). The turn-based REPL remains
+      the default because it is composable with non-TTY pipelines. TUI
+      requires a TTY and errors cleanly when invoked against non-
+      interactive stdout.
+
+      Helpers (_tui_classify_line, _tui_format_prefix) are extracted and
+      unit-tested; the full TUI wiring has a minimal smoke test using
+      prompt_toolkit's create_pipe_input + DummyOutput. Full visual
+      verification is manual.
+    alternatives: >
+      1. textual framework — rejected: heavier full-screen framework
+      with widget model designed for general TUIs; overkill for a REPL
+      that just needs an input field and a scrollable output area.
+      2. urwid — rejected: lower-level, no built-in asyncio integration.
+      3. Custom termios/curses — rejected: high risk with redirected
+      stdout, subagent output, terminal resize handling.
+      4. Token-by-token streaming in the TUI — deferred to a separate
+      ticket: would require intra-turn streaming-chunk reconstruction
+      on top of the TUI work; turn-complete rendering matches the
+      existing `read --follow` model.
+      5. TUI as the default when on a TTY (falling back to turn-based
+      otherwise) — flagged for PM; currently opt-in. Trivial to flip.
+    tags: [repl, tui, ux]
+    maps_to: [project:V1, project:G3]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _repl_tui
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _tui_classify_line
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _tui_format_prefix
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_repl
+        role: implements
+      - file: pyproject.toml
+        identifier: prompt_toolkit
+        role: depends-on
+      - file: tests/test_repl_tui.py
+        identifier: TestTuiClassifyLine
+        role: tests
+      - file: tests/test_repl_tui.py
+        identifier: TestTuiFormatPrefix
+        role: tests
+      - file: tests/test_repl_tui.py
+        identifier: TestTuiSmoke
+        role: tests

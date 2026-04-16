@@ -76,9 +76,9 @@
 | 071 | tool-discoverability-convention | done | medium-high | lead | RHC | chat:rhc | - | pm |
 | 072 | replaceme-fresh-start-default | done | **high** | lead | RHC | chat:rhc | - | pm |
 | 074 | centralize-thread-storage | done | **high** | lead | human | repl:18765-pts33 | - | pm |
-| 075 | consolidate-messaging-cli | review | **high** | lead | human | repl:18765-pts33 | - | human |
+| 075 | consolidate-messaging-cli | done | **high** | lead | human | repl:18765-pts33 | - | human |
 | 076 | interactive-session-messaging | done | **high** | lead | human | repl:18765-pts33 | - | human |
-| 077 | non-blocking-repl | todo | medium-high | - | human | repl:30491-pts33 | - | human |
+| 077 | non-blocking-repl | review | medium-high | lead | human | repl:30491-pts33 | - | human |
 | 078 | ls-read-incorrect-messages | done | medium-high | - | human | repl:30491-pts33 | - | human |
 | 079 | migrate-old-role-dirs | todo | medium | - | human | repl:20333-pts33 | - | pm |
 | 080 | replace-task-with-ephemeral-workers | todo | **high** | - | human | repl:20333-pts33 | - | human |

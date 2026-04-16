@@ -378,15 +378,20 @@ one-line version, `claude-worker ls` for a per-worker context line.
 ### `repl`
 
 ```
-claude-worker repl [--chat ID] [--verbose] [--continuous] NAME
+claude-worker repl [--chat ID] [--verbose] [--continuous] [--tui] NAME
 ```
 
 Interactive turn-by-turn chat with a running worker. Built for humans
-sitting at a terminal — not for orchestrators (use `send` for those).
+sitting at a terminal — not for orchestrators (use `thread send` for those).
 
 - `--verbose`, `-v` — show tool calls, thinking, and metadata.
 - `--continuous`, `-c` — continuous output mode: messages flow like
   `tail -f`, press Enter to type. No prompt shown by default.
+- `--tui` — non-blocking TUI mode (D96, #077). Full-screen layout with
+  an input field pinned at the bottom; messages scroll above while the
+  input remains editable. Inbound messages from other senders appear
+  without disrupting what you're typing. Requires a TTY. Exit with
+  `Ctrl-D` or `/exit`.
 
 The loop:
 
