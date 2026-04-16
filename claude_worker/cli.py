@@ -153,6 +153,10 @@ EPHEMERAL_IDLE_TIMEOUT_SECONDS: int = 300
 EPHEMERAL_WRAPUP_TIMEOUT_SECONDS: int = 30
 EPHEMERAL_SENTINEL_FILENAME: str = "ephemeral"
 
+# Tool-call visibility — ls shows the currently-open tool_use (#081, D98)
+TOOL_CALL_PREVIEW_LENGTH: int = 60
+TOOL_CALL_SCAN_LINE_LIMIT: int = 200
+
 # Notifications — human escalation channel
 NOTIFY_COOLDOWN_SECONDS: float = 60.0
 NOTIFY_SUBPROCESS_TIMEOUT_SECONDS: float = 10.0
@@ -2911,6 +2915,144 @@ def cmd_wait_for_turn(args: argparse.Namespace) -> None:
     sys.exit(rc)
 
 
+def _format_tool_call(tool_use: dict) -> str:
+    """Render a ``tool_use`` content block for ls display.
+
+    Chooses a short, informative per-tool summary:
+      Bash → ``Bash(cmd)``
+      Edit/Write/Read/MultiEdit → ``<Tool>(basename)``
+      Task/Agent → ``Task("description")``
+      Grep/Glob → ``<Tool>(pattern)``
+      (other) → bare tool name
+    Content longer than ``TOOL_CALL_PREVIEW_LENGTH`` chars is truncated
+    with a trailing ellipsis.
+    """
+    name = tool_use.get("name") or "?"
+    inp = tool_use.get("input") or {}
+    if not isinstance(inp, dict):
+        inp = {}
+
+    def _trim(s: str) -> str:
+        s = s.replace("\n", " ").strip()
+        if len(s) > TOOL_CALL_PREVIEW_LENGTH:
+            return s[: TOOL_CALL_PREVIEW_LENGTH - 1] + "…"
+        return s
+
+    if name == "Bash":
+        cmd = str(inp.get("command") or "")
+        return f"Bash({_trim(cmd)})" if cmd else "Bash"
+    if name in ("Edit", "Write", "Read", "MultiEdit"):
+        path = str(inp.get("file_path") or "")
+        return f"{name}({os.path.basename(path)})" if path else name
+    if name in ("Task", "Agent"):
+        desc = str(inp.get("description") or inp.get("prompt") or "")
+        return f"{name}({_trim(desc)})" if desc else name
+    if name in ("Grep", "Glob"):
+        pat = str(inp.get("pattern") or "")
+        return f"{name}({_trim(pat)})" if pat else name
+    return name
+
+
+def _format_tool_call_duration(seconds: float) -> str:
+    """Short human duration: ``(12s)`` / ``(2m 15s)`` / ``(1h 3m)``."""
+    secs = int(seconds)
+    if secs < 60:
+        return f"({secs}s)"
+    if secs < 3600:
+        return f"({secs // 60}m {secs % 60}s)"
+    return f"({secs // 3600}h {(secs % 3600) // 60}m)"
+
+
+def _find_current_tool_call(log_file: Path, now: float | None = None) -> dict | None:
+    """Detect whether the worker is in the middle of a tool call.
+
+    Walks the log backward looking for the most recent assistant
+    message containing ``tool_use`` content blocks. For each tool_use,
+    scans forward in the already-collected tail looking for a matching
+    ``tool_result`` in a subsequent user message. If at least one
+    tool_use has no matching result, it is the currently-open call
+    and this function returns a summary dict::
+
+        {
+          "tool_use_id": str,
+          "name": str,
+          "display": str,       # via _format_tool_call
+          "started_at": float,  # epoch seconds (best-effort from timestamp)
+          "duration_seconds": float,
+        }
+
+    Returns ``None`` when no open tool_use is found within the last
+    ``TOOL_CALL_SCAN_LINE_LIMIT`` log lines. The scan is bounded so
+    a very long log doesn't cost O(bytes) per ls call. (#081, D98)
+
+    Extracted as a pure-ish function for testing — only touches the
+    filesystem via _iter_log_reverse.
+    """
+    if now is None:
+        now = time.time()
+
+    if not log_file.exists():
+        return None
+
+    # Tail lines in reverse order; collect up to TOOL_CALL_SCAN_LINE_LIMIT
+    # entries, then process in forward (oldest-first) order to match
+    # tool_use -> tool_result pairs correctly.
+    tail: list[dict] = []
+    for entry in _iter_log_reverse(log_file):
+        tail.append(entry)
+        if len(tail) >= TOOL_CALL_SCAN_LINE_LIMIT:
+            break
+    tail.reverse()
+
+    # Map of tool_use_id -> (tool_use_block, assistant_timestamp) for
+    # any tool_use seen. Deleted when a matching tool_result appears.
+    open_calls: dict[str, tuple[dict, float]] = {}
+
+    def _parse_ts(entry: dict) -> float:
+        ts = entry.get("timestamp")
+        if isinstance(ts, str):
+            try:
+                from datetime import datetime
+
+                return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+            except (ValueError, TypeError):
+                return now
+        return now
+
+    for entry in tail:
+        etype = entry.get("type")
+        if etype == "assistant":
+            ts = _parse_ts(entry)
+            content = (entry.get("message") or {}).get("content") or []
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        tid = block.get("id")
+                        if tid:
+                            open_calls[tid] = (block, ts)
+        elif etype == "user":
+            content = (entry.get("message") or {}).get("content") or []
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        tid = block.get("tool_use_id")
+                        if tid and tid in open_calls:
+                            del open_calls[tid]
+
+    if not open_calls:
+        return None
+
+    # Pick the most recently started open call (highest timestamp).
+    best_id, (block, started_at) = max(open_calls.items(), key=lambda kv: kv[1][1])
+    return {
+        "tool_use_id": best_id,
+        "name": block.get("name") or "?",
+        "display": _format_tool_call(block),
+        "started_at": started_at,
+        "duration_seconds": max(0.0, now - started_at),
+    }
+
+
 def _format_worker_line(name: str) -> str | None:
     """Format a single worker status line. Returns None if not a valid worker dir."""
     runtime = get_runtime_dir(name)
@@ -2965,6 +3107,14 @@ def _format_worker_line(name: str) -> str | None:
     context_label = _format_context_window_label(log_file)
     context_line = f"\n    context: {context_label}" if context_label else ""
 
+    # Current tool call (#081, D98) — shown when the worker is mid-
+    # tool-call. Line omitted when no open tool_use.
+    tool_info = _find_current_tool_call(log_file)
+    tool_line = ""
+    if tool_info:
+        duration = _format_tool_call_duration(tool_info["duration_seconds"])
+        tool_line = f"\n    tool: {tool_info['display']}  {duration}"
+
     _IDENTITY_LABELS = {"pm": "PM", "technical-lead": "TL"}
     identity_tag = ""
     if worker_identity and worker_identity != "worker":
@@ -2976,6 +3126,7 @@ def _format_worker_line(name: str) -> str | None:
         f"    session: {session}"
         f"{preview_line}"
         f"{context_line}"
+        f"{tool_line}"
     )
 
 
@@ -3060,6 +3211,11 @@ def cmd_list(args: argparse.Namespace) -> None:
     if format_mode == "json":
         for w in workers:
             out = {k: v for k, v in w.items() if k != "log_mtime"}
+            # Augment with current-tool-call (#081, D98). Always a key
+            # for stable script shape; null when no open tool_use.
+            log_file = get_runtime_dir(w["name"]) / "log"
+            tool_info = _find_current_tool_call(log_file)
+            out["current_tool"] = tool_info
             print(json.dumps(out))
     else:
         for w in workers:

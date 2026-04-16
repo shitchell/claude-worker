@@ -301,10 +301,11 @@ Output format per worker:
 
 ```
   my-worker [PM]
-    pid: 1234  status: waiting  idle: 12s  cwd: ~/projects/foo
+    pid: 1234  status: working  idle: 12s  cwd: ~/projects/foo
     session: abc123...
     last: first ~80 chars of the most recent assistant message...
     context: 77% (776k/1M)
+    tool: Bash(pytest tests/)  (12s)
 ```
 
 - `[PM]` / `[TL]` appears next to identity workers.
@@ -314,6 +315,12 @@ Output format per worker:
 - `context:` shows the current context window usage as a percentage
   and absolute count (e.g. `77% (776k/1M)`). Silent for workers that
   haven't produced a first turn yet. Backed by ``claugs``.
+- `tool:` shows the currently-open tool call and how long it has been
+  running (D98, #081). Appears only when the worker has an unresolved
+  `tool_use` in its most recent assistant turn — a direct signal of
+  "what is this worker doing right now?" beyond the `status` field.
+  `--format json` adds the same information under a `current_tool`
+  key (or `null` when none open).
 
 ### `stop`
 

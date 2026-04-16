@@ -2294,3 +2294,60 @@ observations:
       - file: tests/test_ephemeral_worker.py
         identifier: TestEphemeralLifecycle
         role: tests
+  - id: D98
+    name: ls-current-tool-call-visibility
+    rationale: >
+      `claude-worker ls` now shows the currently-open tool_use for
+      working workers. The display ("tool: Bash(pytest tests/)  (12s)")
+      answers the "is this worker actually progressing, or stuck in
+      a tool call?" question that the #074 retrospective identified
+      as a PM pain point. JSON output gains a `current_tool` key with
+      the same info (or null), keeping the JSON shape stable for
+      scripts.
+
+      Detection: walk the log backwards via _iter_log_reverse, collect
+      the last TOOL_CALL_SCAN_LINE_LIMIT (200) entries, replay
+      forward to pair tool_use blocks with tool_result blocks. Any
+      tool_use without a matching result is "open". When multiple
+      open calls exist, pick the most recently started one. The scan
+      is bounded so a very long log doesn't cost O(bytes) per ls call.
+
+      Phase A of the #081 design — the subagents subcommand is
+      deferred to #083 for separate review of the project-slug
+      resolution path.
+    alternatives: >
+      1. Parse tool_use from the runtime log via claude_logs — rejected:
+      claude_logs doesn't expose an open/closed tool-use API today,
+      and a local helper is simpler than adding one upstream.
+      2. Active polling (ask claude "what tool are you running?") —
+      rejected: adds turn latency, the log already contains the
+      answer.
+      3. Show every open tool_use when multiple exist — rejected: the
+      display line gets noisy; the most recent is the one a human
+      reading ls cares about. Full detail via --format json.
+      4. Unbounded log scan — rejected: could cost ~100ms on multi-MB
+      logs. 200-line scan window is plenty for any sensible worker.
+    tags: [observability, ls, diagnostics]
+    maps_to: [project:G2, project:V1]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _find_current_tool_call
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _format_tool_call
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _format_tool_call_duration
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _format_worker_line
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_list
+        role: implements
+      - file: tests/test_tool_call_visibility.py
+        identifier: TestFindCurrentToolCall
+        role: tests
+      - file: tests/test_tool_call_visibility.py
+        identifier: TestLsIntegration
+        role: tests
