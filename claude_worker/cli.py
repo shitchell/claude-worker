@@ -141,6 +141,9 @@ REPL_IDLE_POLL_INTERVAL_SECONDS: float = 0.25
 REPL_INPUT_PROMPT: str = "you> "
 REPL_EXIT_COMMANDS: frozenset[str] = frozenset({"/exit", "/quit"})
 
+# Thread-watch — blocking tail for interactive thread observers (#076)
+THREAD_WATCH_POLL_INTERVAL_SECONDS: float = 0.5
+
 # Notifications — human escalation channel
 NOTIFY_COOLDOWN_SECONDS: float = 60.0
 NOTIFY_SUBPROCESS_TIMEOUT_SECONDS: float = 10.0
@@ -1506,6 +1509,23 @@ def cmd_start(args: argparse.Namespace) -> None:
     os._exit(0)
 
 
+def _is_known_thread_participant(name: str) -> bool:
+    """Return True if ``name`` appears as a participant in any existing thread.
+
+    Used to allow sends to non-worker targets (e.g., interactive Claude
+    Code sessions identified as ``human`` or ``rhc``) when the target
+    is a legitimate thread peer. Prevents typos from silently creating
+    dead threads while enabling worker → interactive replies (D94, #076).
+    """
+    from claude_worker.thread_store import load_index
+
+    index = load_index()
+    for meta in index.values():
+        if name in (meta.get("participants") or []):
+            return True
+    return False
+
+
 def _send_to_single_worker(
     name: str,
     content: str,
@@ -1523,6 +1543,10 @@ def _send_to_single_worker(
       - ``--chat <id>`` (PM workers) → ``chat-<id>`` (multi-consumer)
       - Else → ``pair-<sender>-<recipient>`` (symmetric, deterministic)
 
+    Non-worker targets (D94): if ``name`` has no runtime dir but is a
+    known thread participant (e.g., an interactive Claude Code session),
+    the send is thread-only — no status gate, no wait-for-turn.
+
     Extracted from cmd_send so broadcast can reuse the core send logic
     per target without duplicating the thread write + wait sequence.
     """
@@ -1535,14 +1559,25 @@ def _send_to_single_worker(
 
     runtime = get_runtime_dir(name)
     log_file = runtime / "log"
+    runtime_exists = runtime.exists()
 
-    if not runtime.exists():
-        print(f"Error: worker '{name}' not found at {runtime}", file=sys.stderr)
-        return 1
+    if not runtime_exists:
+        if not _is_known_thread_participant(name):
+            print(
+                f"Error: '{name}' is not a worker and not a known thread "
+                f"participant. Check the name or use `claude-worker thread "
+                f"list` to see known participants.",
+                file=sys.stderr,
+            )
+            return 1
+        # Thread-only target (interactive session, etc.). Fall through;
+        # status gate + wait-for-turn are skipped below.
 
-    # Status gate: skip for broadcast (fire-and-forget to all)
+    # Status gate: skip for broadcast (fire-and-forget to all),
+    # thread-only targets (no FIFO to gate on), and dry-run/queue.
     if (
-        not args.queue
+        runtime_exists
+        and not args.queue
         and not getattr(args, "broadcast", False)
         and not getattr(args, "dry_run", False)
     ):
@@ -1566,7 +1601,9 @@ def _send_to_single_worker(
             )
             return 1
 
-    marker_uuid = _get_last_uuid(log_file)
+    # marker_uuid is only used for _wait_for_turn / _wait_for_queue_response,
+    # both of which are skipped for thread-only (non-worker) targets.
+    marker_uuid = _get_last_uuid(log_file) if runtime_exists else None
 
     # Chat routing (PM workers) / sender resolution
     chat_id = _resolve_chat_id(name, args.chat, args.all_chats)
@@ -1636,6 +1673,12 @@ def _send_to_single_worker(
         and not args.show_response
         and not args.show_full_response
     ):
+        return 0
+
+    # Thread-only (non-worker) target: no log to wait on, no turn semantics.
+    # The reply, if any, will be appended to the same thread — the caller
+    # can observe it via `claude-worker thread watch <thread_id>`.
+    if not runtime_exists:
         return 0
 
     if queue_id is not None:
@@ -5052,6 +5095,83 @@ def cmd_migrate(args: argparse.Namespace) -> None:
             _update_version_anchor(proj_path)
 
 
+def _watch_thread(
+    thread_id: str,
+    since_id: str | None = None,
+    timeout: float | None = None,
+) -> int:
+    """Blocking tail on a thread JSONL. Prints new messages as they arrive.
+
+    Returns:
+      0 on Ctrl-C / EOF (graceful)
+      1 if the thread file does not exist
+      2 on timeout (when ``timeout`` is set and elapses with no new
+        messages appearing)
+
+    Used by ``claude-worker thread watch`` to give interactive (non-worker)
+    sessions a cheap notification mechanism for replies (D94, #076).
+    """
+    from claude_worker.thread_store import _threads_dir
+
+    thread_file = _threads_dir() / f"{thread_id}.jsonl"
+    if not thread_file.exists():
+        print(f"Error: thread '{thread_id}' not found", file=sys.stderr)
+        return 1
+
+    printed_ids: set[str] = set()
+    try:
+        with open(thread_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                printed_ids.add(msg.get("id", ""))
+                # When --since is given, stop prefilling after the marker
+                # so subsequent messages are printed as "new".
+                if since_id is not None and msg.get("id") == since_id:
+                    break
+    except OSError:
+        pass
+
+    deadline = (time.monotonic() + timeout) if timeout is not None else None
+    try:
+        while True:
+            had_new = False
+            try:
+                with open(thread_file) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            msg = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        mid = msg.get("id", "")
+                        if mid in printed_ids:
+                            continue
+                        printed_ids.add(mid)
+                        had_new = True
+                        print(_format_thread_message(msg), flush=True)
+            except OSError:
+                pass
+
+            if deadline is not None:
+                if had_new:
+                    # Reset the deadline on activity — `--timeout` is the
+                    # idle ceiling, not a total wall-clock cap.
+                    deadline = time.monotonic() + timeout
+                elif time.monotonic() >= deadline:
+                    return 2
+            time.sleep(THREAD_WATCH_POLL_INTERVAL_SECONDS)
+    except KeyboardInterrupt:
+        return 0
+
+
 def cmd_thread(args: argparse.Namespace) -> None:
     """Manage conversation threads."""
     from claude_worker.thread_store import (
@@ -5118,9 +5238,17 @@ def cmd_thread(args: argparse.Namespace) -> None:
         close_thread(args.thread_id)
         print(f"Thread {args.thread_id} closed.")
 
+    elif action == "watch":
+        rc = _watch_thread(
+            args.thread_id,
+            since_id=getattr(args, "since", None),
+            timeout=getattr(args, "timeout", None),
+        )
+        sys.exit(rc)
+
     else:
         print(
-            "Usage: claude-worker thread {create|send|read|list|close}",
+            "Usage: claude-worker thread {create|send|read|list|close|watch}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -5805,6 +5933,20 @@ def main():
 
     p_thread_close = thread_sub.add_parser("close", help="Close a thread")
     p_thread_close.add_argument("thread_id", help="Thread ID")
+
+    p_thread_watch = thread_sub.add_parser(
+        "watch", help="Tail a thread — block until new messages arrive"
+    )
+    p_thread_watch.add_argument("thread_id", help="Thread ID")
+    p_thread_watch.add_argument(
+        "--since",
+        help="Resume after this message ID (print messages strictly after it)",
+    )
+    p_thread_watch.add_argument(
+        "--timeout",
+        type=float,
+        help="Exit with code 2 after this many idle seconds (no new messages)",
+    )
 
     p_thread.set_defaults(func=cmd_thread)
 

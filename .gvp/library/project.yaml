@@ -2040,3 +2040,48 @@ observations:
       - file: tests/conftest.py
         identifier: _isolate_global_threads
         role: implements
+  - id: D94
+    name: interactive-session-messaging
+    rationale: >
+      Interactive (non-worker) Claude Code sessions can now participate
+      in the messaging system as thread peers. Two changes enable this:
+      (1) _send_to_single_worker falls back to a thread-only path when
+      the target has no worker runtime dir but is a known participant
+      in an existing thread — the send is written to the thread and
+      returns 0 without status gating or wait-for-turn semantics.
+      (2) A new `claude-worker thread watch <thread-id>` subcommand
+      blocks and tails the thread JSONL, printing new messages as they
+      arrive. Together these close the asymmetric gap where interactive
+      sessions could send to workers but workers could not reply back.
+      Builds on D93 (centralized thread storage) — without global
+      storage the peer lookup would be ambiguous. The participant-
+      membership check (O(n) over the index) prevents typos from
+      silently creating dead threads, satisfying G2.
+    alternatives: >
+      1. Ephemeral worker registration for interactive sessions — rejected:
+      heavier machinery, requires lifecycle management on session exit.
+      2. Notification webhook at send time — rejected: caller-side
+      coupling, doesn't compose with multi-target broadcast.
+      3. Polling-only (no watch command) — rejected: wasteful, worse UX
+      than a blocking tail that resets its idle timer on activity.
+    tags: [messaging, threads, interactive]
+    maps_to: [project:G2, project:V2, project:P5]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _is_known_thread_participant
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _send_to_single_worker
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _watch_thread
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_thread
+        role: implements
+      - file: tests/test_interactive_messaging.py
+        identifier: TestSendToNonWorkerTarget
+        role: tests
+      - file: tests/test_interactive_messaging.py
+        identifier: TestWatchThread
+        role: tests
