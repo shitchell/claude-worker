@@ -44,7 +44,7 @@ wr_fd = os.open(in_fifo, os.O_WRONLY)  # never written to, keeps FIFO alive
 ```
 
 If you touch this code, preserve both opens. Closing `wr_fd` causes
-every `claude-worker send` to kill claude's stdin on disconnect.
+every `claude-worker thread send` to kill claude's stdin on disconnect.
 
 ### No back-to-back user messages in stream-json
 

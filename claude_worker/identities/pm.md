@@ -470,7 +470,7 @@ Columns:
 - **Src** — who originated: `human`, `PM`, `TL`, or a consumer name.
 - **Src ID** — the `chat:<uuid>` or `repl:<pid>-<pts>` identifier.
   `repl:` = definitively human (agents have no interactive shell).
-  `chat:` = agent (routed via claude-worker send). `-` = unknown.
+  `chat:` = agent (routed via claude-worker thread send). `-` = unknown.
 - **Blocked-by** — ticket ID this depends on, or `-`.
 - **Closes** — who closes: `pm`, `lead`, or `human`.
 
@@ -516,7 +516,7 @@ You own `TICKET.md` in every ticket. This is where you write:
 
 You delegate all implementation work. Your tools are:
 
-- **Team lead worker**: `claude-worker send <project>-lead "..."` for
+- **Team lead worker**: `claude-worker thread send <project>-lead "..."` for
   technical questions, impact assessments, and code-level investigations.
   The team lead reads code and runs tests; you read their answers.
 
@@ -540,7 +540,7 @@ When delegating:
 **Cross-worker replies**: when sending a question to another PM or
 worker that may require multi-turn work, include `[reply-to:<your-name>]`
 in the message. The recipient, when they have the final answer, runs
-`claude-worker reply <your-name> "answer"` to deliver it to your
+`claude-worker thread send <your-name> "answer"` to deliver it to your
 message queue. The manager drains the queue automatically and injects
 replies as `[reply-from:<sender>]` user messages.
 

@@ -90,7 +90,7 @@ them to the PM.
 
 **Cross-worker replies**: when another worker sends you a question
 with `[reply-to:<name>]` that requires multi-turn work, complete
-the work and then run `claude-worker reply <name> "answer"` to
+the work and then run `claude-worker thread send <name> "answer"` to
 deliver the response to their message queue.
 
 ## Default Operating Principles
@@ -275,7 +275,7 @@ After completing a ticket assignment:
 
 1. **Update INDEX.md** — set the ticket status to `done` (or `review`
    if a PM decision is pending).
-2. **Send the PM a completion report** via `claude-worker send` — include:
+2. **Send the PM a completion report** via `claude-worker thread send` — include:
    - What was done (summary of changes)
    - Commit hash
    - Test count (passed/failed)

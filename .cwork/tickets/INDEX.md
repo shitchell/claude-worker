@@ -67,8 +67,23 @@
 | 063 | cairn-enforcement-hooks | done | medium | lead | RHC | chat:rhc | - | pm |
 | 064 | pm-autonomous-work-loop | done | **high** | lead | RHC | chat:rhc | - | pm |
 | 065 | design-discussion-protocol | done | medium-high | lead | RHC | chat:rhc | - | pm |
-| 066 | identity-hash-tracking | draft | low | - | TL | - | - | pm |
-| 067 | remote-control-ccr-implementation | todo | **high** | - | RHC | chat:rhc | - | pm |
+| 066 | identity-version-tracking | done | low | lead | TL | - | - | pm |
+| 073 | fix-send-end-to-end-test | done | medium | lead | PM | - | - | pm |
+| 067 | remote-control-ccr-implementation | done | **high** | lead | RHC | chat:rhc | - | pm |
+| 068 | start-resume-dead-worker | done | medium | lead | RHC | chat:rhc | - | pm |
+| 069 | sessions-json-path-migration | done | medium | lead | RHC | chat:rhc | - | pm |
+| 070 | resume-from-archive | done | medium | lead | RHC | chat:rhc | - | pm |
+| 071 | tool-discoverability-convention | done | medium-high | lead | RHC | chat:rhc | - | pm |
+| 072 | replaceme-fresh-start-default | done | **high** | lead | RHC | chat:rhc | - | pm |
+| 074 | centralize-thread-storage | done | **high** | lead | human | repl:18765-pts33 | - | pm |
+| 075 | consolidate-messaging-cli | review | **high** | lead | human | repl:18765-pts33 | - | human |
+| 076 | interactive-session-messaging | done | **high** | lead | human | repl:18765-pts33 | - | human |
+| 077 | non-blocking-repl | todo | medium-high | - | human | repl:30491-pts33 | - | human |
+| 078 | ls-read-incorrect-messages | done | medium-high | - | human | repl:30491-pts33 | - | human |
+| 079 | migrate-old-role-dirs | todo | medium | - | human | repl:20333-pts33 | - | pm |
+| 080 | replace-task-with-ephemeral-workers | todo | **high** | - | human | repl:20333-pts33 | - | human |
+| 081 | worker-tool-call-visibility | todo | medium-high | - | human | repl:20333-pts33 | - | human |
+| 082 | stop-wrapup-test-flakiness | todo | medium | - | PM | - | - | pm |
 
 ## Done (migrated from future-queries)
 

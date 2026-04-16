@@ -416,44 +416,6 @@ def test_read_missing_thread_falls_back_to_log(
     assert "LOG_FALLBACK_MARKER" in out
 
 
-# -- cmd_reply migration ---------------------------------------------------
-
-
-def test_reply_appends_to_pair_thread(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture,
-):
-    """cmd_reply writes to pair-<sender>-<recipient> and does not exit."""
-    base_dir = tmp_path / "workers"
-    base_dir.mkdir()
-    monkeypatch.setattr(cw_manager, "get_base_dir", lambda: base_dir)
-    monkeypatch.setattr(cw_cli, "get_base_dir", lambda: base_dir)
-
-    sessions_path = base_dir / ".sessions.json"
-    sessions_path.write_text(
-        json.dumps({"pm": {"cwd": str(tmp_path), "identity": "pm"}})
-    )
-
-    monkeypatch.setenv("CW_WORKER_NAME", "tl")
-    # Disable ancestry walk so sender resolution falls through to CW_WORKER_NAME
-    monkeypatch.setattr(cw_cli, "_find_worker_by_ancestry", lambda: None)
-
-    args = argparse.Namespace(
-        name="pm",
-        message=["the answer is 42"],
-        sender=None,
-    )
-    cw_cli.cmd_reply(args)
-
-    tid = pair_thread_id("tl", "pm")
-    messages = read_messages(tid)
-    assert len(messages) == 1
-    assert messages[0]["sender"] == "tl"
-    assert "the answer is 42" in messages[0]["content"]
-    assert "reply" in (messages[0].get("tags") or [])
-
-
 # -- Active-thread sidecar -------------------------------------------------
 
 

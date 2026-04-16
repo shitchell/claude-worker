@@ -206,7 +206,7 @@ prompt is provided.
 ### The EOF problem
 
 Named FIFOs (mkfifo) have a critical behavior: when the last writer closes,
-the reader sees EOF. If `claude-worker send` writes a message and closes
+the reader sees EOF. If `claude-worker thread send` writes a message and closes
 the FIFO, claude's stdin would see EOF and the process would exit.
 
 ### The dummy-write-fd trick
@@ -340,8 +340,8 @@ JSON payload from stdin, extracts `session_id` with a pure-bash regex
 call.
 
 Result: inside a Claude Code session, every Bash tool invocation sees
-`CLAUDE_SESSION_UUID` set to the session's UUID. `claude-worker send`
-(also `read`) picks that up and auto-tags against PM workers.
+`CLAUDE_SESSION_UUID` set to the session's UUID. `claude-worker thread send`
+(also `thread read`) picks that up and auto-tags against PM workers.
 
 The install is atomic (sibling `.tmp` + `os.replace()`) so a crash
 mid-install cannot corrupt `~/.claude/settings.json` — which is the

@@ -41,13 +41,13 @@ Requires Python 3.11+, the `claude` CLI on PATH, and `claugs` (the
 claude-worker start --name researcher --prompt "You are a research assistant"
 
 # Send a follow-up message — also blocks by default
-claude-worker send researcher "summarize the architecture of this repo"
+claude-worker thread send researcher "summarize the architecture of this repo"
 
 # Print the response that just arrived
-claude-worker read researcher --last-turn
+claude-worker thread read researcher --last-turn
 
 # Send + show response in one step (no separate read)
-claude-worker send researcher "now focus on the database layer" --show-response
+claude-worker thread send researcher "now focus on the database layer" --show-response
 
 # List all workers
 claude-worker list         # or: claude-worker ls
@@ -127,32 +127,27 @@ subprocess lifecycle.
 - Extra args after `--` are passed through to `claude` (e.g.
   `claude-worker start --name fast -- --model haiku`).
 
-### `send`
+### `thread send`
 
 ```
-claude-worker send [--queue] [--broadcast] [--dry-run] [--verbose]
-                   [--show-response | --show-full-response]
-                   [--chat ID | --all-chats]
-                   [--role pm|tl|worker] [--status STATUS]
-                   [--alive] [--cwd PATH]
-                   [NAME] [MESSAGE...]
+claude-worker thread send [--queue] [--dry-run] [--verbose]
+                          [--show-response | --show-full-response]
+                          [--chat ID | --all-chats]
+                          NAME [MESSAGE...]
 ```
 
-Send a user message to a worker. Blocks until the worker responds. Message
-can be positional args or piped via stdin:
+Send a user message to a worker (or a known thread participant; see
+[interactive-session messaging](#interactive-sessions)). Blocks until the
+worker responds. Message can be positional args or piped via stdin:
 
 ```bash
-echo "analyze this code" | claude-worker send myworker
+echo "analyze this code" | claude-worker thread send myworker
 ```
 
 - `--queue` — bypass the status gate; embed a `[queue:<epoch-ms>]` correlation
   tag in the message and wait for the specific tagged response. Use this when
   multiple senders might be producing responses concurrently, or when you
   need to send to a worker that's still processing a previous turn.
-- `--broadcast` — send the message to all workers matching the filter flags.
-  Worker name is omitted when broadcasting.
-- `--role`, `--status`, `--alive`, `--cwd` — filter targets for broadcast
-  (same filters as `list`).
 - `--dry-run` — print the JSON envelope that would be sent without writing
   to the thread. Zero side effects.
 - `--verbose` — print the JSON envelope to stderr before sending.
@@ -164,18 +159,36 @@ echo "analyze this code" | claude-worker send myworker
   non-PM targets get a stderr warning and the message passes through unchanged.
 - `--all-chats` — bypass automatic chat tagging (no-op for non-PM workers).
 
-**Chat routing**: when running inside Claude Code against a PM worker,
-`send` auto-prepends `[chat:$CLAUDE_SESSION_UUID]` if the hook is installed
-and `CLAUDECODE=1`. See [PM mode](#pm-mode-multi-consumer-workers).
+For multi-target delivery, use [`broadcast`](#broadcast).
 
-### `read`
+**Chat routing**: when running inside Claude Code against a PM worker,
+`thread send` auto-prepends `[chat:$CLAUDE_SESSION_UUID]` if the hook is
+installed and `CLAUDECODE=1`. See [PM mode](#pm-mode-multi-consumer-workers).
+
+### `broadcast`
 
 ```
-claude-worker read [--follow] [--since ID_OR_TIMESTAMP] [--until UUID]
-                   [--new] [--mark] [--last-turn] [--exclude-user] [-n N]
-                   [--count | --summary] [--verbose]
-                   [--color | --no-color] [--chat ID | --all-chats]
-                   NAME
+claude-worker broadcast [--role pm|tl|worker] [--status STATUS]
+                        [--alive] [--cwd PATH]
+                        [--queue] [--dry-run] [--verbose]
+                        [--show-response | --show-full-response]
+                        [--chat ID | --all-chats]
+                        [MESSAGE...]
+```
+
+Send the message to all workers matching the filter flags. The caller is
+excluded from targets if running inside a worker. Exits 0 iff at least one
+target accepted the message. Filter flags mirror [`list`](#list--ls).
+
+### `thread read`
+
+```
+claude-worker thread read [--follow] [--since ID_OR_TIMESTAMP] [--until UUID]
+                          [--new] [--mark] [--last-turn] [--exclude-user] [-n N]
+                          [--count | --summary] [--verbose]
+                          [--color | --no-color] [--chat ID | --all-chats]
+                          [--thread ID] [--log]
+                          NAME
 ```
 
 Read worker output, parsed and formatted via `claude_logs`. User-input
@@ -221,30 +234,40 @@ Each output line is prefixed with `[HH:MM:SS uuid-short]`. At the bottom,
 a hint suggests the follow-up command, preserving any `--exclude-user` the
 caller used so re-running produces the same view.
 
-### `wait-for-turn`
+### `thread wait`
 
 ```
-claude-worker wait-for-turn [--timeout SECONDS] [--after-uuid UUID]
-                            [--settle SECONDS] NAME
+claude-worker thread wait [--timeout SECONDS] [--after-uuid UUID]
+                          [--settle SECONDS] [--chat TAG]
+                          NAME_OR_THREAD_ID
 ```
 
-Block until claude finishes its current turn.
+Block with dual semantics based on the positional argument:
+
+- **Worker name** — wait until claude finishes its current turn (legacy
+  `wait-for-turn` behavior).
+- **Thread ID** (prefix `pair-` or `chat-`) — wait until a new message
+  appears on that thread, then print and return.
+
+Flags:
 
 - `--timeout SECONDS` — total time budget before returning 2 (timeout).
 - `--after-uuid UUID` — ignore log entries up to and including this UUID.
-  Pass the last log UUID captured before sending, so wait-for-turn doesn't
-  match the prior turn's `result` message before the new input reaches
-  claude.
+  Pass the last log UUID captured before sending so the wait doesn't match
+  the prior turn's `result` message before the new input reaches claude.
+  (Worker-name mode only.)
 - `--settle SECONDS` — after detecting a turn boundary, wait this long and
   confirm no new messages appeared before returning. Default 3s. Prevents
   false positives when the worker briefly idles between internal subagent
   dispatches. Set to 0 to disable. The settle window counts against
-  `--timeout`.
+  `--timeout`. (Worker-name mode only.)
+- `--chat TAG` — only fire when the turn's assistant content contains
+  `[chat:<tag>]`. (Worker-name mode only.)
 
 Exit codes:
 
-- `0` — turn complete, worker is ready for more input
-- `1` — worker process died
+- `0` — turn complete / new thread message seen
+- `1` — worker process died / thread not found
 - `2` — timeout
 
 ### `list` / `ls`
@@ -349,7 +372,7 @@ Context window size is auto-detected from the model string in the
 worker's `system/init` message: models with `[1m]` suffix are 1M,
 others default to 200K.
 
-See also: `claude-worker read NAME --context` for a scriptable
+See also: `claude-worker thread read NAME --context` for a scriptable
 one-line version, `claude-worker ls` for a per-worker context line.
 
 ### `repl`
@@ -478,20 +501,6 @@ notification text. Any shell command that accepts a message works
 Rate-limited to one notification per 60 seconds per worker. Best-effort:
 failures are logged to stderr, never crash the worker.
 
-### `reply`
-
-```
-claude-worker reply [--sender NAME] NAME [MESSAGE...]
-```
-
-Send a reply to a worker via the thread primitive. The reply appends to
-the pair thread between sender and recipient; the recipient gets a
-lightweight notification and reads the full message on demand. Message
-reads stdin if omitted.
-
-- `--sender` — sender identity. Auto-detected from PID ancestry if
-  running inside a worker.
-
 ### `projects`
 
 ```
@@ -598,7 +607,7 @@ From inside any Claude Code session (so `CLAUDECODE=1` and
 `CLAUDE_SESSION_UUID` are set by the hook):
 
 ```bash
-claude-worker send pm-myproject "plan the auth refactor"
+claude-worker thread send pm-myproject "plan the auth refactor"
 ```
 
 `send` detects the PM target and auto-prepends `[chat:$CLAUDE_SESSION_UUID]`
@@ -608,7 +617,7 @@ calls can filter to this consumer's conversation only.
 ### Reading your own chat
 
 ```bash
-claude-worker read pm-myproject
+claude-worker thread read pm-myproject
 ```
 
 On a PM worker with `CLAUDE_SESSION_UUID` set, `read` automatically filters
@@ -668,16 +677,16 @@ cleanup. Archives older than 30 days are pruned automatically.
 
 ```bash
 # Queue multiple messages through a busy worker
-claude-worker send worker1 "task 1" --queue &
-claude-worker send worker1 "task 2" --queue &
+claude-worker thread send worker1 "task 1" --queue &
+claude-worker thread send worker1 "task 2" --queue &
 wait  # each send blocks until its tagged response arrives
 
 # Read a precise range
-claude-worker read researcher --since abc12345 --until def67890
+claude-worker thread read researcher --since abc12345 --until def67890
 
 # Quick counts and summaries
-claude-worker read researcher --count
-claude-worker read researcher --summary -n 10
+claude-worker thread read researcher --count
+claude-worker thread read researcher --summary -n 10
 
 # PM worker with a specific agent
 claude-worker start --pm --name pm-backend --cwd ~/projects/backend \

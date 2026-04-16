@@ -2,7 +2,7 @@
 
 Fires after Write/Edit/MultiEdit on files under <cwd>/.cwork/tickets/.
 Discovers other identity workers (PM/TL) with the same CWD and sends
-them a notification via ``claude-worker send --queue``.
+them a notification via ``claude-worker thread send --queue``.
 
 Usage (wired automatically by cmd_start via per-worker settings.json):
 
@@ -188,7 +188,7 @@ def main() -> None:
             continue
         try:
             subprocess.Popen(
-                ["claude-worker", "send", target, "--queue", msg],
+                ["claude-worker", "thread", "send", target, "--queue", msg],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )

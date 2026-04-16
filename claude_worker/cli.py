@@ -1759,12 +1759,14 @@ def _reparse_send_flags(args: argparse.Namespace) -> argparse.Namespace:
 
 
 def cmd_send(args: argparse.Namespace) -> None:
-    """Send a message to a worker, or broadcast to multiple workers.
+    """Send a message to a single worker (or known thread participant).
 
     Default behavior: check worker status first and reject if busy. Use
-    ``--queue`` to bypass the busy check and track a specific response via a
-    correlation ID embedded in the message. Use ``--broadcast`` with filter
-    flags to send to multiple workers matching a filter.
+    ``--queue`` to bypass the busy check and track a specific response via
+    a correlation ID embedded in the message. For multi-target delivery,
+    use ``cmd_broadcast`` (top-level ``broadcast`` subcommand).
+
+    Exposed as ``claude-worker thread send`` after D95 (#075).
     """
     # Fix flag ordering: extract flags that argparse absorbed into message
     args = _reparse_send_flags(args)
@@ -1786,48 +1788,81 @@ def cmd_send(args: argparse.Namespace) -> None:
         print("Error: empty message", file=sys.stderr)
         sys.exit(1)
 
-    # Broadcast mode: send to all matching workers
-    if getattr(args, "broadcast", False):
-        targets = _collect_filtered_workers(args)
-
-        # Self-exclusion
-        self_name = _find_worker_by_ancestry()
-        if self_name:
-            targets = [w for w in targets if w["name"] != self_name]
-
-        if not targets:
-            print("No matching workers found for broadcast", file=sys.stderr)
-            sys.exit(1)
-
-        names = [w["name"] for w in targets]
-        results: list[tuple[str, int]] = []
-        for name in names:
-            rc = _send_to_single_worker(name, content, args)
-            results.append((name, rc))
-
-        # Summary
-        sent = [n for n, rc in results if rc == 0]
-        failed = [n for n, rc in results if rc != 0]
-        if sent:
-            print(f"Broadcast sent to {len(sent)} workers: {', '.join(sent)}")
-        if failed:
-            print(
-                f"Failed for {len(failed)} workers: {', '.join(failed)}",
-                file=sys.stderr,
-            )
-        sys.exit(1 if failed and not sent else 0)
-
-    # Single-target mode
     if not args.name:
         print(
-            "Error: worker name required (or use --broadcast with filters)",
+            "Error: worker name required (use `claude-worker broadcast` "
+            "for multi-target delivery)",
             file=sys.stderr,
         )
         sys.exit(1)
 
+    # Broadcast is never True here post-D95 — the parser no longer sets it
+    # on `thread send`. Belt-and-braces: ensure the namespace attr exists
+    # for _send_to_single_worker's getattr checks.
+    if not hasattr(args, "broadcast"):
+        args.broadcast = False
+
     rc = _send_to_single_worker(args.name, content, args)
     _print_worker_status(args.name)
     sys.exit(rc)
+
+
+def cmd_broadcast(args: argparse.Namespace) -> None:
+    """Send a message to all workers matching the filter flags.
+
+    Top-level subcommand as of D95 (#075). Self-exclusion: the caller is
+    dropped from the target list if they're a worker themselves.
+    Prints a per-worker summary; exits 0 iff at least one target accepted
+    the message.
+    """
+    args = _reparse_send_flags(args)
+
+    if args.show_response and args.show_full_response:
+        print(
+            "Error: --show-response and --show-full-response are mutually exclusive",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if args.message:
+        content = " ".join(args.message)
+    else:
+        content = sys.stdin.read()
+
+    if not content.strip():
+        print("Error: empty message", file=sys.stderr)
+        sys.exit(1)
+
+    targets = _collect_filtered_workers(args)
+
+    self_name = _find_worker_by_ancestry()
+    if self_name:
+        targets = [w for w in targets if w["name"] != self_name]
+
+    if not targets:
+        print("No matching workers found for broadcast", file=sys.stderr)
+        sys.exit(1)
+
+    # Ensure the flag shape expected by _send_to_single_worker is present.
+    args.broadcast = True
+    args.name = None  # unused by _send_to_single_worker
+
+    names = [w["name"] for w in targets]
+    results: list[tuple[str, int]] = []
+    for name in names:
+        rc = _send_to_single_worker(name, content, args)
+        results.append((name, rc))
+
+    sent = [n for n, rc in results if rc == 0]
+    failed = [n for n, rc in results if rc != 0]
+    if sent:
+        print(f"Broadcast sent to {len(sent)} workers: {', '.join(sent)}")
+    if failed:
+        print(
+            f"Failed for {len(failed)} workers: {', '.join(failed)}",
+            file=sys.stderr,
+        )
+    sys.exit(1 if failed and not sent else 0)
 
 
 def _resolve_read_thread_id(args: argparse.Namespace) -> str:
@@ -2200,7 +2235,7 @@ def _show_worker_response(
         # re-running the suggested command produces the same output.
         print(
             f"\nTo see this window again or expand: "
-            f"claude-worker read {name} "
+            f"claude-worker thread read {name} "
             f"--since {first_uuid[:UUID_SHORT_LENGTH]} "
             f"--until {last_uuid[:UUID_SHORT_LENGTH]} "
             f"--exclude-user"
@@ -2568,7 +2603,7 @@ def _render_read_output(
         )
         print(
             f"\nTo see NEW messages after this point: "
-            f"claude-worker read {args.name} "
+            f"claude-worker thread read {args.name} "
             f"--since {last_uuid[:UUID_SHORT_LENGTH]}{exclude_user_flag}"
         )
     # Save read marker if --mark was passed
@@ -2823,10 +2858,28 @@ def _read_follow(log_file, config, formatter, since_uuid, since_ts, args):
 
 
 def cmd_wait_for_turn(args: argparse.Namespace) -> None:
-    """Block until claude finishes its turn or the session ends."""
-    resolve_worker(args.name)  # validate worker exists
+    """Block until a turn boundary or a new thread message (D95, #075).
+
+    Dual semantics based on the positional arg:
+      - ``pair-<a>-<b>`` / ``chat-<id>`` → wait for the next message on
+        that thread (blocks until a new entry appears in its JSONL).
+      - any other value → treat as a worker name; wait for that
+        worker's next turn boundary (legacy ``wait-for-turn``).
+    """
+    target = args.name
+    if target.startswith("pair-") or target.startswith("chat-"):
+        # Thread-id mode: watch the thread until the first new message.
+        rc = _watch_thread(
+            target,
+            since_id=None,
+            timeout=getattr(args, "timeout", None),
+            exit_on_first_new=True,
+        )
+        sys.exit(rc)
+
+    resolve_worker(target)  # validate worker exists
     rc = _wait_for_turn(
-        args.name,
+        target,
         timeout=args.timeout,
         after_uuid=getattr(args, "after_uuid", None),
         settle=args.settle,
@@ -3444,58 +3497,6 @@ def cmd_replaceme(args: argparse.Namespace) -> None:
         except OSError:
             pass
         sys.exit(1)
-
-
-def cmd_reply(args: argparse.Namespace) -> None:
-    """Send a reply to a worker by appending to the pair thread (D88).
-
-    Post-Phase-3, reply writes to the shared pair thread (``pair-<a>-<b>``)
-    between sender and recipient. The recipient's manager thread monitor
-    notices the append and delivers a ``[system:new-message]`` notification
-    via FIFO. No status gate — the thread append persists even if the
-    worker is busy or temporarily dead, so the notification fires once the
-    worker's next poll cycle sees the new message.
-
-    Designed for the callback pattern: a worker sends a question with
-    ``[reply-to:<name>]``, the recipient calls ``claude-worker reply
-    <name> "answer"`` when ready.
-    """
-    from claude_worker.thread_store import (
-        append_message,
-        ensure_thread,
-        pair_thread_id,
-    )
-
-    if args.message:
-        content = " ".join(args.message)
-    else:
-        content = sys.stdin.read()
-
-    if not content.strip():
-        print("Error: empty reply message", file=sys.stderr)
-        sys.exit(1)
-
-    sender = args.sender or _find_worker_by_ancestry() or _resolve_sender()
-    recipient = args.name
-
-    thread_id = pair_thread_id(sender, recipient)
-    participants = sorted([sender, recipient])
-    try:
-        ensure_thread(thread_id, participants)
-        append_message(
-            thread_id,
-            sender=sender,
-            content=content,
-            tags=["reply"],
-        )
-    except Exception as exc:
-        print(
-            f"Error: could not write reply to thread '{thread_id}': {exc}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    print(f"Reply appended to thread '{thread_id}' (from: {sender})")
 
 
 def cmd_notify(args: argparse.Namespace) -> None:
@@ -4335,7 +4336,7 @@ def _repl_stream_new_messages(
 def _repl_print_last_turn(name: str) -> None:
     """Print the worker's last-turn context at REPL entry.
 
-    Equivalent to ``claude-worker read NAME --last-turn`` (including
+    Equivalent to ``claude-worker thread read NAME --last-turn`` (including
     user messages — this is for a human reading the screen, not an
     orchestrator). Silent when the worker has no prior context.
     """
@@ -5099,17 +5100,19 @@ def _watch_thread(
     thread_id: str,
     since_id: str | None = None,
     timeout: float | None = None,
+    exit_on_first_new: bool = False,
 ) -> int:
     """Blocking tail on a thread JSONL. Prints new messages as they arrive.
 
     Returns:
-      0 on Ctrl-C / EOF (graceful)
+      0 on Ctrl-C / EOF / after the first new message if
+        ``exit_on_first_new`` is True (graceful)
       1 if the thread file does not exist
       2 on timeout (when ``timeout`` is set and elapses with no new
         messages appearing)
 
-    Used by ``claude-worker thread watch`` to give interactive (non-worker)
-    sessions a cheap notification mechanism for replies (D94, #076).
+    Used by ``claude-worker thread watch`` (continuous) and
+    ``claude-worker thread wait`` (one-shot) — see D94, D95, #076, #075.
     """
     from claude_worker.thread_store import _threads_dir
 
@@ -5160,6 +5163,9 @@ def _watch_thread(
             except OSError:
                 pass
 
+            if had_new and exit_on_first_new:
+                return 0
+
             if deadline is not None:
                 if had_new:
                     # Reset the deadline on activity — `--timeout` is the
@@ -5196,30 +5202,17 @@ def cmd_thread(args: argparse.Namespace) -> None:
             print(f"  participants: {', '.join(participants)}")
 
     elif action == "send":
-        content = " ".join(args.message) if args.message else sys.stdin.read().strip()
-        if not content:
-            print("Error: no message content", file=sys.stderr)
-            sys.exit(1)
-        # Determine sender from env
-        sender = os.environ.get("CW_WORKER_NAME", "unknown")
-        msg = append_message(args.thread_id, sender, content)
-        print(f"[{msg['timestamp']}] {sender}: {content[:80]}")
+        # Post-D95: `thread send` is the full-featured worker send.
+        cmd_send(args)
 
     elif action == "read":
-        messages = read_messages(
-            args.thread_id,
-            since_id=args.since,
-            limit=args.n,
-        )
-        if not messages:
-            print("No messages.")
-            return
-        for msg in messages:
-            ts = msg.get("timestamp", "?")
-            sender = msg.get("sender", "?")
-            content = msg.get("content", "")
-            mid = msg.get("id", "?")[:8]
-            print(f"[{ts} {mid}] {sender}: {content}")
+        # Post-D95: `thread read` is the full-featured worker read.
+        cmd_read(args)
+
+    elif action == "wait":
+        # Post-D95: `thread wait` replaces `wait-for-turn` with dual
+        # semantics (worker-name vs thread-id).
+        cmd_wait_for_turn(args)
 
     elif action == "list":
         threads = list_threads(status=getattr(args, "status", None))
@@ -5248,7 +5241,7 @@ def cmd_thread(args: argparse.Namespace) -> None:
 
     else:
         print(
-            "Usage: claude-worker thread {create|send|read|list|close|watch}",
+            "Usage: claude-worker thread {create|send|read|wait|list|close|watch}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -5260,14 +5253,14 @@ examples:
   claude-worker start --name researcher --prompt "You are a research assistant"
 
   # Read the response
-  claude-worker read researcher --last-turn
+  claude-worker thread read researcher --last-turn
 
   # Send a message — blocks until claude responds
-  claude-worker send researcher "summarize the architecture of this repo"
-  claude-worker read researcher --last-turn
+  claude-worker thread send researcher "summarize the architecture of this repo"
+  claude-worker thread read researcher --last-turn
 
   # Follow output in real-time
-  claude-worker read researcher --follow
+  claude-worker thread read researcher --follow
 
   # List all workers
   claude-worker list
@@ -5279,7 +5272,7 @@ examples:
   claude-worker tokens researcher
 
   # Or just the current context window as a scriptable one-liner
-  claude-worker read researcher --context
+  claude-worker thread read researcher --context
 
   # Stop and clean up
   claude-worker stop researcher
@@ -5290,7 +5283,10 @@ examples:
     -- --model sonnet
 
   # Pipe a message via stdin
-  cat question.txt | claude-worker send researcher
+  cat question.txt | claude-worker thread send researcher
+
+  # Broadcast to all waiting workers
+  claude-worker broadcast --status waiting "heads up: CI is down"
 
   # Start without blocking
   claude-worker start --name bg-worker --prompt "you are a helper" --background
@@ -5391,222 +5387,70 @@ def main():
         help="Additional args passed to claude (use -- before these)",
     )
 
-    # -- send --
-    p_send = sub.add_parser("send", help="Send a message to a worker")
-    p_send.add_argument(
-        "name",
-        nargs="?",
-        default=None,
-        help="Worker name (omit when using --broadcast)",
+    # -- broadcast -- (top-level per D95, extracted from `send --broadcast`)
+    p_broadcast = sub.add_parser(
+        "broadcast",
+        help="Send a message to all workers matching filter flags",
     )
-    p_send.add_argument(
+    p_broadcast.add_argument(
         "message", nargs="*", help="Message text (reads stdin if omitted)"
     )
-    p_send.add_argument(
-        "--broadcast",
-        action="store_true",
-        help="Send to all workers matching filter flags (--role, --status, --alive, --cwd)",
-    )
-    p_send.add_argument(
+    p_broadcast.add_argument(
         "--role",
         choices=["pm", "tl", "worker"],
-        help="Filter targets by identity role (broadcast only)",
+        help="Filter targets by identity role",
     )
-    p_send.add_argument(
+    p_broadcast.add_argument(
         "--status",
         choices=["working", "waiting", "dead", "starting"],
-        help="Filter targets by status (broadcast only)",
+        help="Filter targets by status",
     )
-    p_send.add_argument(
+    p_broadcast.add_argument(
         "--alive",
         action="store_true",
-        help="Exclude dead workers from broadcast targets",
+        help="Exclude dead workers from targets",
     )
-    p_send.add_argument(
+    p_broadcast.add_argument(
         "--cwd",
         dest="cwd_filter",
         metavar="PATH",
-        help="Filter targets by CWD prefix (broadcast only)",
+        help="Filter targets by CWD prefix",
     )
-    p_send.add_argument(
+    p_broadcast.add_argument(
         "--queue",
         action="store_true",
-        help="Send even if worker is busy; embed a correlation ID and wait "
-        "for the specific tagged response",
+        help="Embed a correlation ID and wait for per-target tagged responses",
     )
-    p_send.add_argument(
+    p_broadcast.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print the JSON envelope that would be sent (with chat/queue "
-        "tags applied) without writing to the FIFO. Zero side effects.",
+        help="Print what would be sent without writing to any thread",
     )
-    p_send.add_argument(
+    p_broadcast.add_argument(
         "--verbose",
         action="store_true",
-        help="Print the JSON envelope to stderr before sending. "
-        "The message is still sent normally.",
+        help="Print each per-target envelope to stderr before sending",
     )
-    p_send.add_argument(
+    p_broadcast.add_argument(
         "--show-response",
         action="store_true",
-        help="After the turn completes, print the assistant's response "
-        "(equivalent to `read --last-turn`)",
+        help="After each target's turn completes, print its response",
     )
-    p_send.add_argument(
+    p_broadcast.add_argument(
         "--show-full-response",
         action="store_true",
-        help="After the turn completes, print everything new since the send "
-        "(equivalent to `read --since <marker>`)",
+        help="After each target's turn completes, print everything new",
     )
-    p_send_chat = p_send.add_mutually_exclusive_group()
-    p_send_chat.add_argument(
+    p_broadcast_chat = p_broadcast.add_mutually_exclusive_group()
+    p_broadcast_chat.add_argument(
         "--chat",
         metavar="ID",
-        help="Prepend [chat:<id>] to the message (PM workers only). "
-        "Auto-detected from CLAUDE_SESSION_UUID when running under "
-        "CLAUDECODE=1 against a PM worker.",
+        help="Prepend [chat:<id>] to every sent message (PM targets only)",
     )
-    p_send_chat.add_argument(
+    p_broadcast_chat.add_argument(
         "--all-chats",
         action="store_true",
-        help="Bypass any automatic chat tagging (no-op for non-PM workers)",
-    )
-
-    # -- read --
-    p_read = sub.add_parser("read", help="Read worker output")
-    p_read.add_argument("name", help="Worker name")
-    p_read.add_argument("--follow", "-f", action="store_true", help="Tail the log")
-    p_read.add_argument("--since", help="Show messages after this UUID or timestamp")
-    p_read.add_argument(
-        "--log",
-        action="store_true",
-        help=(
-            "Read the raw claude session log instead of the thread. "
-            "Debugging escape hatch — threads are the default (post-D88)."
-        ),
-    )
-    p_read.add_argument(
-        "--thread",
-        metavar="ID",
-        help=(
-            "Override auto-detected thread ID (e.g. 'pair-pm-tl' or "
-            "'chat-abc'). Without this, read auto-detects the pair thread "
-            "between the invoker and the target worker."
-        ),
-    )
-    p_read.add_argument(
-        "--until", help="Stop showing messages at this UUID (exclusive)"
-    )
-    p_read.add_argument(
-        "--new",
-        action="store_true",
-        help="Show only messages after the last --mark. Per-consumer via "
-        "CLAUDE_SESSION_UUID or --chat. Mutually exclusive with --since.",
-    )
-    p_read.add_argument(
-        "--mark",
-        action="store_true",
-        help="After displaying, save the last-seen UUID as a read marker. "
-        "Use with --new to track 'unread' messages per consumer.",
-    )
-    p_read.add_argument(
-        "--last-turn",
-        action="store_true",
-        help="Show the most recent conversational exchange: walks backwards "
-        "from the end of the log until at least one user-input AND one "
-        "assistant message have been seen, then shows everything from the "
-        "earlier of the two to the end",
-    )
-    p_read.add_argument(
-        "--exclude-user",
-        action="store_true",
-        help="Hide user-input messages from the display (default shows them)",
-    )
-    p_read.add_argument(
-        "-n",
-        type=int,
-        metavar="N",
-        help="Show only the last N messages",
-    )
-    p_read.add_argument(
-        "--count",
-        action="store_true",
-        help="Print the number of messages instead of content",
-    )
-    p_read.add_argument(
-        "--summary",
-        action="store_true",
-        help="Show one-line summary per message: [uuid] ROLE: preview",
-    )
-    p_read.add_argument(
-        "--context",
-        action="store_true",
-        help="Print the current context window usage (e.g. '77%% (776k/1M)') "
-        "and exit. Bypasses all other read flags.",
-    )
-    p_read.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Include tool calls, tool results, and thinking blocks",
-    )
-    p_read.add_argument(
-        "--color",
-        action="store_true",
-        help="Force ANSI color output",
-    )
-    p_read.add_argument(
-        "--no-color",
-        action="store_true",
-        help="Force plain text output (default when CLAUDECODE is set)",
-    )
-    p_read_chat = p_read.add_mutually_exclusive_group()
-    p_read_chat.add_argument(
-        "--chat",
-        metavar="ID",
-        help="Filter to messages containing [chat:<id>] (PM workers only). "
-        "Auto-detected from CLAUDE_SESSION_UUID when running under "
-        "CLAUDECODE=1 against a PM worker.",
-    )
-    p_read_chat.add_argument(
-        "--all-chats",
-        action="store_true",
-        help="Show all chats — bypass automatic chat filtering",
-    )
-
-    # -- wait-for-turn --
-    p_wait = sub.add_parser(
-        "wait-for-turn", help="Block until claude is ready for input"
-    )
-    p_wait.add_argument("name", help="Worker name")
-    p_wait.add_argument("--timeout", type=float, help="Timeout in seconds")
-    p_wait.add_argument(
-        "--after-uuid",
-        metavar="UUID",
-        help=(
-            "Only consider log entries appearing AFTER this UUID. Pass the "
-            "last log UUID captured before sending, so wait-for-turn "
-            "doesn't match the prior turn's `result` message before the "
-            "new input reaches claude."
-        ),
-    )
-    p_wait.add_argument(
-        "--settle",
-        type=float,
-        default=DEFAULT_SETTLE_SECONDS,
-        metavar="SECONDS",
-        help=(
-            f"After detecting a turn boundary, wait this many seconds and "
-            f"confirm no new messages appeared (default: {DEFAULT_SETTLE_SECONDS}). "
-            f"Prevents false positives when the worker briefly idles between "
-            f"internal subagent dispatches. Set to 0 to disable."
-        ),
-    )
-    p_wait.add_argument(
-        "--chat",
-        metavar="TAG",
-        help="Only fire when the turn's assistant content contains [chat:<tag>]. "
-        "Skips untagged turns and turns for other consumers.",
+        help="Bypass automatic chat tagging",
     )
 
     # -- list --
@@ -5673,20 +5517,6 @@ def main():
         action="store_true",
         help="Skip wrap-up validation checks (handoff file, turn state). "
         "Use when the worker is stuck or the human is supervising.",
-    )
-
-    # -- reply --
-    p_reply = sub.add_parser(
-        "reply",
-        help="Send a reply to a worker via the thread primitive (persistent)",
-    )
-    p_reply.add_argument("name", help="Recipient worker name")
-    p_reply.add_argument(
-        "message", nargs="*", help="Reply text (reads stdin if omitted)"
-    )
-    p_reply.add_argument(
-        "--sender",
-        help="Sender identity (auto-detected from PID ancestry if omitted)",
     )
 
     # -- notify --
@@ -5919,14 +5749,172 @@ def main():
         help="Explicit thread ID (auto-generated if omitted)",
     )
 
-    p_thread_send = thread_sub.add_parser("send", help="Send a message to a thread")
-    p_thread_send.add_argument("thread_id", help="Thread ID")
-    p_thread_send.add_argument("message", nargs="*", help="Message text")
+    # thread send — full-flag send (post-D95, replaces top-level `send`)
+    p_thread_send = thread_sub.add_parser(
+        "send", help="Send a message to a worker (or known thread participant)"
+    )
+    p_thread_send.add_argument(
+        "name",
+        nargs="?",
+        default=None,
+        help="Worker name (or known thread participant)",
+    )
+    p_thread_send.add_argument(
+        "message", nargs="*", help="Message text (reads stdin if omitted)"
+    )
+    p_thread_send.add_argument(
+        "--queue",
+        action="store_true",
+        help="Send even if worker is busy; embed a correlation ID and wait "
+        "for the specific tagged response",
+    )
+    p_thread_send.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the JSON envelope that would be sent without writing",
+    )
+    p_thread_send.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print the JSON envelope to stderr before sending",
+    )
+    p_thread_send.add_argument(
+        "--show-response",
+        action="store_true",
+        help="After the turn completes, print the assistant's response",
+    )
+    p_thread_send.add_argument(
+        "--show-full-response",
+        action="store_true",
+        help="After the turn completes, print everything new since the send",
+    )
+    p_thread_send_chat = p_thread_send.add_mutually_exclusive_group()
+    p_thread_send_chat.add_argument(
+        "--chat",
+        metavar="ID",
+        help="Prepend [chat:<id>] to the message (PM workers only)",
+    )
+    p_thread_send_chat.add_argument(
+        "--all-chats",
+        action="store_true",
+        help="Bypass any automatic chat tagging (no-op for non-PM workers)",
+    )
 
-    p_thread_read = thread_sub.add_parser("read", help="Read messages from a thread")
-    p_thread_read.add_argument("thread_id", help="Thread ID")
-    p_thread_read.add_argument("--since", help="Show messages after this message ID")
-    p_thread_read.add_argument("-n", type=int, help="Show last N messages")
+    # thread read — full-flag read (post-D95, replaces top-level `read`)
+    p_thread_read = thread_sub.add_parser(
+        "read", help="Read worker output (thread or raw log)"
+    )
+    p_thread_read.add_argument("name", help="Worker name")
+    p_thread_read.add_argument(
+        "--follow", "-f", action="store_true", help="Tail the log"
+    )
+    p_thread_read.add_argument(
+        "--since", help="Show messages after this UUID or timestamp"
+    )
+    p_thread_read.add_argument(
+        "--log",
+        action="store_true",
+        help="Read the raw claude session log instead of the thread. "
+        "Debugging escape hatch — threads are the default (post-D88).",
+    )
+    p_thread_read.add_argument(
+        "--thread",
+        metavar="ID",
+        help="Override auto-detected thread ID (e.g. 'pair-pm-tl' or 'chat-abc')",
+    )
+    p_thread_read.add_argument(
+        "--until", help="Stop showing messages at this UUID (exclusive)"
+    )
+    p_thread_read.add_argument(
+        "--new",
+        action="store_true",
+        help="Show only messages after the last --mark (per-consumer)",
+    )
+    p_thread_read.add_argument(
+        "--mark",
+        action="store_true",
+        help="After displaying, save the last-seen UUID as a read marker",
+    )
+    p_thread_read.add_argument(
+        "--last-turn",
+        action="store_true",
+        help="Show the most recent conversational exchange",
+    )
+    p_thread_read.add_argument(
+        "--exclude-user",
+        action="store_true",
+        help="Hide user-input messages from the display (default shows them)",
+    )
+    p_thread_read.add_argument(
+        "-n", type=int, metavar="N", help="Show only the last N messages"
+    )
+    p_thread_read.add_argument(
+        "--count",
+        action="store_true",
+        help="Print the number of messages instead of content",
+    )
+    p_thread_read.add_argument(
+        "--summary",
+        action="store_true",
+        help="Show one-line summary per message: [uuid] ROLE: preview",
+    )
+    p_thread_read.add_argument(
+        "--context",
+        action="store_true",
+        help="Print current context window usage (e.g. '77%% (776k/1M)') and exit",
+    )
+    p_thread_read.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Include tool calls, tool results, and thinking blocks",
+    )
+    p_thread_read.add_argument(
+        "--color", action="store_true", help="Force ANSI color output"
+    )
+    p_thread_read.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Force plain text output (default when CLAUDECODE is set)",
+    )
+    p_thread_read_chat = p_thread_read.add_mutually_exclusive_group()
+    p_thread_read_chat.add_argument(
+        "--chat",
+        metavar="ID",
+        help="Filter to messages containing [chat:<id>] (PM workers only)",
+    )
+    p_thread_read_chat.add_argument(
+        "--all-chats",
+        action="store_true",
+        help="Show all chats — bypass automatic chat filtering",
+    )
+
+    # thread wait — dual-semantic wait (post-D95, replaces top-level `wait-for-turn`)
+    p_thread_wait = thread_sub.add_parser(
+        "wait",
+        help="Block until a turn boundary (worker) or next thread message (thread-id)",
+    )
+    p_thread_wait.add_argument(
+        "name", help="Worker name, or thread-id (prefix 'pair-' or 'chat-')"
+    )
+    p_thread_wait.add_argument("--timeout", type=float, help="Timeout in seconds")
+    p_thread_wait.add_argument(
+        "--after-uuid",
+        metavar="UUID",
+        help="Ignore log entries up to and including this UUID",
+    )
+    p_thread_wait.add_argument(
+        "--settle",
+        type=float,
+        default=DEFAULT_SETTLE_SECONDS,
+        metavar="SECONDS",
+        help=f"Settle window after turn boundary (default: {DEFAULT_SETTLE_SECONDS})",
+    )
+    p_thread_wait.add_argument(
+        "--chat",
+        metavar="TAG",
+        help="Only fire when assistant content contains [chat:<tag>]",
+    )
 
     p_thread_list = thread_sub.add_parser("list", help="List all threads")
     p_thread_list.add_argument("--status", help="Filter by status (open, closed)")
@@ -5954,15 +5942,12 @@ def main():
 
     handlers = {
         "start": cmd_start,
-        "send": cmd_send,
-        "read": cmd_read,
-        "wait-for-turn": cmd_wait_for_turn,
+        "broadcast": cmd_broadcast,
         "list": cmd_list,
         "ls": cmd_list,
         "stop": cmd_stop,
         "replaceme": cmd_replaceme,
         "notify": cmd_notify,
-        "reply": cmd_reply,
         "install-hook": cmd_install_hook,
         "repl": cmd_repl,
         "tokens": cmd_tokens,

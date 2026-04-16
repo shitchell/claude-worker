@@ -135,7 +135,7 @@ When the TL briefs an implementation worker:
 3. **GVP context.** "This relates to decision D-15; don't change
    the approach described there without flagging it."
 4. **File-based for long briefs.** Write the brief to a file, pipe
-   via stdin: `cat brief.md | claude-worker send worker-name`.
+   via stdin: `cat brief.md | claude-worker thread send worker-name`.
    Never use heredocs for briefs with backticks or special chars.
 5. **Explicit boundaries.** "Only modify files in src/auth/ and
    tests/test_auth.py. Don't touch the API surface."

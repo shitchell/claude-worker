@@ -2085,3 +2085,69 @@ observations:
       - file: tests/test_interactive_messaging.py
         identifier: TestWatchThread
         role: tests
+  - id: D95
+    name: consolidate-messaging-cli
+    rationale: >
+      Clean-break consolidation of the messaging CLI surface under the
+      `thread` subcommand. Removes four top-level subcommands (`send`,
+      `read`, `wait-for-turn`, `reply`) and replaces them with
+      `thread send`, `thread read`, `thread wait` — all routed to the
+      existing cmd_send/cmd_read/cmd_wait_for_turn handlers. Extracts
+      `broadcast` to a top-level subcommand (formerly `send --broadcast`)
+      because multi-target delivery is not tied to any single thread.
+      Removes `reply` entirely — redundant with `thread send` after the
+      D93 global thread storage made pair routing deterministic and
+      always-resolvable.
+
+      `thread wait` has dual semantics based on the positional argument:
+      if it matches `pair-*` or `chat-*` it waits for the next message
+      on that thread (reusing _watch_thread with exit_on_first_new=True);
+      otherwise it waits for the named worker's turn boundary (legacy
+      wait-for-turn semantics).
+
+      Internal cmd_* function names are unchanged (cosmetic rename was
+      explicitly scoped out per PM direction). Phase A only — future
+      phases may rename internals.
+    alternatives: >
+      1. Keep `send` as a sugar alias for `thread send` — rejected:
+      human directive "NO backwards compat, NO aliases, NO deprecation".
+      P13 clean-break-over-backwards-compat applies.
+      2. Put `broadcast` under `thread broadcast` — considered and
+      rejected: multi-target broadcasting doesn't belong to any single
+      thread, and top-level keeps the common case short.
+      3. Full internal rename (cmd_send → cmd_thread_send etc.) —
+      rejected: cosmetic churn with no functional benefit, would widen
+      the diff and the test blast radius considerably.
+    tags: [messaging, cli, refactor]
+    maps_to: [project:V1, project:P13, project:D89]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: cmd_send
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_broadcast
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_wait_for_turn
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_thread
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _watch_thread
+        role: implements
+      - file: claude_worker/ticket_watcher.py
+        identifier: _notify_workers
+        role: consumes
+      - file: README.md
+        identifier: thread send
+        role: documents
+      - file: README.md
+        identifier: thread read
+        role: documents
+      - file: README.md
+        identifier: thread wait
+        role: documents
+      - file: README.md
+        identifier: broadcast
+        role: documents
