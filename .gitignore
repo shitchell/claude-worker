@@ -9,8 +9,6 @@ build/
 # ends up with this directory. Contents are logs of chats and actions
 # the worker observed — environment-specific, potentially sensitive, and
 # not something that should travel in git.
-# .cwork/roles/ is the canonical name (see D62, D67).
-# .claude-worker-pm/ and .cwork/pm/ are legacy names kept for compat.
+# .cwork/roles/ is the canonical name (see D62, D67, D99).
 .claude-worker-pm/
-.cwork/pm/
 .cwork/roles/

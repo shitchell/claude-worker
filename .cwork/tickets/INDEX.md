@@ -80,11 +80,11 @@
 | 076 | interactive-session-messaging | done | **high** | lead | human | repl:18765-pts33 | - | human |
 | 077 | non-blocking-repl | done | medium-high | lead | human | repl:30491-pts33 | - | human |
 | 078 | ls-read-incorrect-messages | done | medium-high | - | human | repl:30491-pts33 | - | human |
-| 079 | migrate-old-role-dirs | todo | medium | - | human | repl:20333-pts33 | - | pm |
+| 079 | migrate-old-role-dirs | review | medium | lead | human | repl:20333-pts33 | - | pm |
 | 080 | replace-task-with-ephemeral-workers | done | **high** | lead | human | repl:20333-pts33 | - | human |
-| 081 | worker-tool-call-visibility | review | medium-high | lead | human | repl:20333-pts33 | - | human |
+| 081 | worker-tool-call-visibility | done | medium-high | lead | human | repl:20333-pts33 | - | human |
 | 082 | stop-wrapup-test-flakiness | todo | medium | - | PM | - | - | pm |
-| 083 | subagents-subcommand | draft | medium | - | TL | - | 081 | pm |
+| 083 | subagents-subcommand | todo | medium | - | TL | - | - | pm |
 
 ## Done (migrated from future-queries)
 

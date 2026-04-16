@@ -2351,3 +2351,68 @@ observations:
       - file: tests/test_tool_call_visibility.py
         identifier: TestLsIntegration
         role: tests
+  - id: D99
+    name: migrate-legacy-role-dirs-pm-tl
+    rationale: >
+      Housekeeping merge of legacy PM and TL role directories into the
+      canonical .cwork/roles/ layout (per D62, D67). Before this
+      migration, three layouts coexisted on disk:
+      - .cwork/pm/ (legacy, populated with 20+ observations,
+        30+ ideas, 6 handoffs, 3 design docs, 3 chat transcripts,
+        54KB LOG.md)
+      - .cwork/roles/pm/ (canonical, partially populated)
+      - .cwork/technical-lead/ (legacy, populated with LOG.md and
+        1 handoff)
+      - .cwork/roles/tl/ (canonical, partially populated)
+
+      The migration script at claude_worker/migrations/001-roles-
+      directory-rename.sh didn't handle the split-world case
+      (partial migration). This decision records the manual
+      reconciliation: content from legacy paths was moved to
+      canonical paths, preserving everything. The legacy PM LOG.md
+      was renamed to LOG.archive.md alongside the canonical LOG.md
+      (both files preserved; overlapping timestamps made
+      interleaving unsafe; readers can read either). PM's personal
+      GVP library was placed at .cwork/roles/pm/gvp/library/
+      observations.yaml — the canonical location referenced by
+      pm.md's `cairn export --library .cwork/roles/pm/gvp/` form.
+
+      .gitignore was updated to drop the obsolete `.cwork/pm/` rule
+      (the path can no longer exist) and to reference D99 in the
+      comment trail.
+
+      No code changes — purely filesystem reorganization. The
+      existing migration script remains as-is; its idempotency
+      guards correctly skip this project now that the legacy dirs
+      are gone.
+    alternatives: >
+      1. Extend migration script 001 to handle the partial-merge
+      case — rejected: migration scripts are meant to run once, and
+      extending 001 post-hoc violates its idempotency contract. A
+      new script (002) could have done this but the manual merge
+      ran faster and was reviewable in the commit diff.
+      2. Interleave old and new LOG.md entries chronologically —
+      rejected: timestamps overlap by ~1h (both PM sessions logged
+      during the transition). Rename-as-archive is safer and
+      preserves the distinct operator histories.
+      3. Drop the legacy LOG.md entirely — rejected: 54KB of PM
+      action history from 2026-04-08 → 2026-04-15 is valuable
+      context; preserving as LOG.archive.md costs nothing.
+    tags: [housekeeping, migration, cwork]
+    maps_to: [project:D62, project:D67]
+    refs:
+      - file: .cwork/roles/pm/LOG.archive.md
+        identifier: legacy PM LOG archive
+        role: documents
+      - file: .cwork/roles/pm/gvp/library/observations.yaml
+        identifier: PM observations library (relocated)
+        role: documents
+      - file: .cwork/roles/tl/LOG.md
+        identifier: TL action log (merged)
+        role: documents
+      - file: .gitignore
+        identifier: .cwork/roles/
+        role: documents
+      - file: claude_worker/migrations/001-roles-directory-rename.sh
+        identifier: idempotent migration script (no change)
+        role: depends-on
