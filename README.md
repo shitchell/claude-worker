@@ -87,7 +87,9 @@ claude-worker start [--name NAME] [--cwd DIR] [--prompt PROMPT]
                     [--background] [--foreground]
                     [--show-response | --show-full-response]
                     [--identity NAME | --pm | --team-lead]
-                    [--no-permission-hook] [-- CLAUDE_ARGS...]
+                    [--no-permission-hook]
+                    [--ephemeral] [--ephemeral-idle-timeout SECONDS]
+                    [-- CLAUDE_ARGS...]
 ```
 
 Start a new worker. Forks a background manager process that handles the claude
@@ -124,6 +126,16 @@ subprocess lifecycle.
   identity for code review and delegation. Tags `[TL]` in `ls` output.
 - `--no-permission-hook` — disable the PreToolUse permission-grant hook
   (useful for tests or debugging).
+- `--ephemeral` — mark the worker as short-lived (D97, #080). The manager
+  auto-reaps the worker after `--ephemeral-idle-timeout` seconds of log
+  inactivity (default 300s). Use for long-running delegation instead of
+  Claude Code's Task tool — the delegating worker stays responsive
+  because `claude-worker start` is non-blocking, whereas Task blocks
+  the caller's message queue until it returns.
+- `--ephemeral-idle-timeout SECONDS` — override the default 300s idle
+  window. Only meaningful with `--ephemeral`. Reaping is graceful: the
+  manager sends a `[system:ephemeral-timeout]` wrap-up message, waits
+  up to 30s for the worker to finish its last turn, then SIGTERM.
 - Extra args after `--` are passed through to `claude` (e.g.
   `claude-worker start --name fast -- --model haiku`).
 

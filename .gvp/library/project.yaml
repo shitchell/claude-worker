@@ -2219,3 +2219,78 @@ observations:
       - file: tests/test_repl_tui.py
         identifier: TestTuiSmoke
         role: tests
+  - id: D97
+    name: ephemeral-worker-reaping
+    rationale: >
+      Adds `--ephemeral` / `--ephemeral-idle-timeout SECONDS` flags to
+      `claude-worker start`. The manager's existing 30s poll loop now
+      also runs a reaper: when the ephemeral sentinel is present, it
+      checks log mtime against the idle timeout (default 300s) and
+      terminates idle workers. Cleanup is graceful — a
+      `[system:ephemeral-timeout]` user-message is injected via FIFO
+      as a wrap-up signal, the manager waits up to 30s for the turn
+      to complete, then SIGTERMs the claude subprocess.
+
+      This gives PM/TL workers an alternative to Claude Code's Task
+      tool for long-running delegation. The Task tool blocks the
+      calling worker's message queue for the tool-call duration
+      (OBS26) — incoming thread notifications and queued messages
+      pile up behind the blocked tool call. `claude-worker start
+      --ephemeral` is non-blocking (start returns immediately, the
+      spawned worker does its work async), so the caller remains
+      responsive. Ephemeral workers self-reap after idle, so there's
+      no stale-worker cleanup burden.
+
+      Env wiring: `CW_EPHEMERAL=true|false` is set for the worker's
+      environment so hooks and tools can adapt behavior. Parent
+      tracking reuses the existing CW_PARENT_WORKER var (D92).
+
+      Identity guidance: pm.md and technical-lead.md explicitly
+      discourage Task for work > ~30s, pointing at `--ephemeral`
+      instead. No hook-level deny for now (out of scope per PM).
+    alternatives: >
+      1. PreToolUse hook that denies Task tool invocations — rejected:
+      stronger enforcement but brittle (some identities legitimately
+      need Task for quick investigations), and scope is limited by
+      the ticket. Can add later if guidance proves insufficient.
+      2. Immediate SIGTERM (no wrap-up) — rejected: PM spec is
+      graceful with 30s timeout, mirrors existing `claude-worker stop`
+      semantics. Fast cleanup still comes out at < 30s in the common
+      case because the reaper polls proc.poll() and exits early.
+      3. CWD modification tracking as an activity signal — rejected:
+      more file-system traffic, log mtime is already a reliable
+      heuristic (status="working" persists through tool calls per
+      OBS26, so status-based detection is not reliable).
+      4. Separate periodic task process (not piggybacked on the
+      manager loop) — rejected: needless complexity. The 30s poll
+      cadence already exists.
+    tags: [lifecycle, manager, delegation]
+    maps_to: [project:G2, project:V4, project:V6]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: cmd_start
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: _ephemeral_should_reap
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: _read_ephemeral_sentinel
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: _reap_ephemeral_worker
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: _run_manager_forkless
+        role: implements
+      - file: claude_worker/identities/pm.md
+        identifier: Delegation Model
+        role: documents
+      - file: claude_worker/identities/technical-lead.md
+        identifier: Core Responsibilities
+        role: documents
+      - file: tests/test_ephemeral_worker.py
+        identifier: TestShouldReap
+        role: tests
+      - file: tests/test_ephemeral_worker.py
+        identifier: TestEphemeralLifecycle
+        role: tests

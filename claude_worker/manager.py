@@ -32,6 +32,14 @@ REMOTE_CONTROL_TIMEOUT_SECONDS: float = 30.0
 REMOTE_CONTROL_POLL_INTERVAL: float = 0.2
 IDENTITY_DRIFT_CHECK_INTERVAL_SECONDS: float = 30.0
 
+# Ephemeral workers (#080, D97): the reaper runs in the same poll
+# loop as the cwork/thread/periodic checks. Sentinel file at
+# <runtime>/ephemeral contains the idle timeout in seconds.
+EPHEMERAL_SENTINEL_FILENAME: str = "ephemeral"
+EPHEMERAL_CHECK_INTERVAL_SECONDS: float = 30.0
+EPHEMERAL_WRAPUP_TIMEOUT_SECONDS: float = 30.0
+EPHEMERAL_WRAPUP_POLL_INTERVAL: float = 0.5
+
 # Identity drift detection (#066): hash of the source identity.md, written
 # to runtime/identity.hash at copy time. The manager's poll loop compares
 # the stored hash against the current source hash and injects a
@@ -48,6 +56,82 @@ ACTIVE_THREAD_FILE: str = "active-thread"
 # it unset and defaults to the literal "claude" on PATH.
 CLAUDE_BIN_ENV_VAR: str = "CLAUDE_WORKER_CLAUDE_BIN"
 DEFAULT_CLAUDE_BIN: str = "claude"
+
+
+def _read_ephemeral_sentinel(runtime: Path) -> float | None:
+    """Read the ephemeral idle-timeout from ``<runtime>/ephemeral``.
+
+    Returns the timeout in seconds, or ``None`` if the file is absent
+    (worker is not ephemeral). Malformed content falls back to 300s
+    so a corrupt sentinel doesn't leave an ephemeral worker running
+    forever (#080, D97).
+    """
+    path = runtime / EPHEMERAL_SENTINEL_FILENAME
+    if not path.exists():
+        return None
+    try:
+        return float(path.read_text().strip())
+    except (OSError, ValueError):
+        return 300.0
+
+
+def _ephemeral_should_reap(
+    log_path: Path, idle_timeout: float, now: float | None = None
+) -> bool:
+    """Return True if the ephemeral worker's log has been idle > threshold.
+
+    Idle is measured by the log file's mtime. A missing log returns
+    False — the worker is likely still in the `starting` state and
+    shouldn't be reaped before writing anything.
+
+    Extracted for unit testing — pure function, no side effects.
+    """
+    if now is None:
+        now = time.time()
+    try:
+        mtime = log_path.stat().st_mtime
+    except OSError:
+        return False
+    return (now - mtime) > idle_timeout
+
+
+def _reap_ephemeral_worker(
+    name: str,
+    proc: "subprocess.Popen",
+    in_fifo: Path,
+    idle_elapsed_seconds: float,
+) -> None:
+    """Gracefully terminate an ephemeral worker (#080, D97).
+
+    Sends a ``[system:ephemeral-timeout]`` wrap-up notification via
+    the FIFO, waits up to ``EPHEMERAL_WRAPUP_TIMEOUT_SECONDS`` for
+    the worker to complete its last turn (or exit), then SIGTERM.
+    """
+    idle_minutes = max(1, int(idle_elapsed_seconds // 60))
+    notification = (
+        f"[system:ephemeral-timeout] Worker {name} idle {idle_minutes} "
+        f"minutes, terminating."
+    )
+    payload = json.dumps(
+        {"type": "user", "message": {"role": "user", "content": notification}}
+    )
+    try:
+        with open(in_fifo, "w") as f:
+            f.write(payload + "\n")
+            f.flush()
+    except OSError:
+        pass
+
+    deadline = time.monotonic() + EPHEMERAL_WRAPUP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(EPHEMERAL_WRAPUP_POLL_INTERVAL)
+
+    try:
+        proc.terminate()
+    except Exception:
+        pass
 
 
 def _resolve_claude_bin() -> str:
@@ -1163,6 +1247,12 @@ def _run_manager_forkless(
     env["CW_IDENTITY"] = identity
     env["CW_PARENT_WORKER"] = os.environ.get("CW_WORKER_NAME", "")
 
+    # Ephemeral flag (#080, D97) — readable from hooks/tools so they
+    # can tune behavior for short-lived workers.
+    env["CW_EPHEMERAL"] = (
+        "true" if (runtime / EPHEMERAL_SENTINEL_FILENAME).exists() else "false"
+    )
+
     # Extra env vars from identity config
     if extra_env:
         env.update(extra_env)
@@ -1297,6 +1387,10 @@ def _run_manager_forkless(
         last_thread_check = time.monotonic()
         last_periodic_check = time.monotonic()
         last_identity_drift_check = time.monotonic()
+        last_ephemeral_check = time.monotonic()
+        # Read the ephemeral idle-timeout once at startup. None means
+        # the worker is not ephemeral. (#080, D97)
+        ephemeral_idle_timeout = _read_ephemeral_sentinel(runtime)
         # One-shot dedup flag: set when a drift notification has been
         # delivered for the current divergence, cleared when the source
         # hash matches the stored hash again.
@@ -1398,6 +1492,24 @@ def _run_manager_forkless(
                     identity_drift_notified = check_identity_drift(
                         identity, runtime, in_fifo, identity_drift_notified
                     )
+
+                # Ephemeral inactivity reap (#080, D97). Runs only when
+                # the ephemeral sentinel was present at startup.
+                if (
+                    ephemeral_idle_timeout is not None
+                    and now - last_ephemeral_check >= EPHEMERAL_CHECK_INTERVAL_SECONDS
+                ):
+                    last_ephemeral_check = now
+                    if _ephemeral_should_reap(log_path, ephemeral_idle_timeout):
+                        try:
+                            mtime = log_path.stat().st_mtime
+                            idle_elapsed = time.time() - mtime
+                        except OSError:
+                            idle_elapsed = ephemeral_idle_timeout
+                        _reap_ephemeral_worker(name, proc, in_fifo, idle_elapsed)
+                        # The reaper's SIGTERM causes proc.poll() to
+                        # transition; the loop condition catches it
+                        # on the next iteration.
         except (OSError, BrokenPipeError):
             # These are EXPECTED during normal shutdown (claude exits,
             # FIFO closes). Not a panic condition.

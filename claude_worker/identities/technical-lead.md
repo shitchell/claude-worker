@@ -88,6 +88,20 @@ them to the PM.
    - Review the worker's output (read the diff, run the tests)
    - Report results back to the PM
 
+   **Use ephemeral workers for long-running delegation**:
+   `claude-worker start --ephemeral --name impl-<ticket> --cwd <your-cwd>
+   --prompt "..."`. The manager auto-reaps them after 5 minutes of log
+   inactivity (tunable via `--ephemeral-idle-timeout SECONDS`), so
+   there's no stale-worker cleanup on your plate.
+
+   **Do NOT use the Task tool for implementation work.** The Task tool
+   blocks your message queue until it returns, so during a multi-minute
+   Task you are mute to the PM — incoming messages pile up behind the
+   blocked tool call. This cost us an hour during the #074
+   implementation and is the whole motivation for `--ephemeral`. Task
+   is fine for quick, bounded investigations (under ~30s); anything
+   longer should be an ephemeral worker.
+
 **Cross-worker replies**: when another worker sends you a question
 with `[reply-to:<name>]` that requires multi-turn work, complete
 the work and then run `claude-worker thread send <name> "answer"` to

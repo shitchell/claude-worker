@@ -148,6 +148,11 @@ THREAD_WATCH_POLL_INTERVAL_SECONDS: float = 0.5
 REPL_TUI_POLL_INTERVAL_SECONDS: float = 0.1
 REPL_TUI_MAX_OUTPUT_LINES: int = 5000
 
+# Ephemeral workers — auto-reaped after idle (#080, D97)
+EPHEMERAL_IDLE_TIMEOUT_SECONDS: int = 300
+EPHEMERAL_WRAPUP_TIMEOUT_SECONDS: int = 30
+EPHEMERAL_SENTINEL_FILENAME: str = "ephemeral"
+
 # Notifications — human escalation channel
 NOTIFY_COOLDOWN_SECONDS: float = 60.0
 NOTIFY_SUBPROCESS_TIMEOUT_SECONDS: float = 10.0
@@ -1319,6 +1324,10 @@ def cmd_start(args: argparse.Namespace) -> None:
     saved_args = (
         claude_args if not args.resume else claude_args[2:]
     )  # strip --resume <sid>
+    ephemeral = bool(getattr(args, "ephemeral", False))
+    ephemeral_idle_timeout = int(
+        getattr(args, "ephemeral_idle_timeout", EPHEMERAL_IDLE_TIMEOUT_SECONDS)
+    )
     save_worker(
         name,
         cwd=args.cwd or os.getcwd(),
@@ -1326,6 +1335,8 @@ def cmd_start(args: argparse.Namespace) -> None:
         identity=identity or "worker",
         pm=pm_mode,
         team_lead=tl_mode,
+        ephemeral=ephemeral,
+        ephemeral_idle_timeout=ephemeral_idle_timeout,
     )
 
     # Build initial message from prompt-file and/or prompt.
@@ -1379,6 +1390,14 @@ def cmd_start(args: argparse.Namespace) -> None:
     except FileExistsError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # Ephemeral sentinel — written before the manager fork so the
+    # manager's poll loop sees it immediately. Contains the idle
+    # timeout in seconds (D97, #080).
+    if ephemeral:
+        (runtime / EPHEMERAL_SENTINEL_FILENAME).write_text(
+            f"{ephemeral_idle_timeout}\n"
+        )
 
     # Write the identity file into the runtime dir. Must happen BEFORE
     # the fork so the manager subprocess sees it when spawning claude.
@@ -5647,6 +5666,24 @@ def main():
         "pre-authorize Edit/Write/MultiEdit calls that would otherwise "
         "hit the sensitive-file denial. Use this flag to opt out (e.g. "
         "for tests or if the hook itself misbehaves).",
+    )
+    p_start.add_argument(
+        "--ephemeral",
+        action="store_true",
+        help="Mark the worker as short-lived. The manager reaps it after "
+        "--ephemeral-idle-timeout seconds of log inactivity (default "
+        f"{EPHEMERAL_IDLE_TIMEOUT_SECONDS}s). Use instead of Task tool "
+        "for long-running delegation — the delegating worker stays "
+        "responsive because claude-worker start is non-blocking.",
+    )
+    p_start.add_argument(
+        "--ephemeral-idle-timeout",
+        type=int,
+        default=EPHEMERAL_IDLE_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help=f"Idle timeout for --ephemeral workers (default "
+        f"{EPHEMERAL_IDLE_TIMEOUT_SECONDS}s). Only meaningful with "
+        "--ephemeral.",
     )
     p_start.add_argument(
         "claude_args",

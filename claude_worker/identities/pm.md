@@ -525,9 +525,21 @@ You delegate all implementation work. Your tools are:
   tasks. Workers receive a clear brief from you and report back when
   done.
 
-- **Task agents**: for quick, bounded investigations (e.g., "review
-  the GVP library for conflicts with this request"). Use the Task
-  tool directly.
+- **Ephemeral workers**: `claude-worker start --ephemeral --name <task>
+  --cwd <your-cwd> --prompt "..."` for long-running delegation where
+  you don't want to spawn a persistent worker. The manager auto-reaps
+  them after 5 minutes of log inactivity (tunable via
+  `--ephemeral-idle-timeout SECONDS`). Use this for investigations
+  that might take more than a minute but don't need a lingering
+  worker afterward. **Prefer this over the Task tool** — see below.
+
+- **Task agents** (use sparingly): for quick, bounded investigations
+  under ~30 seconds (e.g., "grep the GVP library for conflicts with
+  this request"). The Task tool blocks your message queue until it
+  returns, so during a multi-minute Task you are mute to the TL and
+  the human. **Do NOT use the Task tool for implementation work or
+  anything that might run longer than ~30 seconds — start an
+  ephemeral worker instead.**
 
 When delegating:
 
