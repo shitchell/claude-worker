@@ -1594,10 +1594,6 @@ def _send_to_single_worker(
         thread_id = pair_thread_id(sender, name)
         participants = sorted([sender, name])
 
-    # Resolve the target worker's cwd — threads live under <cwd>/.cwork/threads/
-    saved = get_saved_worker(name)
-    target_cwd = (saved or {}).get("cwd") or os.getcwd()
-
     if getattr(args, "dry_run", False):
         print(
             json.dumps(
@@ -1607,7 +1603,6 @@ def _send_to_single_worker(
                     "recipient": name,
                     "participants": participants,
                     "content": tagged_content,
-                    "cwd": target_cwd,
                 },
                 indent=2,
             )
@@ -1616,16 +1611,14 @@ def _send_to_single_worker(
 
     if getattr(args, "verbose", False):
         print(
-            f"[verbose] thread={thread_id} sender={sender} recipient={name} "
-            f"cwd={target_cwd}",
+            f"[verbose] thread={thread_id} sender={sender} recipient={name}",
             file=sys.stderr,
         )
         print(tagged_content, file=sys.stderr)
 
     try:
-        ensure_thread(target_cwd, thread_id, participants)
+        ensure_thread(thread_id, participants)
         append_message(
-            target_cwd,
             thread_id,
             sender=sender,
             content=tagged_content,
@@ -1857,17 +1850,6 @@ def _read_from_thread(
     thread_id = _resolve_read_thread_id(args)
     explicit_thread = bool(getattr(args, "thread", None))
 
-    # Resolve target worker's cwd — threads live under <cwd>/.cwork/threads/.
-    # If the worker has no saved session (test harness, or a worker that
-    # never ran), there's no meaningful thread location. Fall back to the
-    # log path when auto-detecting so tests and fresh workers Just Work.
-    saved = get_saved_worker(args.name)
-    target_cwd = (saved or {}).get("cwd")
-    if not target_cwd:
-        if fallback_to_log and not explicit_thread:
-            return None
-        target_cwd = os.getcwd()
-
     since_id: str | None = None
     if getattr(args, "since", None):
         since_id = str(args.since).strip() or None
@@ -1878,7 +1860,6 @@ def _read_from_thread(
 
     try:
         messages = read_messages(
-            target_cwd,
             thread_id,
             since_id=since_id,
             limit=limit,
@@ -3454,16 +3435,11 @@ def cmd_reply(args: argparse.Namespace) -> None:
     sender = args.sender or _find_worker_by_ancestry() or _resolve_sender()
     recipient = args.name
 
-    # Resolve recipient's cwd for the thread write
-    saved = get_saved_worker(recipient)
-    target_cwd = (saved or {}).get("cwd") or os.getcwd()
-
     thread_id = pair_thread_id(sender, recipient)
     participants = sorted([sender, recipient])
     try:
-        ensure_thread(target_cwd, thread_id, participants)
+        ensure_thread(thread_id, participants)
         append_message(
-            target_cwd,
             thread_id,
             sender=sender,
             content=content,
@@ -5086,13 +5062,11 @@ def cmd_thread(args: argparse.Namespace) -> None:
         read_messages,
     )
 
-    cwd = os.getcwd()
     action = args.thread_action
 
     if action == "create":
         participants = [p.strip() for p in args.participants.split(",") if p.strip()]
         tid = create_thread(
-            cwd,
             participants=participants,
             thread_type=args.thread_type,
             thread_id=getattr(args, "thread_id", None),
@@ -5108,12 +5082,11 @@ def cmd_thread(args: argparse.Namespace) -> None:
             sys.exit(1)
         # Determine sender from env
         sender = os.environ.get("CW_WORKER_NAME", "unknown")
-        msg = append_message(cwd, args.thread_id, sender, content)
+        msg = append_message(args.thread_id, sender, content)
         print(f"[{msg['timestamp']}] {sender}: {content[:80]}")
 
     elif action == "read":
         messages = read_messages(
-            cwd,
             args.thread_id,
             since_id=args.since,
             limit=args.n,
@@ -5129,7 +5102,7 @@ def cmd_thread(args: argparse.Namespace) -> None:
             print(f"[{ts} {mid}] {sender}: {content}")
 
     elif action == "list":
-        threads = list_threads(cwd, status=getattr(args, "status", None))
+        threads = list_threads(status=getattr(args, "status", None))
         if not threads:
             print("No threads.")
             return
@@ -5142,7 +5115,7 @@ def cmd_thread(args: argparse.Namespace) -> None:
             print(f"  {tid}  [{thread_type}:{status}]  {participants}  last: {last}")
 
     elif action == "close":
-        close_thread(cwd, args.thread_id)
+        close_thread(args.thread_id)
         print(f"Thread {args.thread_id} closed.")
 
     else:

@@ -70,324 +70,261 @@ meta:
         id_prefix: C
         primary_field: description
         is_root: true
-
 constraints:
   - id: C1
     name: max-subscription-tokens-only-via-claude-code
-    description: >
-      Anthropic Max subscription tokens ($200/mo for thousands of
-      dollars worth of API usage) are only usable through Claude Code,
-      not via direct API calls or LangChain/LangGraph. This is an
-      external constraint we don't control. It forces all agent
-      orchestration through Claude Code's execution model rather than
-      the architecturally preferred approach of deterministic workflow
-      engines with direct API access. When/if this constraint is
-      lifted (Max tokens via API, or project migrates to paid API),
-      the CCR remote control layer and other CC-coupled decisions
-      should be re-evaluated.
-    tags: [architecture]
-
+    description: |
+      Anthropic Max subscription tokens ($200/mo for thousands of dollars worth of API usage) are only usable through Claude Code, not via direct API calls or LangChain/LangGraph. This is an external constraint we don't control. It forces all agent orchestration through Claude Code's execution model rather than the architecturally preferred approach of deterministic workflow engines with direct API access. When/if this constraint is lifted (Max tokens via API, or project migrates to paid API), the CCR remote control layer and other CC-coupled decisions should be re-evaluated.
+    tags:
+      - architecture
 goals:
   - id: G1
     name: race-free-send-wait
-    statement: >
-      Every send/wait interaction between the parent CLI and the claude
-      subprocess must be immune to stale-state races. A caller who writes
-      to the FIFO and then waits for a turn boundary must only match
-      turn boundaries that occur AFTER their own write, never prior
-      turns' boundaries that were already in the log.
-    tags: [correctness, races]
+    statement: |
+      Every send/wait interaction between the parent CLI and the claude subprocess must be immune to stale-state races. A caller who writes to the FIFO and then waits for a turn boundary must only match turn boundaries that occur AFTER their own write, never prior turns' boundaries that were already in the log.
+    tags:
+      - correctness
+      - races
     maps_to: []
-
   - id: G2
     name: loud-over-silent-failure
-    statement: >
-      When a subsystem fails (daemon thread crash, sensitive file gate,
-      send envelope mismatch, test fixture disabling the tested
-      condition), the failure must produce an observable signal —
-      either a sentinel log line, a stderr warning, a worker state
-      transition to `dead`, or a test that fails for the right reason.
-      A worker that appears alive but is actually broken is worse
-      than a dead worker because operators don't know to investigate.
-      Context disruption (compaction, clear) must also produce an
-      observable signal and trigger a recovery procedure.
-    tags: [observability, state-awareness, lifecycle]
+    statement: |
+      When a subsystem fails (daemon thread crash, sensitive file gate, send envelope mismatch, test fixture disabling the tested condition), the failure must produce an observable signal — either a sentinel log line, a stderr warning, a worker state transition to `dead`, or a test that fails for the right reason. A worker that appears alive but is actually broken is worse than a dead worker because operators don't know to investigate. Context disruption (compaction, clear) must also produce an observable signal and trigger a recovery procedure.
+    tags:
+      - observability
+      - state-awareness
+      - lifecycle
     maps_to: []
-
   - id: G3
     name: test-first-with-real-conditions
-    statement: >
-      Every bugfix and feature lands with a test that would fail if
-      the production change were reverted. Tests must exercise the
-      SAME conditions as production — speedups via monkey-patch must
-      not disable the very thing being tested.
-    tags: [testing, regression-safety]
+    statement: |
+      Every bugfix and feature lands with a test that would fail if the production change were reverted. Tests must exercise the SAME conditions as production — speedups via monkey-patch must not disable the very thing being tested.
+    tags:
+      - testing
+      - regression-safety
     maps_to: []
-
   - id: G4
     name: composable-subcommands
-    statement: >
-      Every new subcommand or flag should compose cleanly with the
-      existing CLI surface. Shared helpers (_wait_for_turn,
-      _resolve_chat_id, _render_one_message, _iter_log_reverse) are
-      reused across multiple subcommands rather than reimplemented.
-    tags: [architecture, dry]
+    statement: |
+      Every new subcommand or flag should compose cleanly with the existing CLI surface. Shared helpers (_wait_for_turn, _resolve_chat_id, _render_one_message, _iter_log_reverse) are reused across multiple subcommands rather than reimplemented.
+    tags:
+      - architecture
+      - dry
     maps_to: []
-
 values:
   - id: V1
     name: clarity-over-cleverness
-    statement: >
-      Obvious code beats impressive code. Descriptive names, explicit
-      signatures, "why" comments only. One-liners that save two lines
-      but cost understanding are a net loss.
-    tags: [craftsmanship]
+    statement: |
+      Obvious code beats impressive code. Descriptive names, explicit signatures, "why" comments only. One-liners that save two lines but cost understanding are a net loss.
+    tags:
+      - craftsmanship
     maps_to: []
-
   - id: V2
     name: explicit-over-implicit
-    statement: >
-      No hidden state, no side-channel parameters, no magic globals.
-      Function signatures show all dependencies. Constants are named
-      and documented at the point of definition, not inferred from
-      usage.
-    tags: [craftsmanship]
+    statement: |
+      No hidden state, no side-channel parameters, no magic globals. Function signatures show all dependencies. Constants are named and documented at the point of definition, not inferred from usage.
+    tags:
+      - craftsmanship
     maps_to: []
-
   - id: V3
     name: atomic-persistence
-    statement: >
-      User-critical state (settings.json, .sessions.json,
-      missing-tags.json) is written atomically via sibling .tmp +
-      os.replace. A crash mid-write must leave the old content
-      intact. Non-atomic writes to these files are a bug.
-    tags: [correctness, durability]
+    statement: |
+      User-critical state (settings.json, .sessions.json, missing-tags.json) is written atomically via sibling .tmp + os.replace. A crash mid-write must leave the old content intact. Non-atomic writes to these files are a bug.
+    tags:
+      - correctness
+      - durability
     maps_to: []
-
   - id: V4
     name: delegation-beats-self-discovery
-    statement: >
-      When the task is "investigate an unfamiliar system" and the
-      worker is not already expert, prefer a subagent or sub-worker
-      over self-reasoning. Fresh context is faster AND more accurate
-      than loaded context, and consumes dramatically less of the
-      delegating worker's context budget. A delegation message costs
-      ~1% of context; the equivalent direct implementation costs
-      5-10%. Memory-based claims about unfamiliar APIs should be
-      verified before stating.
-    tags: [process, efficiency, context]
+    statement: |
+      When the task is "investigate an unfamiliar system" and the worker is not already expert, prefer a subagent or sub-worker over self-reasoning. Fresh context is faster AND more accurate than loaded context, and consumes dramatically less of the delegating worker's context budget. A delegation message costs ~1% of context; the equivalent direct implementation costs 5-10%. Memory-based claims about unfamiliar APIs should be verified before stating.
+    tags:
+      - process
+      - efficiency
+      - context
     maps_to: []
-
   - id: V5
     name: one-contiguous-block
-    statement: >
-      A feature should live in one place, not scattered across
-      multiple files. If a feature forces changes in 5+ files,
-      reconsider the architecture before committing.
-    tags: [architecture]
+    statement: |
+      A feature should live in one place, not scattered across multiple files. If a feature forces changes in 5+ files, reconsider the architecture before committing.
+    tags:
+      - architecture
     maps_to: []
-
   - id: V6
     name: context-budget-awareness
-    statement: >
-      Context is a finite, non-renewable resource within a session.
-      Every tool call output, every file read, every inline code
-      change consumes context. Delegation (sending work to a sub-
-      worker) costs ~1% of context; direct implementation costs
-      5-10%. Identity workers (PM, TL) must delegate aggressively
-      to preserve context for coordination, which is their primary
-      value. Context budget warnings at 50%, 65%, and 80% enforce
-      this awareness.
-    tags: [context, delegation]
+    statement: |
+      Context is a finite, non-renewable resource within a session. Every tool call output, every file read, every inline code change consumes context. Delegation (sending work to a sub- worker) costs ~1% of context; direct implementation costs 5-10%. Identity workers (PM, TL) must delegate aggressively to preserve context for coordination, which is their primary value. Context budget warnings at 50%, 65%, and 80% enforce this awareness.
+    tags:
+      - context
+      - delegation
     maps_to: []
-
 principles:
   - id: P1
     name: capture-marker-before-fifo-write
-    statement: >
-      Before writing a user message to a worker's FIFO, capture the
-      current last-uuid of the log as a marker. Pass this marker as
-      after_uuid to any subsequent wait-for-turn or
-      wait-for-queue-response call so the scan phase skips past prior
-      turn boundaries. Applies to cmd_send, cmd_repl, and any future
-      caller that writes-then-waits.
-    tags: [races, fifo]
-    maps_to: [project:G1]
-
+    statement: |
+      Before writing a user message to a worker's FIFO, capture the current last-uuid of the log as a marker. Pass this marker as after_uuid to any subsequent wait-for-turn or wait-for-queue-response call so the scan phase skips past prior turn boundaries. Applies to cmd_send, cmd_repl, and any future caller that writes-then-waits.
+    tags:
+      - races
+      - fifo
+    maps_to:
+      - project:G1
   - id: P2
     name: named-constants-for-all-magic-numbers
-    statement: >
-      Every timeout, threshold, retry count, buffer size, poll
-      interval, and display limit is a module-level UPPER_SNAKE_CASE
-      constant with a docstring or inline comment explaining its
-      rationale.
-    tags: [craftsmanship]
-    maps_to: [project:V1, project:V2]
-
+    statement: |
+      Every timeout, threshold, retry count, buffer size, poll interval, and display limit is a module-level UPPER_SNAKE_CASE constant with a docstring or inline comment explaining its rationale.
+    tags:
+      - craftsmanship
+    maps_to:
+      - project:V1
+      - project:V2
   - id: P3
     name: atomic-write-for-user-state
-    statement: >
-      Code that writes settings.json, .sessions.json, missing-tags.json,
-      or similar persistent state files uses manager._atomic_write_text.
-      Direct path.write_text calls to these paths are forbidden.
-    tags: [durability]
-    maps_to: [project:V3]
-
+    statement: |
+      Code that writes settings.json, .sessions.json, missing-tags.json, or similar persistent state files uses manager._atomic_write_text. Direct path.write_text calls to these paths are forbidden.
+    tags:
+      - durability
+    maps_to:
+      - project:V3
   - id: P4
     name: test-real-conditions-not-monkey-patched-away
-    statement: >
-      When speeding up a test, prefer controllable injection
-      (stub_delay_ms, time.monotonic clock advancer, stub session IDs)
-      over disabling the condition. Ask "what is the minimum production
-      change that would make this test fail?" — if the answer is
-      "removing the monkey-patch", the test is broken.
-    tags: [testing]
-    maps_to: [project:G3]
-
+    statement: |
+      When speeding up a test, prefer controllable injection (stub_delay_ms, time.monotonic clock advancer, stub session IDs) over disabling the condition. Ask "what is the minimum production change that would make this test fail?" — if the answer is "removing the monkey-patch", the test is broken.
+    tags:
+      - testing
+    maps_to:
+      - project:G3
   - id: P5
     name: fix-class-of-bug-not-instance
-    statement: >
-      When fixing a race, state-machine regression, or filter/display
-      mismatch in one call site, grep for all other sites with the
-      same shape and apply the fix uniformly before committing.
-    tags: [debugging, process]
-    maps_to: [project:G1, project:G2]
-
+    statement: |
+      When fixing a race, state-machine regression, or filter/display mismatch in one call site, grep for all other sites with the same shape and apply the fix uniformly before committing.
+    tags:
+      - debugging
+      - process
+    maps_to:
+      - project:G1
+      - project:G2
   - id: P6
     name: try-before-look-is-wrong
-    statement: >
-      When a thing silently fails or behaves unexpectedly, the FIRST
-      action is to inspect current state of inputs and outputs, not
-      to try a variant approach. Looking is cheaper than trying.
-    tags: [debugging]
-    maps_to: [project:V4]
-
+    statement: |
+      When a thing silently fails or behaves unexpectedly, the FIRST action is to inspect current state of inputs and outputs, not to try a variant approach. Looking is cheaper than trying.
+    tags:
+      - debugging
+    maps_to:
+      - project:V4
   - id: P7
     name: publish-dont-discover
-    statement: >
-      When a test or external tool needs a value the owning code
-      already has (subprocess PID, session ID, marker UUID), publish
-      it to a sidecar file or stdout from the owning code. Don't
-      reverse-engineer identity from outside the source of truth.
-    tags: [testing, process]
-    maps_to: [project:V4]
-
+    statement: |
+      When a test or external tool needs a value the owning code already has (subprocess PID, session ID, marker UUID), publish it to a sidecar file or stdout from the owning code. Don't reverse-engineer identity from outside the source of truth.
+    tags:
+      - testing
+      - process
+    maps_to:
+      - project:V4
   - id: P8
     name: loud-thread-panic-handling
-    statement: >
-      Any daemon thread in the manager wraps its body in a panic
-      handler that writes a sentinel JSONL line to the log AND
-      SIGTERMs the manager's own PID.
-    tags: [observability]
-    maps_to: [project:G2]
-
+    statement: |
+      Any daemon thread in the manager wraps its body in a panic handler that writes a sentinel JSONL line to the log AND SIGTERMs the manager's own PID.
+    tags:
+      - observability
+    maps_to:
+      - project:G2
   - id: P9
     name: idempotent-cleanup
-    statement: >
-      cleanup_runtime_dir and similar cleanup helpers must be safe
-      to call from multiple concurrent callers. Use
-      shutil.rmtree(ignore_errors=True), missing_ok flags, and
-      explicit try/except around potentially-racy operations.
-    tags: [durability]
-    maps_to: [project:V3, project:G2]
-
+    statement: |
+      cleanup_runtime_dir and similar cleanup helpers must be safe to call from multiple concurrent callers. Use shutil.rmtree(ignore_errors=True), missing_ok flags, and explicit try/except around potentially-racy operations.
+    tags:
+      - durability
+    maps_to:
+      - project:V3
+      - project:G2
   - id: P10
     name: survive-context-disruption
-    statement: >
-      When context is disrupted (compaction, clear, crash), the
-      recovery path is: (1) re-read identity guidance, (2) re-read
-      latest handoff, (3) verify current work against files, (4)
-      report status. Identity re-injection hooks provide the
-      behavioral guidance; handoff files provide the work context.
-      The agent must never continue working after disruption without
-      explicitly verifying its understanding.
-    tags: [context, observability, lifecycle]
-    maps_to: [project:G2]
-
+    statement: |
+      When context is disrupted (compaction, clear, crash), the recovery path is: (1) re-read identity guidance, (2) re-read latest handoff, (3) verify current work against files, (4) report status. Identity re-injection hooks provide the behavioral guidance; handoff files provide the work context. The agent must never continue working after disruption without explicitly verifying its understanding.
+    tags:
+      - context
+      - observability
+      - lifecycle
+    maps_to:
+      - project:G2
   - id: P11
     name: prefer-clean-jump-migration-when-state-is-empty
-    statement: >
-      When migrating between architectures, prefer a clean A→B jump
-      over incremental A→A+B→B when: (a) no live state needs
-      preservation during transition, (b) the intermediate dual-state
-      is itself a complexity source, (c) the surface area is bounded
-      enough to cut over in one commit. Incremental migration is
-      better when live state exists or the surface is too large for
-      atomic cutover. Three-factor decision table: live state? dual-
-      state complexity? surface area? All point clean-jump → clean.
-      Any point incremental → incremental. Mixed → human decides.
-    tags: [architecture, process]
-    maps_to: [project:V1, project:P5]
-
+    statement: |
+      When migrating between architectures, prefer a clean A→B jump over incremental A→A+B→B when: (a) no live state needs preservation during transition, (b) the intermediate dual-state is itself a complexity source, (c) the surface area is bounded enough to cut over in one commit. Incremental migration is better when live state exists or the surface is too large for atomic cutover. Three-factor decision table: live state? dual- state complexity? surface area? All point clean-jump → clean. Any point incremental → incremental. Mixed → human decides.
+    tags:
+      - architecture
+      - process
+    maps_to:
+      - project:V1
+      - project:P5
   - id: P12
     name: consistent-lightweight-notifications-with-read-on-demand
-    statement: >
-      When notifying agents of events, always use the same lightweight
-      format regardless of agent state (idle vs working). The agent
-      reads full content when ready to act on it. Grounded in two
-      observations: (1) interrupting agent flow causes step-dropping
-      (main:OBS3), (2) token-distance recall is lossy — information
-      delivered far from point of use degrades (main:OBS4). Consistent
-      format + read-on-demand addresses both.
-    tags: [coordination, architecture]
-    maps_to: [project:V1, project:V2]
-
+    statement: |
+      When notifying agents of events, always use the same lightweight format regardless of agent state (idle vs working). The agent reads full content when ready to act on it. Grounded in two observations: (1) interrupting agent flow causes step-dropping (main:OBS3), (2) token-distance recall is lossy — information delivered far from point of use degrades (main:OBS4). Consistent format + read-on-demand addresses both.
+    tags:
+      - coordination
+      - architecture
+    maps_to:
+      - project:V1
+      - project:V2
+  - id: P13
+    name: clean-break-over-backwards-compat
+    status: active
+    tags: architecture,process
+    maps_to: project:V1
+    description: 'When redesigning CLI surface, architecture, or APIs, do a clean break. No aliases, no deprecation periods, no backwards-compatibility shims. Good design is the only priority — if the new approach is better, the old one is removed entirely. Human directive: ''i do not care about backwards compat. i care about good design and good design only.'''
+    origin:
+      - id: a3411eee-ea2c-4ba2-b925-66f4aac2cc45
+        date: '2026-04-16T03:07:38.810Z'
+        by:
+          name: claude-worker PM
+          email: pm@claude-worker.local
+        skip_review: true
 decisions:
   - id: D1
     name: status-idle-threshold-seconds-unified
-    decision: >
-      STATUS_IDLE_THRESHOLD_SECONDS = 3.0 is applied as a display-level
-      debounce in get_worker_status. A turn-end is reported as `waiting`
-      only if the log mtime is at least the threshold old; fresher
-      turn-ends are reported as `working`. Applied uniformly to ls,
-      REPL idle check, status lines after send/start, and send's
-      status gate.
-    origin: >
-      REPL feature implementation (P7 of 2026-04-07/08 session). User
-      explicitly chose unified (option a) over split display-vs-gate
-      (option b). Risk: send gate inherits ~3s post-turn latency.
-    tags: [status, races]
-    maps_to: [project:P1, project:P5]
+    decision: |
+      STATUS_IDLE_THRESHOLD_SECONDS = 3.0 is applied as a display-level debounce in get_worker_status. A turn-end is reported as `waiting` only if the log mtime is at least the threshold old; fresher turn-ends are reported as `working`. Applied uniformly to ls, REPL idle check, status lines after send/start, and send's status gate.
+    origin: |
+      REPL feature implementation (P7 of 2026-04-07/08 session). User explicitly chose unified (option a) over split display-vs-gate (option b). Risk: send gate inherits ~3s post-turn latency.
+    tags:
+      - status
+      - races
+    maps_to:
+      - project:P1
+      - project:P5
     refs:
       - file: claude_worker/cli.py
         identifier: STATUS_IDLE_THRESHOLD_SECONDS constant and get_worker_status mtime check
         role: implements
-
   - id: D2
     name: wait-for-turn-after-uuid-marker-everywhere
-    decision: >
-      _wait_for_turn, _wait_for_queue_response, and cmd_repl's
-      post-send wait all accept an after_uuid parameter. Callers
-      capture _get_last_uuid(log_file) BEFORE writing to the FIFO.
-      This is the canonical fix for the write-then-wait race class.
-    origin: >
-      First discovered P1 during --show-response implementation. Bit
-      again in P5 Imp-1 (CLI missing flag), P5 Imp-6 (queue response
-      had same race), P8 (REPL post-send wait used status-mtime
-      instead). Each incident expanded the same fix. Pattern P5
-      (fix-class-of-bug-not-instance) was named from this.
-    tags: [races, fifo]
-    maps_to: [project:P1, project:P5]
+    decision: |
+      _wait_for_turn, _wait_for_queue_response, and cmd_repl's post-send wait all accept an after_uuid parameter. Callers capture _get_last_uuid(log_file) BEFORE writing to the FIFO. This is the canonical fix for the write-then-wait race class.
+    origin: |
+      First discovered P1 during --show-response implementation. Bit again in P5 Imp-1 (CLI missing flag), P5 Imp-6 (queue response had same race), P8 (REPL post-send wait used status-mtime instead). Each incident expanded the same fix. Pattern P5 (fix-class-of-bug-not-instance) was named from this.
+    tags:
+      - races
+      - fifo
+    maps_to:
+      - project:P1
+      - project:P5
     refs:
       - file: claude_worker/cli.py
         identifier: _wait_for_turn after_uuid param, _get_last_uuid marker capture in cmd_send, cmd_repl, cmd_stop
         role: implements
-
   - id: D3
     name: stub-claude-harness-via-env-var
-    decision: >
-      End-to-end tests use tests/stub_claude.sh as a drop-in for the
-      claude binary, selected via CLAUDE_WORKER_CLAUDE_BIN. run_manager
-      is a thin wrapper around _run_manager_forkless(install_signals);
-      tests drive the forkless helper directly in a thread with
-      install_signals=False. Manager writes runtime/claude-pid after
-      Popen so tests can SIGTERM the stub directly.
-    origin: >
-      Round 4 Tier A (P6) to unblock _read_follow and cmd_send
-      end-to-end tests deferred from Round 3. The claude-pid
-      sidecar follows P7 (publish-don't-discover).
-    tags: [testing, architecture]
-    maps_to: [project:P7, project:G3]
+    decision: |
+      End-to-end tests use tests/stub_claude.sh as a drop-in for the claude binary, selected via CLAUDE_WORKER_CLAUDE_BIN. run_manager is a thin wrapper around _run_manager_forkless(install_signals); tests drive the forkless helper directly in a thread with install_signals=False. Manager writes runtime/claude-pid after Popen so tests can SIGTERM the stub directly.
+    origin: |
+      Round 4 Tier A (P6) to unblock _read_follow and cmd_send end-to-end tests deferred from Round 3. The claude-pid sidecar follows P7 (publish-don't-discover).
+    tags:
+      - testing
+      - architecture
+    maps_to:
+      - project:P7
+      - project:G3
     refs:
       - file: claude_worker/manager.py
         identifier: CLAUDE_BIN_ENV_VAR, _resolve_claude_bin, _run_manager_forkless, claude-pid sidecar
@@ -398,19 +335,17 @@ decisions:
       - file: tests/conftest.py
         identifier: running_worker fixture with CLAUDE_WORKER_CLAUDE_BIN env var
         role: implements
-
   - id: D4
     name: atomic-writes-for-user-critical-state
-    decision: >
-      manager._atomic_write_text(path, content) is the only path for
-      writing settings.json (install-hook), .sessions.json (save_worker),
-      and missing-tags.json (_handle_missing_tag_reports).
-    origin: >
-      Round 3 Imp-8 (code review finding). settings.json corruption
-      was flagged as highest-risk; fix extended to all three files
-      because the helper cost is trivial.
-    tags: [durability]
-    maps_to: [project:P3, project:V3]
+    decision: |
+      manager._atomic_write_text(path, content) is the only path for writing settings.json (install-hook), .sessions.json (save_worker), and missing-tags.json (_handle_missing_tag_reports).
+    origin: |
+      Round 3 Imp-8 (code review finding). settings.json corruption was flagged as highest-risk; fix extended to all three files because the helper cost is trivial.
+    tags:
+      - durability
+    maps_to:
+      - project:P3
+      - project:V3
     refs:
       - file: claude_worker/manager.py
         identifier: _atomic_write_text function, used by save_worker
@@ -418,21 +353,16 @@ decisions:
       - file: claude_worker/cli.py
         identifier: _atomic_write_text used by cmd_install_hook, _handle_missing_tag_reports
         role: implements
-
   - id: D5
     name: reverse-log-iterator-for-tail-queries
-    decision: >
-      _iter_log_reverse(path, chunk_size=8192) yields JSONL entries
-      newest-to-oldest via reverse chunk reads. Used by 5 callers
-      (_get_last_uuid, _get_last_assistant_preview, get_worker_status,
-      _wait_for_turn scan, _read_static fast path) in place of
-      forward full-log scans.
-    origin: >
-      Round 3 Imp-5 (code review performance finding). Long PM logs
-      made ls expensive. Written as one helper with 11 tests covering
-      chunk boundaries, malformed JSON, empty files, and laziness.
-    tags: [performance]
-    maps_to: [project:V5]
+    decision: |
+      _iter_log_reverse(path, chunk_size=8192) yields JSONL entries newest-to-oldest via reverse chunk reads. Used by 5 callers (_get_last_uuid, _get_last_assistant_preview, get_worker_status, _wait_for_turn scan, _read_static fast path) in place of forward full-log scans.
+    origin: |
+      Round 3 Imp-5 (code review performance finding). Long PM logs made ls expensive. Written as one helper with 11 tests covering chunk boundaries, malformed JSON, empty files, and laziness.
+    tags:
+      - performance
+    maps_to:
+      - project:V5
     refs:
       - file: claude_worker/cli.py
         identifier: _iter_log_reverse function and its 5 callers
@@ -440,23 +370,18 @@ decisions:
       - file: tests/test_log_reverse_iter.py
         identifier: 11 tests covering chunk boundaries, malformed JSON, laziness
         role: implements
-
   - id: D6
     name: token-stats-via-claugs-delegation
-    decision: >
-      Token accounting lives in claugs (claude_logs package), not in
-      claude-worker. Dependency floor: claugs>=0.6.7. claude-worker
-      surfaces values via ls, tokens subcommand, read --context, and
-      the REPL banner by importing compute_token_stats and
-      compute_context_window_usage.
-    origin: >
-      P9 of 2026-04-08 session. User asked claude-worker to figure
-      out its own token usage. Delegated to a PM worker in the claugs
-      repo which delegated to a sub-worker; the sub-worker discovered
-      the multi-line-per-response JSONL quirk (30-72% inflation in
-      naive line-summing) and built the API. V4 (delegation) validated.
-    tags: [delegation, tokens]
-    maps_to: [project:V4, project:G4]
+    decision: |
+      Token accounting lives in claugs (claude_logs package), not in claude-worker. Dependency floor: claugs>=0.6.7. claude-worker surfaces values via ls, tokens subcommand, read --context, and the REPL banner by importing compute_token_stats and compute_context_window_usage.
+    origin: |
+      P9 of 2026-04-08 session. User asked claude-worker to figure out its own token usage. Delegated to a PM worker in the claugs repo which delegated to a sub-worker; the sub-worker discovered the multi-line-per-response JSONL quirk (30-72% inflation in naive line-summing) and built the API. V4 (delegation) validated.
+    tags:
+      - delegation
+      - tokens
+    maps_to:
+      - project:V4
+      - project:G4
     refs:
       - file: claude_worker/cli.py
         identifier: cmd_tokens, _format_context_window_label, REPL banner — all import from claude_logs
@@ -464,60 +389,46 @@ decisions:
       - file: pyproject.toml
         identifier: claugs>=0.6.7 dependency floor
         role: implements
-
   - id: D7
     name: gitignore-pm-workspace
-    decision: >
-      .claude-worker-pm/ is gitignored in claude-worker and claugs.
-      Per-environment runtime state shouldn't travel in git.
-      NOTE: directory name to be renamed to .cwork/pm/ (see D9).
-    origin: >
-      P9 of 2026-04-08 session. User: "we'll gitignore it for now;
-      easy enough to undo or unignore specific files on an
-      as-needed basis."
-    tags: [gitignore]
-    maps_to: [project:V2]
+    decision: |
+      .claude-worker-pm/ is gitignored in claude-worker and claugs. Per-environment runtime state shouldn't travel in git. NOTE: directory name to be renamed to .cwork/pm/ (see D9).
+    origin: |
+      P9 of 2026-04-08 session. User: "we'll gitignore it for now; easy enough to undo or unignore specific files on an as-needed basis."
+    tags:
+      - gitignore
+    maps_to:
+      - project:V2
     refs:
       - file: .gitignore
         identifier: .cwork/pm/ and .claude-worker-pm/ entries
         role: implements
-
   - id: D8
     name: pm-handoff-packet-cwork-pm-handoffs
-    decision: >
-      PM wrap-up produces a handoff packet at
-      .cwork/pm/handoffs/<timestamp>.md. Fresh PMs read the latest
-      handoff at startup. Contents: active consumers, in-flight
-      work, conflicts needing resolution, cross-project dependencies,
-      decisions made this session with GVP refs, next-action
-      recommendation, open questions, environment state.
-    origin: >
-      P10 of 2026-04-08 session. User approved maintaining handoffs
-      as a running record: "having that record just seems useful."
-      This session produces the first handoff as a prototype while
-      the wrap-up automation is still being built.
-    tags: [pm, handoff]
-    maps_to: [project:G2]
+    decision: |
+      PM wrap-up produces a handoff packet at .cwork/pm/handoffs/<timestamp>.md. Fresh PMs read the latest handoff at startup. Contents: active consumers, in-flight work, conflicts needing resolution, cross-project dependencies, decisions made this session with GVP refs, next-action recommendation, open questions, environment state.
+    origin: |
+      P10 of 2026-04-08 session. User approved maintaining handoffs as a running record: "having that record just seems useful." This session produces the first handoff as a prototype while the wrap-up automation is still being built.
+    tags:
+      - pm
+      - handoff
+    maps_to:
+      - project:G2
     refs:
       - file: claude_worker/identities/pm.md
         identifier: per-session handoff packets
         role: implements
-
   - id: D9
     name: cwork-namespace-rename-deferred
-    decision: >
-      Runtime directory .claude-worker-pm/ will be renamed to
-      .cwork/pm/ in a future pass. claude-worker global state will
-      live under ~/.cwork/; PM identity global library at
-      ~/.cwork/identities/pm/gvp/; claude-worker global GVP library
-      at ~/.cwork/gvp/.
-    origin: >
-      P10 of 2026-04-08 session. User: "i think .cwork/pm/ is a
-      little cleaner that .claude-worker-pm/ :p and allows
-      flexibility for future claude-worker stuff." Backwards-
-      incompatible accepted since the project has a single user.
-    tags: [naming, refactor]
-    maps_to: [project:V5]
+    decision: |
+      Runtime directory .claude-worker-pm/ will be renamed to .cwork/pm/ in a future pass. claude-worker global state will live under ~/.cwork/; PM identity global library at ~/.cwork/identities/pm/gvp/; claude-worker global GVP library at ~/.cwork/gvp/.
+    origin: |
+      P10 of 2026-04-08 session. User: "i think .cwork/pm/ is a little cleaner that .claude-worker-pm/ :p and allows flexibility for future claude-worker stuff." Backwards- incompatible accepted since the project has a single user.
+    tags:
+      - naming
+      - refactor
+    maps_to:
+      - project:V5
     refs:
       - file: .gitignore
         identifier: Both .cwork/ and .claude-worker-pm/ entries reflect the rename
@@ -525,108 +436,81 @@ decisions:
       - file: claude_worker/cli.py
         identifier: .cwork/pm/ paths in PM startup and chat routing code
         role: implements
-
   - id: D10
     name: gvp-uuid-as-project-identity
-    decision: >
-      cairn init generates a project_id UUID that is the
-      authoritative project identity. Project name is display-only.
-      ~/.gvp/cache/by-id/<uuid>.yml tracks where each project lives
-      (local paths, git URLs) with last_seen timestamps. Consumer
-      requests to a PM must include a [project:<uuid>] tag so
-      decisions are traceable across machines and clones.
-    origin: >
-      P10 of 2026-04-08 session. User wanted UUID-as-identity
-      because git origin URLs can change (project starts local,
-      moves to repo). Tight cairn/claude-worker coupling accepted
-      given imminent TypeScript port where they'd become proper
-      package dependencies.
-    tags: [identity, cairn]
-    maps_to: [project:V2, project:G4]
+    decision: |
+      cairn init generates a project_id UUID that is the authoritative project identity. Project name is display-only. ~/.gvp/cache/by-id/<uuid>.yml tracks where each project lives (local paths, git URLs) with last_seen timestamps. Consumer requests to a PM must include a [project:<uuid>] tag so decisions are traceable across machines and clones.
+    origin: |
+      P10 of 2026-04-08 session. User wanted UUID-as-identity because git origin URLs can change (project starts local, moves to repo). Tight cairn/claude-worker coupling accepted given imminent TypeScript port where they'd become proper package dependencies.
+    tags:
+      - identity
+      - cairn
+    maps_to:
+      - project:V2
+      - project:G4
     refs:
       - file: .gvp/config.yaml
         identifier: project_id
         role: defines
-
   - id: D11
     name: pm-four-tier-library-inheritance
-    decision: >
-      PM workers consult four GVP libraries in decreasing authority:
-      (1) project lib at <project>/.gvp/library — authoritative,
-      validated by cairn;
-      (2) PM personal lib at <project>/.cwork/pm/gvp/ — working
-      notes, not validated;
-      (3) PM identity global lib at ~/.cwork/identities/pm/gvp/ —
-      shared across all PMs, read-only guidance;
-      (4) claude-worker global lib at ~/.cwork/gvp/ — worker-wide
-      rules, read-only guidance.
-      cairn validate on the project library looks at ONLY the
-      project library. Promotion from PM personal to project is
-      explicit.
-    origin: >
-      P10 of 2026-04-08 session. User wanted a personal PM lib
-      without making the project's GVP library dependent on it.
-    tags: [pm, gvp]
-    maps_to: [project:V5, project:V2]
+    decision: |
+      PM workers consult four GVP libraries in decreasing authority: (1) project lib at <project>/.gvp/library — authoritative, validated by cairn; (2) PM personal lib at <project>/.cwork/pm/gvp/ — working notes, not validated; (3) PM identity global lib at ~/.cwork/identities/pm/gvp/ — shared across all PMs, read-only guidance; (4) claude-worker global lib at ~/.cwork/gvp/ — worker-wide rules, read-only guidance. cairn validate on the project library looks at ONLY the project library. Promotion from PM personal to project is explicit.
+    origin: |
+      P10 of 2026-04-08 session. User wanted a personal PM lib without making the project's GVP library dependent on it.
+    tags:
+      - pm
+      - gvp
+    maps_to:
+      - project:V5
+      - project:V2
     refs:
       - file: claude_worker/identities/pm.md
         identifier: Maintain the project's GVP library
         role: implements
-
   - id: D12
     name: queue-id-random-hex-not-epoch-ms
-    decision: >
-      Queue correlation IDs use secrets.token_hex(4) instead of
-      str(int(time.time() * 1000)). Eliminates the theoretical
-      sub-millisecond collision risk between concurrent --queue
-      sends from different processes.
-    origin: >
-      Ticket #005 audit (2026-04-09). TL identified the collision
-      risk as residual after D2 (after_uuid marker) fixed the
-      primary stale-match race. 3-line fix.
-    tags: [races, fifo]
-    maps_to: [project:G1, project:P1]
+    decision: |
+      Queue correlation IDs use secrets.token_hex(4) instead of str(int(time.time() * 1000)). Eliminates the theoretical sub-millisecond collision risk between concurrent --queue sends from different processes.
+    origin: |
+      Ticket #005 audit (2026-04-09). TL identified the collision risk as residual after D2 (after_uuid marker) fixed the primary stale-match race. 3-line fix.
+    tags:
+      - races
+      - fifo
+    maps_to:
+      - project:G1
+      - project:P1
     refs:
       - file: claude_worker/cli.py
         identifier: _generate_queue_id using secrets.token_hex
         role: implements
-
   - id: D13
     name: delivery-confirmation-deferred
-    decision: >
-      Post-send delivery confirmation (scanning the log for the
-      sent message before waiting for the response) is deferred.
-      The current failure mode for undelivered messages is a hang
-      (detected by timeout), not silent success. The manager's
-      thread panic handling (P8) catches the edge case where the
-      FIFO reader thread crashes. Fast-fail confirmation (~25 LOE)
-      can be revisited if hang-on-failure proves painful in practice.
-    origin: >
-      Ticket #005 audit (2026-04-09). TL assessed severity as LOW
-      because message loss → worker death → detected. PM concurred:
-      hang-not-silent is acceptable for now.
-    tags: [fifo, observability]
-    maps_to: [project:G2, project:P8]
+    decision: |
+      Post-send delivery confirmation (scanning the log for the sent message before waiting for the response) is deferred. The current failure mode for undelivered messages is a hang (detected by timeout), not silent success. The manager's thread panic handling (P8) catches the edge case where the FIFO reader thread crashes. Fast-fail confirmation (~25 LOE) can be revisited if hang-on-failure proves painful in practice.
+    origin: |
+      Ticket #005 audit (2026-04-09). TL assessed severity as LOW because message loss → worker death → detected. PM concurred: hang-not-silent is acceptable for now.
+    tags:
+      - fifo
+      - observability
+    maps_to:
+      - project:G2
+      - project:P8
     refs:
       - file: .cwork/tickets/005-review-message-delivery/TECHNICAL.md
         identifier: Failure Mode 3 analysis
         role: defines
-
   - id: D14
     name: notify-subcommand-human-escalation
-    decision: >
-      claude-worker notify "message" reads notification config from
-      ~/.cwork/config.yaml (notifications.command with ${MESSAGE}
-      placeholder), runs via subprocess, rate-limited to 60s per
-      caller via cooldown timestamp files. Best-effort: failures
-      logged to stderr, never crash. Config is user-level, not
-      project-level, keeping credentials out of committed files.
-    origin: >
-      Ticket #002 (2026-04-09). Human: "i should perhaps implement
-      a policy around using ntfy.sh or something anytime something
-      requires human escalation so there's no confusion."
-    tags: [observability]
-    maps_to: [project:G2, project:V2]
+    decision: |
+      claude-worker notify "message" reads notification config from ~/.cwork/config.yaml (notifications.command with ${MESSAGE} placeholder), runs via subprocess, rate-limited to 60s per caller via cooldown timestamp files. Best-effort: failures logged to stderr, never crash. Config is user-level, not project-level, keeping credentials out of committed files.
+    origin: |
+      Ticket #002 (2026-04-09). Human: "i should perhaps implement a policy around using ntfy.sh or something anytime something requires human escalation so there's no confusion."
+    tags:
+      - observability
+    maps_to:
+      - project:G2
+      - project:V2
     refs:
       - file: claude_worker/cli.py
         identifier: cmd_notify
@@ -634,28 +518,18 @@ decisions:
       - file: tests/test_notify.py
         identifier: TestNotifyConfigHandling
         role: implements
-
   - id: D15
     name: ticket-watcher-posttooluse-hook
-    decision: >
-      Ticket change notifications use a PostToolUse hook on
-      Write/Edit/MultiEdit, not manager polling or inotify.
-      The hook fires after each successful file write, checks if
-      the target path is under .cwork/tickets/, discovers PM/TL
-      workers with the same CWD via .sessions.json, and sends
-      [system:ticket-change] notifications via fire-and-forget
-      claude-worker send --queue subprocess calls. Rate-limited
-      to 5s per target to batch rapid changes.
-    origin: >
-      Ticket #020 (2026-04-09). Three options assessed:
-      (a) Manager polling — rejected, contradicts the architectural
-      cleanup from #016 where we removed polling from the manager.
-      (b) PostToolUse hook — chosen, event-driven, no polling,
-      rides existing hook infrastructure (PreToolUse and Stop already
-      wired). (c) inotify watcher — rejected, over-engineered,
-      requires new dependency and third daemon thread.
-    tags: [observability, architecture]
-    maps_to: [project:G2, project:G4]
+    decision: |
+      Ticket change notifications use a PostToolUse hook on Write/Edit/MultiEdit, not manager polling or inotify. The hook fires after each successful file write, checks if the target path is under .cwork/tickets/, discovers PM/TL workers with the same CWD via .sessions.json, and sends [system:ticket-change] notifications via fire-and-forget claude-worker send --queue subprocess calls. Rate-limited to 5s per target to batch rapid changes.
+    origin: |
+      Ticket #020 (2026-04-09). Three options assessed: (a) Manager polling — rejected, contradicts the architectural cleanup from #016 where we removed polling from the manager. (b) PostToolUse hook — chosen, event-driven, no polling, rides existing hook infrastructure (PreToolUse and Stop already wired). (c) inotify watcher — rejected, over-engineered, requires new dependency and third daemon thread.
+    tags:
+      - observability
+      - architecture
+    maps_to:
+      - project:G2
+      - project:G4
     refs:
       - file: claude_worker/ticket_watcher.py
         identifier: PostToolUse hook entry point
@@ -663,46 +537,32 @@ decisions:
       - file: claude_worker/cli.py
         identifier: PostToolUse
         role: implements
-
   - id: D16
     name: gvp-categorical-structure-emergent-manifest
-    decision: >
-      The global GVP library at ~/.cwork/gvp/library/ uses emergent
-      categories (directories) with a CATEGORIES.md manifest for
-      discovery. Categories are not fixed — any TL can add a new
-      directory and update the manifest. Each YAML file is
-      self-describing via its meta block (name, scope, description).
-      No schema enforcement tooling — the manifest is the discovery
-      mechanism.
-    origin: >
-      Ticket #018 (2026-04-09). TL assessed four questions: what
-      categories, how to discover, fixed vs emergent, schema vs
-      self-describing. Chose emergent + manifest over fixed categories
-      (too rigid) and config schema (requires tooling). CATEGORIES.md
-      auto-created by _ensure_cwork_dirs on first identity-mode start.
-    tags: [gvp, architecture]
-    maps_to: [project:V2, project:V5]
+    decision: |
+      The global GVP library at ~/.cwork/gvp/library/ uses emergent categories (directories) with a CATEGORIES.md manifest for discovery. Categories are not fixed — any TL can add a new directory and update the manifest. Each YAML file is self-describing via its meta block (name, scope, description). No schema enforcement tooling — the manifest is the discovery mechanism.
+    origin: |
+      Ticket #018 (2026-04-09). TL assessed four questions: what categories, how to discover, fixed vs emergent, schema vs self-describing. Chose emergent + manifest over fixed categories (too rigid) and config schema (requires tooling). CATEGORIES.md auto-created by _ensure_cwork_dirs on first identity-mode start.
+    tags:
+      - gvp
+      - architecture
+    maps_to:
+      - project:V2
+      - project:V5
     refs:
       - file: claude_worker/cli.py
         identifier: CATEGORIES.md
         role: implements
-
   - id: D17
     name: docs-update-sessions-02-03
-    decision: >
-      README.md and CLAUDE.md updated to reflect features shipped in
-      sessions 02-03: replaceme, notify, ls filters, CWD guard, ticket
-      watcher, persistent session logs, context threshold Stop hook,
-      stop wrap-up improvements, and the ~/.cwork/workers/ migration.
-      Directory map updated with all new modules. Runtime directory
-      section updated to reflect ~/.cwork/workers/ path and archive
-      behavior.
-    origin: >
-      PM session 03 (2026-04-09). Docs were stale — referenced
-      /tmp/claude-workers/, listed ~90 tests (now ~170), and missed
-      8 new subcommands/hooks added across sessions 02-03.
-    tags: [craftsmanship]
-    maps_to: [project:V1]
+    decision: |
+      README.md and CLAUDE.md updated to reflect features shipped in sessions 02-03: replaceme, notify, ls filters, CWD guard, ticket watcher, persistent session logs, context threshold Stop hook, stop wrap-up improvements, and the ~/.cwork/workers/ migration. Directory map updated with all new modules. Runtime directory section updated to reflect ~/.cwork/workers/ path and archive behavior.
+    origin: |
+      PM session 03 (2026-04-09). Docs were stale — referenced /tmp/claude-workers/, listed ~90 tests (now ~170), and missed 8 new subcommands/hooks added across sessions 02-03.
+    tags:
+      - craftsmanship
+    maps_to:
+      - project:V1
     refs:
       - file: README.md
         identifier: replaceme
@@ -710,64 +570,49 @@ decisions:
       - file: CLAUDE.md
         identifier: Directory map
         role: defines
-
   - id: D18
     name: pm-continuous-backlog-processing
-    decision: >
-      PMs must continuously process the ticket backlog without waiting
-      for human prompting. When the TL completes a task, the PM
-      immediately triages and assigns the next highest-priority
-      unblocked ticket. PMs only go idle when the actionable backlog
-      is genuinely empty. Assignment briefs must include "write tests
-      per G3" and "record D<N> in project.yaml with refs".
-    origin: >
-      Ticket #025 (2026-04-09). Human: "you don't have to and
-      shouldn't end-turn if there are open / non-pending tickets.
-      just keep working through them and delegating them by priority."
-      Also OBS1 from session 02: PM and TL went idle after completing
-      a ticket until human poked them.
-    tags: [pm, process]
-    maps_to: [project:G2]
+    decision: |
+      PMs must continuously process the ticket backlog without waiting for human prompting. When the TL completes a task, the PM immediately triages and assigns the next highest-priority unblocked ticket. PMs only go idle when the actionable backlog is genuinely empty. Assignment briefs must include "write tests per G3" and "record D<N> in project.yaml with refs".
+    origin: |
+      Ticket #025 (2026-04-09). Human: "you don't have to and shouldn't end-turn if there are open / non-pending tickets. just keep working through them and delegating them by priority." Also OBS1 from session 02: PM and TL went idle after completing a ticket until human poked them.
+    tags:
+      - pm
+      - process
+    maps_to:
+      - project:G2
     refs:
       - file: claude_worker/identities/pm.md
         identifier: Backlog Processing
         role: implements
-
   - id: D19
     name: ticket-source-tracking-columns
-    decision: >
-      INDEX.md uses Src (human/PM/TL/consumer name) and Src ID
-      (chat:<uuid> or repl:<pid>-<pts>) columns for ticket
-      provenance. repl: = definitively human, chat: = agent.
-      Also includes Blocked-by and Closes columns. PM identity
-      docs updated with column semantics.
-    origin: >
-      Ticket #026 (2026-04-09). Human noticed #010 was misattributed
-      as internal when it was human-originated. Split Consumer into
-      Src + Src ID to separate identity from semantics.
-    tags: [pm, process]
-    maps_to: [project:G2, project:V2]
+    decision: |
+      INDEX.md uses Src (human/PM/TL/consumer name) and Src ID (chat:<uuid> or repl:<pid>-<pts>) columns for ticket provenance. repl: = definitively human, chat: = agent. Also includes Blocked-by and Closes columns. PM identity docs updated with column semantics.
+    origin: |
+      Ticket #026 (2026-04-09). Human noticed #010 was misattributed as internal when it was human-originated. Split Consumer into Src + Src ID to separate identity from semantics.
+    tags:
+      - pm
+      - process
+    maps_to:
+      - project:G2
+      - project:V2
     refs:
       - file: claude_worker/identities/pm.md
         identifier: Src ID
         role: defines
-
   - id: D20
     name: send-broadcast-with-filter-flags
-    decision: >
-      send --broadcast sends a message to all workers matching filter
-      flags (--role, --status, --alive, --cwd). Reuses the filter
-      logic from cmd_list via _collect_filtered_workers. Fire-and-
-      forget by default (skips status gate, writes to each FIFO
-      without waiting). --show-response waits for each target
-      sequentially. Self-exclusion via _find_worker_by_ancestry.
-      Core send logic extracted to _send_to_single_worker for reuse.
-    origin: >
-      Ticket #027 (2026-04-09). Human: "new feature that would
-      probably be good is a send --broadcast flag or some ability
-      to send messages to multiple agents."
-    tags: [architecture, fifo]
-    maps_to: [project:G4, project:V5]
+    decision: |
+      send --broadcast sends a message to all workers matching filter flags (--role, --status, --alive, --cwd). Reuses the filter logic from cmd_list via _collect_filtered_workers. Fire-and- forget by default (skips status gate, writes to each FIFO without waiting). --show-response waits for each target sequentially. Self-exclusion via _find_worker_by_ancestry. Core send logic extracted to _send_to_single_worker for reuse.
+    origin: |
+      Ticket #027 (2026-04-09). Human: "new feature that would probably be good is a send --broadcast flag or some ability to send messages to multiple agents."
+    tags:
+      - architecture
+      - fifo
+    maps_to:
+      - project:G4
+      - project:V5
     refs:
       - file: claude_worker/cli.py
         identifier: _send_to_single_worker
@@ -775,26 +620,18 @@ decisions:
       - file: claude_worker/cli.py
         identifier: _collect_filtered_workers
         role: uses
-
   - id: D21
     name: callback-queue-guaranteed-delivery
-    decision: >
-      Guaranteed inter-agent message delivery uses a callback +
-      persistent queue pattern. Senders include [reply-to:<name>]
-      in multi-turn questions. Recipients run claude-worker reply
-      <name> "answer" which writes to ~/.cwork/queues/<name>/.
-      The manager drains the queue every 5s on the FIFO thread's
-      select() timeout, injecting replies as [reply-from:<sender>]
-      synthetic user messages. No status gate on reply — messages
-      persist even if the recipient is busy. Phase 2 (MCP server
-      for plain-session recipients) deferred.
-    origin: >
-      Ticket #028 (2026-04-09). Real failure: PM sent question to
-      GVP PM, got ack (closed send), but actual answer came in a
-      follow-up turn that was never delivered. Callback + queue
-      decouples sender from recipient's turn count.
-    tags: [fifo, architecture]
-    maps_to: [project:G1, project:G4]
+    decision: |
+      Guaranteed inter-agent message delivery uses a callback + persistent queue pattern. Senders include [reply-to:<name>] in multi-turn questions. Recipients run claude-worker reply <name> "answer" which writes to ~/.cwork/queues/<name>/. The manager drains the queue every 5s on the FIFO thread's select() timeout, injecting replies as [reply-from:<sender>] synthetic user messages. No status gate on reply — messages persist even if the recipient is busy. Phase 2 (MCP server for plain-session recipients) deferred.
+    origin: |
+      Ticket #028 (2026-04-09). Real failure: PM sent question to GVP PM, got ack (closed send), but actual answer came in a follow-up turn that was never delivered. Callback + queue decouples sender from recipient's turn count.
+    tags:
+      - fifo
+      - architecture
+    maps_to:
+      - project:G1
+      - project:G4
     refs:
       - file: claude_worker/manager.py
         identifier: enqueue_message
@@ -805,22 +642,18 @@ decisions:
       - file: claude_worker/cli.py
         identifier: cmd_reply
         role: implements
-
   - id: D22
     name: wait-for-turn-chat-tag-filter
-    decision: >
-      wait-for-turn accepts --chat <tag> to filter turns by chat tag.
-      Only fires when the turn's assistant content contains
-      [chat:<tag>]. Untagged turns and turns for other consumers are
-      skipped. Composes with --after-uuid and --settle. Handles both
-      result messages (walks back to find assistant content) and
-      assistant end_turn messages (checks directly).
-    origin: >
-      Ticket #029 (2026-04-09). TAStest consumer reported 3-4 false
-      fires while waiting for a multi-step delegation chain on a PM
-      serving multiple concurrent consumers.
-    tags: [pm, races]
-    maps_to: [project:G4, project:P1]
+    decision: |
+      wait-for-turn accepts --chat <tag> to filter turns by chat tag. Only fires when the turn's assistant content contains [chat:<tag>]. Untagged turns and turns for other consumers are skipped. Composes with --after-uuid and --settle. Handles both result messages (walks back to find assistant content) and assistant end_turn messages (checks directly).
+    origin: |
+      Ticket #029 (2026-04-09). TAStest consumer reported 3-4 false fires while waiting for a multi-step delegation chain on a PM serving multiple concurrent consumers.
+    tags:
+      - pm
+      - races
+    maps_to:
+      - project:G4
+      - project:P1
     refs:
       - file: claude_worker/cli.py
         identifier: _message_has_chat_tag
@@ -828,66 +661,48 @@ decisions:
       - file: claude_worker/cli.py
         identifier: chat_tag
         role: implements
-
   - id: D23
     name: wait-for-turn-after-uuid-verified-correct
-    decision: >
-      Investigation of reported silent no-op (#030) confirmed the
-      code is correct. When after_uuid is the most recent entry,
-      the reverse scan breaks at the marker (turn_end stays None),
-      falls through to the tail loop, and polls/times out correctly.
-      The consumer's report was likely caused by a dead worker
-      (rc=1) or missing --after-uuid flag. Three regression tests
-      added to guard the correct behavior.
-    origin: >
-      Ticket #030 (2026-04-09). TAStest consumer reported silent
-      exit 0 on wait-for-turn --after-uuid. TL investigation per
-      P6 (look before trying) confirmed all three hypotheses are
-      false — the code handles the edge case correctly.
-    tags: [races, debugging]
-    maps_to: [project:G2, project:P6]
+    decision: |
+      Investigation of reported silent no-op (#030) confirmed the code is correct. When after_uuid is the most recent entry, the reverse scan breaks at the marker (turn_end stays None), falls through to the tail loop, and polls/times out correctly. The consumer's report was likely caused by a dead worker (rc=1) or missing --after-uuid flag. Three regression tests added to guard the correct behavior.
+    origin: |
+      Ticket #030 (2026-04-09). TAStest consumer reported silent exit 0 on wait-for-turn --after-uuid. TL investigation per P6 (look before trying) confirmed all three hypotheses are false — the code handles the edge case correctly.
+    tags:
+      - races
+      - debugging
+    maps_to:
+      - project:G2
+      - project:P6
     refs:
       - file: tests/test_wait_after_uuid_edge.py
         identifier: TestAfterUuidMostRecent
         role: implements
-
   - id: D24
     name: repl-verbose-flag
-    decision: >
-      REPL accepts --verbose (-v) to show tool calls, thinking, and
-      metadata matching read --verbose output. Default REPL stays
-      simplified (hidden: timestamps, metadata, thinking, tools).
-      Verbose mode uses the same hidden set as read --verbose
-      (hidden: timestamps, metadata, progress, file-history-snapshot,
-      last-prompt) with no show_only filter.
-    origin: >
-      Ticket #031 (2026-04-09). Human: "for repl mode, i'd love it
-      if it showed the equivalent of read --verbose." Chose --verbose
-      flag over /verbose toggle (simpler, no mid-session state) and
-      always-verbose (too noisy by default).
-    tags: [craftsmanship]
-    maps_to: [project:V1]
+    decision: |
+      REPL accepts --verbose (-v) to show tool calls, thinking, and metadata matching read --verbose output. Default REPL stays simplified (hidden: timestamps, metadata, thinking, tools). Verbose mode uses the same hidden set as read --verbose (hidden: timestamps, metadata, progress, file-history-snapshot, last-prompt) with no show_only filter.
+    origin: |
+      Ticket #031 (2026-04-09). Human: "for repl mode, i'd love it if it showed the equivalent of read --verbose." Chose --verbose flag over /verbose toggle (simpler, no mid-session state) and always-verbose (too noisy by default).
+    tags:
+      - craftsmanship
+    maps_to:
+      - project:V1
     refs:
       - file: claude_worker/cli.py
         identifier: verbose
         role: implements
-
   - id: D25
     name: pyyaml-required-dependency
-    decision: >
-      pyyaml is a required dependency (not optional). Added to
-      pyproject.toml as pyyaml>=6.0. _get_cwork_config now warns
-      to stderr on ImportError instead of silently returning {}.
-      The previous "keep pyyaml optional" decision from PM session
-      02 is reversed — config.yaml is used by stop wrap-up timeout,
-      notifications, and will be used by more features. Silent
-      failure violates G2.
-    origin: >
-      PM session 03 (2026-04-09). PM caught the bug before pushing
-      #031: import yaml silently fails, cmd_notify silently does
-      nothing. G2 violation.
-    tags: [durability, observability]
-    maps_to: [project:G2, project:V3]
+    decision: |
+      pyyaml is a required dependency (not optional). Added to pyproject.toml as pyyaml>=6.0. _get_cwork_config now warns to stderr on ImportError instead of silently returning {}. The previous "keep pyyaml optional" decision from PM session 02 is reversed — config.yaml is used by stop wrap-up timeout, notifications, and will be used by more features. Silent failure violates G2.
+    origin: |
+      PM session 03 (2026-04-09). PM caught the bug before pushing #031: import yaml silently fails, cmd_notify silently does nothing. G2 violation.
+    tags:
+      - durability
+      - observability
+    maps_to:
+      - project:G2
+      - project:V3
     refs:
       - file: pyproject.toml
         identifier: pyyaml
@@ -895,43 +710,34 @@ decisions:
       - file: claude_worker/cli.py
         identifier: _get_cwork_config
         role: implements
-
   - id: D26
     name: pm-bug-triage-verify-environment
-    decision: >
-      PMs must verify the consumer's environment (version, install
-      location, command resolution) before delegating bug reports to
-      TLs. One message round-trip catches version mismatches that
-      look like code bugs but require zero code changes. Exceptions:
-      consumer already verified versions, or bug is reproducible
-      against PM's own build.
-    origin: >
-      Ticket #032 (2026-04-09). Two incidents in two days against
-      the gvp PM: cairn version mismatch and stale global binary.
-      Both detectable in one message ("what does cairn --version
-      show?") but cost 15-30 min of TL investigation each.
-    tags: [pm, process, debugging]
-    maps_to: [project:P6, project:V4]
+    decision: |
+      PMs must verify the consumer's environment (version, install location, command resolution) before delegating bug reports to TLs. One message round-trip catches version mismatches that look like code bugs but require zero code changes. Exceptions: consumer already verified versions, or bug is reproducible against PM's own build.
+    origin: |
+      Ticket #032 (2026-04-09). Two incidents in two days against the gvp PM: cairn version mismatch and stale global binary. Both detectable in one message ("what does cairn --version show?") but cost 15-30 min of TL investigation each.
+    tags:
+      - pm
+      - process
+      - debugging
+    maps_to:
+      - project:P6
+      - project:V4
     refs:
       - file: claude_worker/identities/pm.md
         identifier: Bug Triage
         role: implements
-
   - id: D27
     name: worker-environment-variables
-    decision: >
-      Workers set CW_WORKER_NAME, CW_IDENTITY, and CW_PARENT_WORKER
-      in the claude subprocess environment via Popen env dict. Identity
-      (pm, technical-lead, worker) is passed from cmd_start to
-      run_manager via a new identity parameter. CW_PARENT_WORKER
-      inherits from the parent's CW_WORKER_NAME (empty for top-level).
-      Available to hooks and Bash tool calls for self-identification.
-    origin: >
-      Ticket #034 (2026-04-09). TL assessed at ~15 LOE. Unblocks
-      identity-aware subcommands, simpler replaceme detection, and
-      the thin identity first pass.
-    tags: [architecture]
-    maps_to: [project:V2, project:G4]
+    decision: |
+      Workers set CW_WORKER_NAME, CW_IDENTITY, and CW_PARENT_WORKER in the claude subprocess environment via Popen env dict. Identity (pm, technical-lead, worker) is passed from cmd_start to run_manager via a new identity parameter. CW_PARENT_WORKER inherits from the parent's CW_WORKER_NAME (empty for top-level). Available to hooks and Bash tool calls for self-identification.
+    origin: |
+      Ticket #034 (2026-04-09). TL assessed at ~15 LOE. Unblocks identity-aware subcommands, simpler replaceme detection, and the thin identity first pass.
+    tags:
+      - architecture
+    maps_to:
+      - project:V2
+      - project:G4
     refs:
       - file: claude_worker/manager.py
         identifier: CW_WORKER_NAME
@@ -939,109 +745,84 @@ decisions:
       - file: claude_worker/cli.py
         identifier: identity
         role: uses
-
   - id: D28
     name: synthetic-user-message-system-prefix
-    decision: >
-      All synthetic User messages injected by claude-worker are
-      prefixed with [system:<source>] to distinguish them from
-      actual human input. Convention:
-      - [system:context-threshold] — context window warning
-      - [system:stop-requested] — stop wrap-up message
-      - [system:ticket-change] — ticket file change notification
-      - [system:queue-drain] — message queue delivery
-      Agents should treat [system:*] messages with lower authority
-      than [chat:*] or [repl:*] (human-originated) messages.
-    origin: >
-      Ticket #033 (2026-04-09). Human: "we should ensure that all
-      synthetic User messages are clearly labeled as NOT from the
-      User." Queue drain was the only injection point missing the
-      prefix — others already had it.
-    tags: [observability, pm]
-    maps_to: [project:G2, project:V2]
+    decision: |
+      All synthetic User messages injected by claude-worker are prefixed with [system:<source>] to distinguish them from actual human input. Convention: - [system:context-threshold] — context window warning - [system:stop-requested] — stop wrap-up message - [system:ticket-change] — ticket file change notification - [system:queue-drain] — message queue delivery Agents should treat [system:*] messages with lower authority than [chat:*] or [repl:*] (human-originated) messages.
+    origin: |
+      Ticket #033 (2026-04-09). Human: "we should ensure that all synthetic User messages are clearly labeled as NOT from the User." Queue drain was the only injection point missing the prefix — others already had it.
+    tags:
+      - observability
+      - pm
+    maps_to:
+      - project:G2
+      - project:V2
     refs:
       - file: claude_worker/manager.py
         identifier: system:queue-drain
         role: implements
-
   - id: D29
     name: thin-identity-flag
-    decision: >
-      start accepts --identity <name> that reads identity prompt from
-      ~/.cwork/identities/<name>/identity.md (user-installed) or falls
-      back to bundled identities for pm and technical-lead. --pm and
-      --team-lead are backwards-compat aliases. Session metadata stores
-      identity: "<name>" alongside legacy pm/team_lead booleans.
-      _get_worker_identity reads the new field with fallback to legacy.
-      ls shows [<LABEL>] using a label map (pm→PM, technical-lead→TL,
-      custom identities show uppercased name).
-    origin: >
-      Ticket #035 (2026-04-10). TL recommended as step 3 of the
-      foundation plan. Thin first pass — no hooks/skeleton/migrations.
-      Full identity directory system grows from here.
-    tags: [architecture, identity]
-    maps_to: [project:G4, project:V5]
+    decision: |
+      start accepts --identity <name> that reads identity prompt from ~/.cwork/identities/<name>/identity.md (user-installed) or falls back to bundled identities for pm and technical-lead. --pm and --team-lead are backwards-compat aliases. Session metadata stores identity: "<name>" alongside legacy pm/team_lead booleans. _get_worker_identity reads the new field with fallback to legacy. ls shows [<LABEL>] using a label map (pm→PM, technical-lead→TL, custom identities show uppercased name).
+    origin: |
+      Ticket #035 (2026-04-10). TL recommended as step 3 of the foundation plan. Thin first pass — no hooks/skeleton/migrations. Full identity directory system grows from here.
+    tags:
+      - architecture
+      - identity
+    maps_to:
+      - project:G4
+      - project:V5
     refs:
       - file: claude_worker/cli.py
         identifier: _get_worker_identity
         role: implements
       - file: claude_worker/cli.py
-        identifier: --identity
+        identifier: '--identity'
         role: implements
-
   - id: D30
     name: repl-continuous-output-mode
-    decision: >
-      REPL accepts --continuous (-c) for tail-f style output with
-      on-demand input. Messages flow continuously; pressing any key
-      activates the readline prompt. After submit, returns to flow.
-      Uses raw terminal mode (termios/tty) + threading, no external
-      deps. Terminal state restored via try/finally. Default REPL
-      behavior unchanged — --continuous is opt-in.
-    origin: >
-      Ticket #036 (2026-04-10). Human: "what i'd love is a mechanism
-      whereby messages always flow by default with an input bar never
-      showing up — not even on end-of-turn."
-    tags: [craftsmanship]
-    maps_to: [project:V1, project:G4]
+    decision: |
+      REPL accepts --continuous (-c) for tail-f style output with on-demand input. Messages flow continuously; pressing any key activates the readline prompt. After submit, returns to flow. Uses raw terminal mode (termios/tty) + threading, no external deps. Terminal state restored via try/finally. Default REPL behavior unchanged — --continuous is opt-in.
+    origin: |
+      Ticket #036 (2026-04-10). Human: "what i'd love is a mechanism whereby messages always flow by default with an input bar never showing up — not even on end-of-turn."
+    tags:
+      - craftsmanship
+    maps_to:
+      - project:V1
+      - project:G4
     refs:
       - file: claude_worker/cli.py
         identifier: _repl_continuous
         role: implements
-
   - id: D31
     name: fifo-pending-status-check
-    decision: >
-      get_worker_status checks whether the FIFO has unread bytes
-      before reporting "waiting." Non-blocking select(fd, 0) on an
-      O_RDONLY|O_NONBLOCK fd detects pending data. If bytes exist,
-      returns "working" despite aged log mtime. Prevents false-idle
-      reports during the window between cmd_send's FIFO write and
-      the manager's drain.
-    origin: >
-      Ticket #011, future-queries item #3. Speculative fix to a
-      <100ms race window. ~10 lines + 2 regression tests.
-    tags: [status, races]
-    maps_to: [project:G1, project:D1]
+    decision: |
+      get_worker_status checks whether the FIFO has unread bytes before reporting "waiting." Non-blocking select(fd, 0) on an O_RDONLY|O_NONBLOCK fd detects pending data. If bytes exist, returns "working" despite aged log mtime. Prevents false-idle reports during the window between cmd_send's FIFO write and the manager's drain.
+    origin: |
+      Ticket #011, future-queries item #3. Speculative fix to a <100ms race window. ~10 lines + 2 regression tests.
+    tags:
+      - status
+      - races
+    maps_to:
+      - project:G1
+      - project:D1
     refs:
       - file: claude_worker/cli.py
         identifier: select
         role: implements
-
   - id: D32
     name: per-session-read-markers
-    decision: >
-      read accepts --mark (save last-seen UUID) and --new (show only
-      messages after last mark). Consumer identity from
-      CLAUDE_SESSION_UUID, --chat, or "cli" fallback. Markers stored
-      at runtime/read-markers/<md5-of-consumer>.txt. --new is sugar
-      for --since <last-mark>. --new + --since is an error.
-    origin: >
-      Ticket #010, future-queries item #2. Per-consumer read tracking
-      for PM orchestration — enables "show me what's new since my
-      last read" without manual --since UUIDs.
-    tags: [pm, craftsmanship]
-    maps_to: [project:G4, project:V1]
+    decision: |
+      read accepts --mark (save last-seen UUID) and --new (show only messages after last mark). Consumer identity from CLAUDE_SESSION_UUID, --chat, or "cli" fallback. Markers stored at runtime/read-markers/<md5-of-consumer>.txt. --new is sugar for --since <last-mark>. --new + --since is an error.
+    origin: |
+      Ticket #010, future-queries item #2. Per-consumer read tracking for PM orchestration — enables "show me what's new since my last read" without manual --since UUIDs.
+    tags:
+      - pm
+      - craftsmanship
+    maps_to:
+      - project:G4
+      - project:V1
     refs:
       - file: claude_worker/cli.py
         identifier: _save_read_marker
@@ -1049,20 +830,16 @@ decisions:
       - file: claude_worker/cli.py
         identifier: _load_read_marker
         role: implements
-
   - id: D33
     name: auto-analyze-session-in-wrapup
-    decision: >
-      The stop wrap-up message instructs workers to run the
-      analyze-session skill on their own session log and save to
-      ~/.cwork/analyses/. Applies to all identity types (PM, TL,
-      generic). Best-effort — agents invoke the skill as part of
-      their wrap-up turn; failure doesn't block shutdown.
-    origin: >
-      Ticket #037 (2026-04-10). Cluster B planning. The skill was
-      already bundled (#004) but not automatically invoked.
-    tags: [observability]
-    maps_to: [project:G2]
+    decision: |
+      The stop wrap-up message instructs workers to run the analyze-session skill on their own session log and save to ~/.cwork/analyses/. Applies to all identity types (PM, TL, generic). Best-effort — agents invoke the skill as part of their wrap-up turn; failure doesn't block shutdown.
+    origin: |
+      Ticket #037 (2026-04-10). Cluster B planning. The skill was already bundled (#004) but not automatically invoked.
+    tags:
+      - observability
+    maps_to:
+      - project:G2
     refs:
       - file: claude_worker/cli.py
         identifier: _build_stop_wrapup_message
@@ -1070,21 +847,18 @@ decisions:
       - file: claude_worker/cli.py
         identifier: ANALYSES_DIR
         role: implements
-
   - id: D34
     name: token-tracking-csv-and-stats
-    decision: >
-      Token tracking uses a global CSV at ~/.cwork/analyses/summary.csv.
-      append_session_row writes one row per analyzed session with 13
-      columns (date, worker, identity, project, tokens, cost, etc.).
-      claude-worker stats reads the CSV and prints summaries by
-      identity type and project. CSV created with headers on first
-      write; subsequent appends are header-free.
-    origin: >
-      Ticket #038 (2026-04-10). Cluster B — observability foundation
-      for answering "how many tokens does a typical X cost?"
-    tags: [observability, tokens]
-    maps_to: [project:G2, project:V2]
+    decision: |
+      Token tracking uses a global CSV at ~/.cwork/analyses/summary.csv. append_session_row writes one row per analyzed session with 13 columns (date, worker, identity, project, tokens, cost, etc.). claude-worker stats reads the CSV and prints summaries by identity type and project. CSV created with headers on first write; subsequent appends are header-free.
+    origin: |
+      Ticket #038 (2026-04-10). Cluster B — observability foundation for answering "how many tokens does a typical X cost?"
+    tags:
+      - observability
+      - tokens
+    maps_to:
+      - project:G2
+      - project:V2
     refs:
       - file: claude_worker/token_tracking.py
         identifier: append_session_row
@@ -1092,42 +866,34 @@ decisions:
       - file: claude_worker/cli.py
         identifier: cmd_stats
         role: implements
-
   - id: D35
     name: post-fix-gvp-review-flywheel
-    decision: >
-      After closing a bug ticket, the PM reviews the GVP library to
-      identify what guiding elements were associated with the buggy
-      code and what elements were missing that would have prevented
-      the bug. Gaps are proposed as new guiding elements to the
-      human. This is the alignment flywheel: bugs → GVP gaps →
-      fill gaps → fewer bugs.
-    origin: >
-      Ticket #039 (2026-04-10). Cluster B. Human: "we can tweak
-      guiding elements to produce increasingly consistent results."
-    tags: [gvp, process]
-    maps_to: [project:G2, project:V2]
+    decision: |
+      After closing a bug ticket, the PM reviews the GVP library to identify what guiding elements were associated with the buggy code and what elements were missing that would have prevented the bug. Gaps are proposed as new guiding elements to the human. This is the alignment flywheel: bugs → GVP gaps → fill gaps → fewer bugs.
+    origin: |
+      Ticket #039 (2026-04-10). Cluster B. Human: "we can tweak guiding elements to produce increasingly consistent results."
+    tags:
+      - gvp
+      - process
+    maps_to:
+      - project:G2
+      - project:V2
     refs:
       - file: claude_worker/identities/pm.md
         identifier: Post-Fix GVP Review
         role: implements
-
   - id: D36
     name: cwork-directory-monitoring
-    decision: >
-      The manager monitors the worker's .cwork/ directory every 30s
-      via snapshot_cwork_dir (rglob + stat) and diff_cwork_snapshots.
-      Changed/added files trigger a [system:cwork-change] synthetic
-      message injected via the FIFO. First scan establishes baseline
-      (no notification). Complements the PostToolUse ticket watcher
-      (#020) by catching external changes (other workers, humans,
-      scripts).
-    origin: >
-      Ticket #040 (2026-04-10). Cherry-picked from Cluster A per
-      TL recommendation. ~30 LOE, no dependencies on full identity
-      system.
-    tags: [observability, architecture]
-    maps_to: [project:G2, project:G4]
+    decision: |
+      The manager monitors the worker's .cwork/ directory every 30s via snapshot_cwork_dir (rglob + stat) and diff_cwork_snapshots. Changed/added files trigger a [system:cwork-change] synthetic message injected via the FIFO. First scan establishes baseline (no notification). Complements the PostToolUse ticket watcher (#020) by catching external changes (other workers, humans, scripts).
+    origin: |
+      Ticket #040 (2026-04-10). Cherry-picked from Cluster A per TL recommendation. ~30 LOE, no dependencies on full identity system.
+    tags:
+      - observability
+      - architecture
+    maps_to:
+      - project:G2
+      - project:G4
     refs:
       - file: claude_worker/manager.py
         identifier: snapshot_cwork_dir
@@ -1135,20 +901,18 @@ decisions:
       - file: claude_worker/manager.py
         identifier: check_cwork_changes
         role: implements
-
   - id: D37
     name: project-registry
-    decision: >
-      ~/.cwork/projects/registry.yaml links all projects started
-      with an identity worker. Auto-registered on start --identity.
-      claude-worker projects subcommand shows registered projects
-      cross-referenced with active workers (by CWD match) and ticket
-      counts. Single source of truth — no per-project link.yaml.
-    origin: >
-      Ticket #042 (2026-04-10). TL design approved by PM. Enables
-      cross-project discovery for Right-Hand Claude and PM workers.
-    tags: [architecture, identity]
-    maps_to: [project:G4, project:V2]
+    decision: |
+      ~/.cwork/projects/registry.yaml links all projects started with an identity worker. Auto-registered on start --identity. claude-worker projects subcommand shows registered projects cross-referenced with active workers (by CWD match) and ticket counts. Single source of truth — no per-project link.yaml.
+    origin: |
+      Ticket #042 (2026-04-10). TL design approved by PM. Enables cross-project discovery for Right-Hand Claude and PM workers.
+    tags:
+      - architecture
+      - identity
+    maps_to:
+      - project:G4
+      - project:V2
     refs:
       - file: claude_worker/project_registry.py
         identifier: register_project
@@ -1156,39 +920,34 @@ decisions:
       - file: claude_worker/cli.py
         identifier: cmd_projects
         role: implements
-
   - id: D38
     name: internalize-md-per-identity
-    decision: >
-      Identity internalization messages are loaded from
-      ~/.cwork/identities/<name>/internalize.md when present, falling
-      back to hardcoded PM_INTERNALIZE_MESSAGE / TL_INTERNALIZE_MESSAGE
-      constants. Custom identities can define their own first-turn
-      message without code changes. Applied in both cmd_start and
-      cmd_replaceme.
-    origin: >
-      Ticket A of identity directory incremental plan (#041).
-      ~15 LOE, makes identities more self-contained.
-    tags: [identity, architecture]
-    maps_to: [project:V5, project:G4]
+    decision: |
+      Identity internalization messages are loaded from ~/.cwork/identities/<name>/internalize.md when present, falling back to hardcoded PM_INTERNALIZE_MESSAGE / TL_INTERNALIZE_MESSAGE constants. Custom identities can define their own first-turn message without code changes. Applied in both cmd_start and cmd_replaceme.
+    origin: |
+      Ticket A of identity directory incremental plan (#041). ~15 LOE, makes identities more self-contained.
+    tags:
+      - identity
+      - architecture
+    maps_to:
+      - project:V5
+      - project:G4
     refs:
       - file: claude_worker/cli.py
         identifier: _get_internalize_message
         role: implements
-
   - id: D39
     name: identity-config-yaml
-    decision: >
-      Per-identity config at ~/.cwork/identities/<name>/config.yaml.
-      Supported keys: claude_args (list, prepended to CLI args),
-      env (dict, set in subprocess environment via extra_env parameter
-      on run_manager). CLI args take precedence over config. Loaded
-      by _load_identity_config, returns {} on missing/malformed files.
-    origin: >
-      Ticket B of identity directory incremental plan (#042).
-      ~25 LOE. Makes identities carry their own configuration.
-    tags: [identity, architecture]
-    maps_to: [project:V5, project:V2]
+    decision: |
+      Per-identity config at ~/.cwork/identities/<name>/config.yaml. Supported keys: claude_args (list, prepended to CLI args), env (dict, set in subprocess environment via extra_env parameter on run_manager). CLI args take precedence over config. Loaded by _load_identity_config, returns {} on missing/malformed files.
+    origin: |
+      Ticket B of identity directory incremental plan (#042). ~25 LOE. Makes identities carry their own configuration.
+    tags:
+      - identity
+      - architecture
+    maps_to:
+      - project:V5
+      - project:V2
     refs:
       - file: claude_worker/cli.py
         identifier: _load_identity_config
@@ -1196,43 +955,34 @@ decisions:
       - file: claude_worker/manager.py
         identifier: extra_env
         role: implements
-
   - id: D40
     name: skeleton-scaffolding-from-identity-dir
-    decision: >
-      _ensure_cwork_dirs checks ~/.cwork/identities/<identity>/skeleton/
-      and copies its directory tree into <cwd>/.cwork/<identity>/ via
-      _scaffold_from_skeleton. Only creates items that don't exist —
-      never overwrites. Falls back to hardcoded PM/TL skeleton for
-      backwards compat when no skeleton dir is present. Custom
-      identities get project scaffolding by populating their
-      skeleton/ directory.
-    origin: >
-      Ticket C of identity directory incremental plan (#042).
-      ~20 LOE. Generalizes the PM/TL skeleton creation.
-    tags: [identity, architecture]
-    maps_to: [project:V5, project:G4]
+    decision: |
+      _ensure_cwork_dirs checks ~/.cwork/identities/<identity>/skeleton/ and copies its directory tree into <cwd>/.cwork/<identity>/ via _scaffold_from_skeleton. Only creates items that don't exist — never overwrites. Falls back to hardcoded PM/TL skeleton for backwards compat when no skeleton dir is present. Custom identities get project scaffolding by populating their skeleton/ directory.
+    origin: |
+      Ticket C of identity directory incremental plan (#042). ~20 LOE. Generalizes the PM/TL skeleton creation.
+    tags:
+      - identity
+      - architecture
+    maps_to:
+      - project:V5
+      - project:G4
     refs:
       - file: claude_worker/cli.py
         identifier: _scaffold_from_skeleton
         role: implements
-
   - id: D41
     name: identity-specific-hooks
-    decision: >
-      Identity-specific hooks are loaded from
-      ~/.cwork/identities/<name>/hooks/hooks.json (raw settings.json
-      fragment format) and merged with standard hooks via _merge_hooks.
-      Each hook type's entries are appended, preserving base entries.
-      Passed through _build_permission_hook_settings via identity
-      parameter. Consistent with existing hook infrastructure — no
-      new format invented.
-    origin: >
-      Ticket D of identity directory incremental plan (#042).
-      ~30 LOE. Chose raw JSON fragments over simpler format for
-      consistency with existing per-worker settings.json.
-    tags: [identity, architecture]
-    maps_to: [project:V5, project:G4]
+    decision: |
+      Identity-specific hooks are loaded from ~/.cwork/identities/<name>/hooks/hooks.json (raw settings.json fragment format) and merged with standard hooks via _merge_hooks. Each hook type's entries are appended, preserving base entries. Passed through _build_permission_hook_settings via identity parameter. Consistent with existing hook infrastructure — no new format invented.
+    origin: |
+      Ticket D of identity directory incremental plan (#042). ~30 LOE. Chose raw JSON fragments over simpler format for consistency with existing per-worker settings.json.
+    tags:
+      - identity
+      - architecture
+    maps_to:
+      - project:V5
+      - project:G4
     refs:
       - file: claude_worker/cli.py
         identifier: _load_identity_hooks
@@ -1240,26 +990,18 @@ decisions:
       - file: claude_worker/cli.py
         identifier: _merge_hooks
         role: implements
-
   - id: D42
     name: identity-periodic-tasks
-    decision: >
-      Periodic tasks are defined in
-      ~/.cwork/identities/<name>/hooks/periodic/periodic.yaml
-      mapping script names to interval seconds. The manager checks
-      on each poll cycle (~30s) whether any task's interval has
-      elapsed since its last run (timestamps in runtime/periodic/).
-      Due tasks are executed and output injected as [system:cron]
-      via the FIFO. Only runs for identity workers (not plain).
-      Best-effort: failures silently skipped. Partially superseded
-      by D65 (PM autonomous work loop via CC native scheduling).
-    origin: >
-      Ticket E of identity directory incremental plan (#042/043).
-      ~40 LOE. Completes the full identity directory system:
-      identity.md + internalize.md + config.yaml + skeleton/ +
-      hooks/ + periodic/.
-    tags: [identity, architecture]
-    maps_to: [project:V5, project:G4]
+    decision: |
+      Periodic tasks are defined in ~/.cwork/identities/<name>/hooks/periodic/periodic.yaml mapping script names to interval seconds. The manager checks on each poll cycle (~30s) whether any task's interval has elapsed since its last run (timestamps in runtime/periodic/). Due tasks are executed and output injected as [system:cron] via the FIFO. Only runs for identity workers (not plain). Best-effort: failures silently skipped. Partially superseded by D65 (PM autonomous work loop via CC native scheduling).
+    origin: |
+      Ticket E of identity directory incremental plan (#042/043). ~40 LOE. Completes the full identity directory system: identity.md + internalize.md + config.yaml + skeleton/ + hooks/ + periodic/.
+    tags:
+      - identity
+      - architecture
+    maps_to:
+      - project:V5
+      - project:G4
     refs:
       - file: claude_worker/manager.py
         identifier: check_periodic_tasks
@@ -1267,64 +1009,49 @@ decisions:
       - file: claude_worker/manager.py
         identifier: load_periodic_config
         role: implements
-
   - id: D43
     name: right-hand-claude-identity
-    decision: >
-      Right-Hand Claude (RHC) identity at ~/.cwork/identities/rhc/.
-      Cross-project coordinator: reads project registry, routes work
-      to PMs, answers cross-project questions, never implements.
-      CWD is ~/ for broad visibility. Communicates via claude-worker
-      send with [reply-to:rhc] for async answers. Launched via
-      claude-worker start --identity rhc --name rhc --cwd ~/.
-    origin: >
-      Ticket #044 (2026-04-10). Human: "i would love a right-hand-
-      claude sort of identity — a primary point of contact i go to
-      who maintains a high-level overview of all active projects."
-    tags: [identity]
-    maps_to: [project:G4, project:V1]
+    decision: |
+      Right-Hand Claude (RHC) identity at ~/.cwork/identities/rhc/. Cross-project coordinator: reads project registry, routes work to PMs, answers cross-project questions, never implements. CWD is ~/ for broad visibility. Communicates via claude-worker send with [reply-to:rhc] for async answers. Launched via claude-worker start --identity rhc --name rhc --cwd ~/.
+    origin: |
+      Ticket #044 (2026-04-10). Human: "i would love a right-hand- claude sort of identity — a primary point of contact i go to who maintains a high-level overview of all active projects."
+    tags:
+      - identity
+    maps_to:
+      - project:G4
+      - project:V1
     refs:
       - file: claude_worker/cli.py
-        identifier: --identity
+        identifier: '--identity'
         role: uses
-
   - id: D44
     name: off-hours-idle-cron-script
-    decision: >
-      PM identity gets an off-hours-idle-check.sh periodic task that
-      fires when: (a) current time is 1am-7am local (configurable
-      via CW_OFFHOURS_START/END), (b) worker idle >= 2 hours
-      (configurable via CW_IDLE_THRESHOLD), (c) open todo tickets
-      exist. Rate-limited to once per calendar day via sentinel file.
-      Configured in periodic.yaml at 30-minute check interval; the
-      script self-gates on conditions. Superseded by D65 (PM
-      autonomous work loop via CC native scheduling).
-    origin: >
-      Ticket #045 (2026-04-10). Human: "i wonder if we should have
-      a cron sort of system whereby PMs get a ping at 3am saying
-      'hey, why not knock out a couple of idle tickets?'"
-    tags: [identity, pm]
-    maps_to: [project:G4]
+    decision: |
+      PM identity gets an off-hours-idle-check.sh periodic task that fires when: (a) current time is 1am-7am local (configurable via CW_OFFHOURS_START/END), (b) worker idle >= 2 hours (configurable via CW_IDLE_THRESHOLD), (c) open todo tickets exist. Rate-limited to once per calendar day via sentinel file. Configured in periodic.yaml at 30-minute check interval; the script self-gates on conditions. Superseded by D65 (PM autonomous work loop via CC native scheduling).
+    origin: |
+      Ticket #045 (2026-04-10). Human: "i wonder if we should have a cron sort of system whereby PMs get a ping at 3am saying 'hey, why not knock out a couple of idle tickets?'"
+    tags:
+      - identity
+      - pm
+    maps_to:
+      - project:G4
     refs:
       - file: claude_worker/manager.py
         identifier: check_periodic_tasks
         role: uses
-
   - id: D45
     name: tier1-workflow-enforcement
-    decision: >
-      Tier 1 deterministic enforcement: (1) commit_checker.py
-      PostToolUse hook warns on git commits missing test files (G3)
-      or .gvp/library/ updates. Fires only for Python source changes,
-      exempt for docs. (2) ticket_lifecycle.py validates done tickets
-      have TECHNICAL.md and corresponding D<N> refs. Both are warnings
-      not blocks — enforcement over prose, detection over silence.
-    origin: >
-      Ticket #046 Tier 1 (2026-04-10). OBS10 (TL skips tests + GVP)
-      was the #1 enforcement gap. Post-commit hook catches it at the
-      moment of commission.
-    tags: [process, testing, gvp]
-    maps_to: [project:G2, project:G3]
+    decision: |
+      Tier 1 deterministic enforcement: (1) commit_checker.py PostToolUse hook warns on git commits missing test files (G3) or .gvp/library/ updates. Fires only for Python source changes, exempt for docs. (2) ticket_lifecycle.py validates done tickets have TECHNICAL.md and corresponding D<N> refs. Both are warnings not blocks — enforcement over prose, detection over silence.
+    origin: |
+      Ticket #046 Tier 1 (2026-04-10). OBS10 (TL skips tests + GVP) was the #1 enforcement gap. Post-commit hook catches it at the moment of commission.
+    tags:
+      - process
+      - testing
+      - gvp
+    maps_to:
+      - project:G2
+      - project:G3
     refs:
       - file: claude_worker/commit_checker.py
         identifier: _check_commit
@@ -1335,21 +1062,18 @@ decisions:
       - file: claude_worker/cli.py
         identifier: commit_checker_command
         role: implements
-
   - id: D46
     name: archive-on-stop-persistent-logs
-    decision: >
-      cleanup_runtime_dir archives the runtime directory (via
-      archive_runtime_dir) before deleting it. Logs, session metadata,
-      and grants are preserved in timestamped archive dirs. Archives
-      older than 30 days (ARCHIVE_RETENTION_DAYS) are pruned by
-      prune_archives on each ls invocation. Archive dirs identified
-      by dots in their name (timestamp separator).
-    origin: >
-      Ticket #006 (2026-04-09). Backfilled — implemented before
-      OBS10 decision recording discipline was established.
-    tags: [durability, observability]
-    maps_to: [project:V3, project:G2]
+    decision: |
+      cleanup_runtime_dir archives the runtime directory (via archive_runtime_dir) before deleting it. Logs, session metadata, and grants are preserved in timestamped archive dirs. Archives older than 30 days (ARCHIVE_RETENTION_DAYS) are pruned by prune_archives on each ls invocation. Archive dirs identified by dots in their name (timestamp separator).
+    origin: |
+      Ticket #006 (2026-04-09). Backfilled — implemented before OBS10 decision recording discipline was established.
+    tags:
+      - durability
+      - observability
+    maps_to:
+      - project:V3
+      - project:G2
     refs:
       - file: claude_worker/manager.py
         identifier: archive_runtime_dir
@@ -1357,19 +1081,17 @@ decisions:
       - file: claude_worker/manager.py
         identifier: prune_archives
         role: implements
-
   - id: D47
     name: workers-dir-to-cwork
-    decision: >
-      Worker runtime directories live at ~/.cwork/workers/ instead
-      of /tmp/claude-workers/<uid>/. Survives reboots for persistent
-      PM/TL state. get_runtime_dir falls back to legacy /tmp/ path
-      for pre-migration workers. create_runtime_dir checks both
-      paths to prevent name collisions. Base dir created with 700.
-    origin: >
+    decision: |
+      Worker runtime directories live at ~/.cwork/workers/ instead of /tmp/claude-workers/<uid>/. Survives reboots for persistent PM/TL state. get_runtime_dir falls back to legacy /tmp/ path for pre-migration workers. create_runtime_dir checks both paths to prevent name collisions. Base dir created with 700.
+    origin: |
       Ticket #007 (2026-04-09). Backfilled.
-    tags: [architecture, durability]
-    maps_to: [project:V3]
+    tags:
+      - architecture
+      - durability
+    maps_to:
+      - project:V3
     refs:
       - file: claude_worker/manager.py
         identifier: get_base_dir
@@ -1377,72 +1099,60 @@ decisions:
       - file: claude_worker/manager.py
         identifier: _legacy_base_dir
         role: implements
-
   - id: D48
     name: ls-filter-flags
-    decision: >
-      ls accepts --role (pm/tl/worker), --status, --alive, --cwd
-      (prefix match), --format json. Composable with AND logic.
-      _collect_filtered_workers extracted as shared helper for both
-      ls and send --broadcast. Archive dirs (dots in name) excluded
-      from ls output.
-    origin: >
+    decision: |
+      ls accepts --role (pm/tl/worker), --status, --alive, --cwd (prefix match), --format json. Composable with AND logic. _collect_filtered_workers extracted as shared helper for both ls and send --broadcast. Archive dirs (dots in name) excluded from ls output.
+    origin: |
       Ticket #008 (2026-04-09). Backfilled.
-    tags: [architecture]
-    maps_to: [project:G4]
+    tags:
+      - architecture
+    maps_to:
+      - project:G4
     refs:
       - file: claude_worker/cli.py
         identifier: _collect_filtered_workers
         role: implements
-
   - id: D49
     name: cwd-write-enforcement-hook
-    decision: >
-      cwd_guard.py is a PreToolUse hook that denies Edit/Write/
-      MultiEdit calls targeting files outside the worker's CWD.
-      Wired automatically into per-worker settings.json. Reads
-      outside CWD unrestricted. Deny message directs to route
-      changes through the owning PM.
-    origin: >
+    decision: |
+      cwd_guard.py is a PreToolUse hook that denies Edit/Write/ MultiEdit calls targeting files outside the worker's CWD. Wired automatically into per-worker settings.json. Reads outside CWD unrestricted. Deny message directs to route changes through the owning PM.
+    origin: |
       Ticket #014 (2026-04-09). Backfilled.
-    tags: [architecture]
-    maps_to: [project:V2]
+    tags:
+      - architecture
+    maps_to:
+      - project:V2
     refs:
       - file: claude_worker/cwd_guard.py
         identifier: _is_within
         role: implements
-
   - id: D50
     name: stop-wrapup-timeout-improvements
-    decision: >
-      Stop wrap-up default timeout bumped from 600s to 900s (15min).
-      --wrap-up-timeout flag with minimum enforcement: values below
-      the configured minimum (from ~/.cwork/config.yaml
-      stop.wrap_up_timeout_minimum) are clamped with stderr warning.
-      FIFO write switched to O_NONBLOCK for consistency.
-    origin: >
+    decision: |
+      Stop wrap-up default timeout bumped from 600s to 900s (15min). --wrap-up-timeout flag with minimum enforcement: values below the configured minimum (from ~/.cwork/config.yaml stop.wrap_up_timeout_minimum) are clamped with stderr warning. FIFO write switched to O_NONBLOCK for consistency.
+    origin: |
       Ticket #017 (2026-04-09). Backfilled.
-    tags: [lifecycle]
-    maps_to: [project:G2]
+    tags:
+      - lifecycle
+    maps_to:
+      - project:G2
     refs:
       - file: claude_worker/cli.py
         identifier: _get_wrapup_timeout_minimum
         role: implements
-
   - id: D51
     name: replaceme-auto-restart
-    decision: >
-      claude-worker replaceme auto-detects which worker is calling
-      via bounded PID ancestry walk (/proc, max 5 levels). SIGUSR1
-      handler in manager archives runtime dir instead of deleting.
-      Detached replacer process forked before signaling (survives
-      host death). Two-tier wrap-up validation (turn complete +
-      identity-specific handoff file). --skip-validation override.
-    origin: >
-      Ticket #023 (2026-04-09). Backfilled. Keystone feature for
-      PM/TL self-replacement at context limits.
-    tags: [architecture, lifecycle]
-    maps_to: [project:G1, project:G4]
+    decision: |
+      claude-worker replaceme auto-detects which worker is calling via bounded PID ancestry walk (/proc, max 5 levels). SIGUSR1 handler in manager archives runtime dir instead of deleting. Detached replacer process forked before signaling (survives host death). Two-tier wrap-up validation (turn complete + identity-specific handoff file). --skip-validation override.
+    origin: |
+      Ticket #023 (2026-04-09). Backfilled. Keystone feature for PM/TL self-replacement at context limits.
+    tags:
+      - architecture
+      - lifecycle
+    maps_to:
+      - project:G1
+      - project:G4
     refs:
       - file: claude_worker/cli.py
         identifier: _find_worker_by_ancestry
@@ -1453,44 +1163,35 @@ decisions:
       - file: claude_worker/manager.py
         identifier: handle_replace
         role: implements
-
   - id: D52
     name: remove-send-background
-    decision: >
-      The --background flag was removed from the send subcommand.
-      send always blocks until the worker responds. The correct
-      pattern for non-blocking sends is the Bash tool's
-      run_in_background parameter. --background was the most common
-      cause of lost inter-worker messages.
-    origin: >
-      Ticket #024 (2026-04-09). Backfilled. PM and TL both kept
-      using --background despite skill warnings, resulting in
-      dropped responses.
-    tags: [fifo, process]
-    maps_to: [project:G2]
+    decision: |
+      The --background flag was removed from the send subcommand. send always blocks until the worker responds. The correct pattern for non-blocking sends is the Bash tool's run_in_background parameter. --background was the most common cause of lost inter-worker messages.
+    origin: |
+      Ticket #024 (2026-04-09). Backfilled. PM and TL both kept using --background despite skill warnings, resulting in dropped responses.
+    tags:
+      - fifo
+      - process
+    maps_to:
+      - project:G2
     refs:
       - file: claude_worker/cli.py
         identifier: cmd_send
         role: implements
-
   - id: D53
     name: compaction-resilience-design
-    decision: >
-      Compaction resilience uses a layered approach: prevention
-      (context budget warnings at 50%/65%/80% via Stop hook,
-      delegation enforcement for identity workers), detection
-      (SessionStart hook on compact events, compaction_detector.py),
-      recovery (identity re-injection on compact/clear events,
-      handoff file as recovery anchor). Mid-turn intervention uses
-      PostToolUse exit 2 (the only viable mechanism — signals kill
-      the session in -p mode). No identity text truncation on
-      re-injection.
-    origin: >
-      Ticket #048 (2026-04-10). Signal experiment confirmed:
-      SIGUSR1 no effect on claude process, SIGUSR2/SIGINT kill
-      the session. PostToolUse exit 2 is the only mid-turn path.
-    tags: [context, architecture, observability, lifecycle]
-    maps_to: [project:P10, project:V6]
+    decision: |
+      Compaction resilience uses a layered approach: prevention (context budget warnings at 50%/65%/80% via Stop hook, delegation enforcement for identity workers), detection (SessionStart hook on compact events, compaction_detector.py), recovery (identity re-injection on compact/clear events, handoff file as recovery anchor). Mid-turn intervention uses PostToolUse exit 2 (the only viable mechanism — signals kill the session in -p mode). No identity text truncation on re-injection.
+    origin: |
+      Ticket #048 (2026-04-10). Signal experiment confirmed: SIGUSR1 no effect on claude process, SIGUSR2/SIGINT kill the session. PostToolUse exit 2 is the only mid-turn path.
+    tags:
+      - context
+      - architecture
+      - observability
+      - lifecycle
+    maps_to:
+      - project:P10
+      - project:V6
     refs:
       - file: claude_worker/compaction_detector.py
         identifier: compaction detection hook
@@ -1498,23 +1199,20 @@ decisions:
       - file: .cwork/tickets/048-compaction-resilience/TECHNICAL.md
         identifier: compaction resilience design
         role: defines
-
   - id: D56
     name: replaceme-production-hardening
-    decision: >
-      Harden cmd_replaceme against silent failures: log replacer
-      errors to a sidecar file, deduplicate identity flags from
-      saved_args, load identity config for extra_env, resolve
-      user-installed identities before bundled fallback, and add
-      _ensure_cwork_dirs + register_project calls. Mirrors
-      cmd_start's flow to prevent future divergence.
-    origin: >
-      Ticket #052 (2026-04-10). First production test of replaceme
-      (#023) failed silently — old worker died, no replacement
-      launched, no diagnostics. Root cause: multiple bugs from
-      cmd_replaceme diverging from cmd_start's flow.
-    tags: [architecture, lifecycle, observability]
-    maps_to: [project:G2, project:V2, project:P8]
+    decision: |
+      Harden cmd_replaceme against silent failures: log replacer errors to a sidecar file, deduplicate identity flags from saved_args, load identity config for extra_env, resolve user-installed identities before bundled fallback, and add _ensure_cwork_dirs + register_project calls. Mirrors cmd_start's flow to prevent future divergence.
+    origin: |
+      Ticket #052 (2026-04-10). First production test of replaceme (#023) failed silently — old worker died, no replacement launched, no diagnostics. Root cause: multiple bugs from cmd_replaceme diverging from cmd_start's flow.
+    tags:
+      - architecture
+      - lifecycle
+      - observability
+    maps_to:
+      - project:G2
+      - project:V2
+      - project:P8
     refs:
       - file: claude_worker/cli.py
         identifier: cmd_replaceme
@@ -1525,41 +1223,34 @@ decisions:
       - file: .cwork/tickets/052-replaceme-production-failure/TICKET.md
         identifier: replaceme production failure
         role: defines
-
   - id: D57
     name: tl-post-completion-reporting
-    decision: >
-      TL identity must report back to the PM after completing every
-      ticket assignment: update INDEX.md status, send a completion
-      report via claude-worker send (what was done, commit hash, test
-      count, issues found), and echo the [queue:<id>] tag if the
-      assignment had one. Without this, the PM has no signal that
-      work finished and sits idle.
-    origin: >
-      PM directive (2026-04-10). First TL session completed #052 but
-      the PM had to poll for completion status because the TL identity
-      lacked explicit reporting instructions.
-    tags: [identity, process]
-    maps_to: [project:G2, project:V2]
+    decision: |
+      TL identity must report back to the PM after completing every ticket assignment: update INDEX.md status, send a completion report via claude-worker send (what was done, commit hash, test count, issues found), and echo the [queue:<id>] tag if the assignment had one. Without this, the PM has no signal that work finished and sits idle.
+    origin: |
+      PM directive (2026-04-10). First TL session completed #052 but the PM had to poll for completion status because the TL identity lacked explicit reporting instructions.
+    tags:
+      - identity
+      - process
+    maps_to:
+      - project:G2
+      - project:V2
     refs:
       - file: claude_worker/identities/technical-lead.md
         identifier: Post-completion reporting
         role: defines
-
   - id: D58
     name: foreground-systemd-mode
-    decision: >
-      Add --foreground flag to claude-worker start that runs the
-      manager directly in the current process without forking.
-      Calls run_manager (→ _run_manager_forkless with
-      install_signals=True) instead of the fork/setsid/devnull
-      dance. Enables systemd Type=simple service management.
-      Mutually exclusive with --background.
-    origin: >
-      Ticket #053 (2026-04-10). TAStest Director needs always-on
-      family-rhc deployment under systemd.
-    tags: [architecture, lifecycle]
-    maps_to: [project:G4, project:V2]
+    decision: |
+      Add --foreground flag to claude-worker start that runs the manager directly in the current process without forking. Calls run_manager (→ _run_manager_forkless with install_signals=True) instead of the fork/setsid/devnull dance. Enables systemd Type=simple service management. Mutually exclusive with --background.
+    origin: |
+      Ticket #053 (2026-04-10). TAStest Director needs always-on family-rhc deployment under systemd.
+    tags:
+      - architecture
+      - lifecycle
+    maps_to:
+      - project:G4
+      - project:V2
     refs:
       - file: claude_worker/cli.py
         identifier: cmd_start
@@ -1570,23 +1261,19 @@ decisions:
       - file: .cwork/tickets/053-foreground-systemd-mode/TICKET.md
         identifier: foreground systemd mode
         role: defines
-
   - id: D59
     name: compact-boundary-not-init
-    decision: >
-      system/init fires every turn in -p stream-json mode and is
-      NOT a compaction indicator. The real compaction signal is
-      compact_boundary (type: system, subtype: compact_boundary)
-      with compactMetadata containing trigger type and pre-token
-      count. Hook-based detection (compaction_detector.py) was
-      already correct (uses SessionStart matcher_value=compact).
-      Log analysis must use compact_boundary, never init count.
-    origin: >
-      Ticket #055 (2026-04-11). PM experiment with /compact
-      revealed the real log format. Prior analysis of old TL
-      session incorrectly reported 151 compactions (actually 0).
-    tags: [observability, context]
-    maps_to: [project:G2, project:V2, project:P6]
+    decision: |
+      system/init fires every turn in -p stream-json mode and is NOT a compaction indicator. The real compaction signal is compact_boundary (type: system, subtype: compact_boundary) with compactMetadata containing trigger type and pre-token count. Hook-based detection (compaction_detector.py) was already correct (uses SessionStart matcher_value=compact). Log analysis must use compact_boundary, never init count.
+    origin: |
+      Ticket #055 (2026-04-11). PM experiment with /compact revealed the real log format. Prior analysis of old TL session incorrectly reported 151 compactions (actually 0).
+    tags:
+      - observability
+      - context
+    maps_to:
+      - project:G2
+      - project:V2
+      - project:P6
     refs:
       - file: claude_worker/compaction_detector.py
         identifier: compaction detection hook
@@ -1597,41 +1284,36 @@ decisions:
       - file: tests/test_compaction_detection.py
         identifier: compaction detection tests
         role: implements
-
   - id: D60
     name: claugs-floor-0-6-8
-    decision: >
-      Bump claugs dependency floor from >=0.6.7 to >=0.6.8 for the
-      sub-agent context reporting fix. Context window usage now
-      correctly excludes Task/Agent sub-calls from the main session
-      footprint.
-    origin: >
-      claugs 0.6.8 release (2026-04-11). Fix shipped upstream,
-      bump floor to pick it up.
-    tags: [delegation, tokens]
-    maps_to: [project:V4, project:D6]
+    decision: |
+      Bump claugs dependency floor from >=0.6.7 to >=0.6.8 for the sub-agent context reporting fix. Context window usage now correctly excludes Task/Agent sub-calls from the main session footprint.
+    origin: |
+      claugs 0.6.8 release (2026-04-11). Fix shipped upstream, bump floor to pick it up.
+    tags:
+      - delegation
+      - tokens
+    maps_to:
+      - project:V4
+      - project:D6
     refs:
       - file: pyproject.toml
         identifier: claugs dependency
         role: implements
-
   - id: D61
     name: wrapup-file-injection-at-threshold
-    decision: >
-      Move wrap-up procedures from identity files to separate
-      wrap-up.md files (~/.cwork/identities/<name>/wrap-up.md,
-      bundled fallback for pm and technical-lead). At the 80%
-      context threshold, the Stop hook auto-injects the wrap-up
-      file contents instead of just a warning. This prevents
-      attention decay — the agent receives the full procedure
-      in-context at the moment it needs it.
-    origin: >
-      Ticket #054 (2026-04-11). Old TL session showed wrap-up
-      instructions from session start had decayed by the time
-      they were needed. Injecting at threshold time ensures
-      the agent sees them fresh.
-    tags: [context, lifecycle, identity]
-    maps_to: [project:V6, project:P10, project:G2]
+    decision: |
+      Move wrap-up procedures from identity files to separate wrap-up.md files (~/.cwork/identities/<name>/wrap-up.md, bundled fallback for pm and technical-lead). At the 80% context threshold, the Stop hook auto-injects the wrap-up file contents instead of just a warning. This prevents attention decay — the agent receives the full procedure in-context at the moment it needs it.
+    origin: |
+      Ticket #054 (2026-04-11). Old TL session showed wrap-up instructions from session start had decayed by the time they were needed. Injecting at threshold time ensures the agent sees them fresh.
+    tags:
+      - context
+      - lifecycle
+      - identity
+    maps_to:
+      - project:V6
+      - project:P10
+      - project:G2
     refs:
       - file: claude_worker/context_threshold.py
         identifier: _load_wrapup_file
@@ -1645,59 +1327,40 @@ decisions:
       - file: tests/test_wrapup_injection.py
         identifier: wrap-up injection tests
         role: implements
-
   - id: D62
     name: pm-backlog-continues-during-conversations
-    decision: >
-      Consumer and human conversations do not pause the PM's work
-      loop. The PM continues autonomously deciding priority and
-      queuing tickets in parallel with ongoing discussions.
-      Conversations provide input on shape and signoff — they
-      should not cause deferral on priority or ready tickets.
-      Only pause a specific ticket if the conversation reveals
-      a conflict or a need for new guiding elements.
-    origin: >
-      PM directive (2026-04-11). PM was deferring backlog
-      processing during consumer design discussions, creating
-      idle gaps.
-    tags: [pm, process]
-    maps_to: [project:G2, project:D18]
+    decision: |
+      Consumer and human conversations do not pause the PM's work loop. The PM continues autonomously deciding priority and queuing tickets in parallel with ongoing discussions. Conversations provide input on shape and signoff — they should not cause deferral on priority or ready tickets. Only pause a specific ticket if the conversation reveals a conflict or a need for new guiding elements.
+    origin: |
+      PM directive (2026-04-11). PM was deferring backlog processing during consumer design discussions, creating idle gaps.
+    tags:
+      - pm
+      - process
+    maps_to:
+      - project:G2
+      - project:D18
     refs:
       - file: claude_worker/identities/pm.md
         identifier: Backlog Processing
         role: extends
-
 observations:
   - id: OBS1
     name: mid-turn-intervention-only-via-posttooluse-exit-2
-    description: >
-      The ONLY mechanism for mid-turn agent communication is
-      PostToolUse hooks exiting with code 2 + stderr message. This
-      produces a blocking error shown to the agent mid-turn. No
-      signal gracefully interrupts a turn in -p mode — SIGUSR1 has
-      no effect, SIGUSR2 and SIGINT both kill the session. Use
-      PostToolUse exit 2 sparingly: only for critical thresholds
-      (context >85%) where waiting for turn end risks compaction.
-      Non-critical warnings should use Stop hooks (between turns).
-      Confirmed via live signal testing (2026-04-10, ticket #048).
-
+    description: |
+      The ONLY mechanism for mid-turn agent communication is PostToolUse hooks exiting with code 2 + stderr message. This produces a blocking error shown to the agent mid-turn. No signal gracefully interrupts a turn in -p mode — SIGUSR1 has no effect, SIGUSR2 and SIGINT both kill the session. Use PostToolUse exit 2 sparingly: only for critical thresholds (context >85%) where waiting for turn end risks compaction. Non-critical warnings should use Stop hooks (between turns). Confirmed via live signal testing (2026-04-10, ticket #048).
   - id: D54
     name: compaction-resilience-immediate-phase
-    decision: >
-      Immediate compaction resilience implementation: (1) context
-      warnings at 50%/65%/80% via Stop hook with per-threshold
-      sentinels. 50% = delegation reminder, 65% = wrap-up
-      recommendation, 80% = begin wrap-up. (2) Enhanced compaction
-      detector: logs to .cwork/<identity>/LOG.md, fires
-      claude-worker notify, notes analyze-session/wrap-up were
-      skipped. (3) Identity re-injector: full identity.md + ticket
-      summary + GVP count on compact/clear events; lighter summary
-      on startup/resume. No truncation.
-    origin: >
-      Ticket #048 immediate phase (2026-04-10). Prevention +
-      detection + recovery layered approach approved by human.
-    tags: [context, observability]
-    maps_to: [project:P10, project:V6, project:G2]
+    decision: |
+      Immediate compaction resilience implementation: (1) context warnings at 50%/65%/80% via Stop hook with per-threshold sentinels. 50% = delegation reminder, 65% = wrap-up recommendation, 80% = begin wrap-up. (2) Enhanced compaction detector: logs to .cwork/<identity>/LOG.md, fires claude-worker notify, notes analyze-session/wrap-up were skipped. (3) Identity re-injector: full identity.md + ticket summary + GVP count on compact/clear events; lighter summary on startup/resume. No truncation.
+    origin: |
+      Ticket #048 immediate phase (2026-04-10). Prevention + detection + recovery layered approach approved by human.
+    tags:
+      - context
+      - observability
+    maps_to:
+      - project:P10
+      - project:V6
+      - project:G2
     refs:
       - file: claude_worker/context_threshold.py
         identifier: THRESHOLDS
@@ -1708,37 +1371,32 @@ observations:
       - file: claude_worker/identity_reinjector.py
         identifier: _load_identity_text
         role: implements
-
   - id: D55
     name: context-threshold-70-percent
-    decision: >
-      Added 70% context threshold between the 65% warning and 80%
-      wrap-up trigger. Message: "Finish your current task, close out
-      the ticket, then switch to wrap-up procedures." Four thresholds
-      total: 50% (delegate), 65% (consider wrapping up), 70% (finish
-      and wrap up), 80% (begin wrap-up now).
-    origin: >
-      PM session 03 (2026-04-10). Provides a transition step between
-      "consider wrapping up" and "wrap up now."
-    tags: [context]
-    maps_to: [project:V6, project:P10]
+    decision: |
+      Added 70% context threshold between the 65% warning and 80% wrap-up trigger. Message: "Finish your current task, close out the ticket, then switch to wrap-up procedures." Four thresholds total: 50% (delegate), 65% (consider wrapping up), 70% (finish and wrap up), 80% (begin wrap-up now).
+    origin: |
+      PM session 03 (2026-04-10). Provides a transition step between "consider wrapping up" and "wrap up now."
+    tags:
+      - context
+    maps_to:
+      - project:V6
+      - project:P10
     refs:
       - file: claude_worker/context_threshold.py
         identifier: THRESHOLDS
         role: implements
-
   - id: D63
     name: docs-audit-post-session-03
-    decision: >
-      Comprehensive documentation audit of README.md, CLAUDE.md,
-      and docs/architecture.md to reflect all features shipped in
-      session 03: new subcommands, hooks, identity system, foreground
-      mode, and updated runtime directory layout.
-    origin: >
-      Ticket #056 (2026-04-11). 37+ tickets shipped with partial
-      docs updates; consumer flagged documentation debt.
-    tags: [craftsmanship]
-    maps_to: [project:V1, project:D17]
+    decision: |
+      Comprehensive documentation audit of README.md, CLAUDE.md, and docs/architecture.md to reflect all features shipped in session 03: new subcommands, hooks, identity system, foreground mode, and updated runtime directory layout.
+    origin: |
+      Ticket #056 (2026-04-11). 37+ tickets shipped with partial docs updates; consumer flagged documentation debt.
+    tags:
+      - craftsmanship
+    maps_to:
+      - project:V1
+      - project:D17
     refs:
       - file: README.md
         identifier: claude-worker documentation
@@ -1749,21 +1407,18 @@ observations:
       - file: docs/architecture.md
         identifier: architecture documentation
         role: implements
-
   - id: D64
     name: send-flag-reparse-trailing
-    decision: >
-      Fix send CLI flag ordering by extracting trailing flags from
-      the message positional. When argparse absorbs flags into
-      nargs="*", _reparse_send_flags scans from the end backwards
-      and extracts recognized flags. Message content is preserved
-      even if it contains flag-like words (only trailing flags
-      are extracted).
-    origin: >
-      Ticket #058 (2026-04-10). High hit rate — RHC, PM, and human
-      all tripped on send NAME "msg" --flag failing.
-    tags: [architecture, craftsmanship]
-    maps_to: [project:G4, project:V1]
+    decision: |
+      Fix send CLI flag ordering by extracting trailing flags from the message positional. When argparse absorbs flags into nargs="*", _reparse_send_flags scans from the end backwards and extracts recognized flags. Message content is preserved even if it contains flag-like words (only trailing flags are extracted).
+    origin: |
+      Ticket #058 (2026-04-10). High hit rate — RHC, PM, and human all tripped on send NAME "msg" --flag failing.
+    tags:
+      - architecture
+      - craftsmanship
+    maps_to:
+      - project:G4
+      - project:V1
     refs:
       - file: claude_worker/cli.py
         identifier: _reparse_send_flags
@@ -1771,25 +1426,20 @@ observations:
       - file: tests/test_send_flag_ordering.py
         identifier: send flag ordering tests
         role: implements
-
   - id: D65
     name: pm-autonomous-work-loop
-    decision: >
-      PM operates in two modes via CC native scheduling. Mode 1
-      (continuous work): ScheduleWakeup for adaptive pacing through
-      the backlog (60-270s intervals, cache-aware). Mode 2 (periodic
-      review): CronCreate with durable=true for daily wake-ups
-      (47 8 * * *). Stable state = ideas triaged + tickets actioned
-      + blockers reported. Supersedes D42 (homegrown periodic tasks)
-      and D44 (off-hours cron shell script). CronCreate durable
-      tasks persist across --resume via per-project
-      .claude/scheduled_tasks.json.
-    origin: >
-      Ticket #064 (2026-04-13). PM needed autonomous work loop
-      without human nudges. CC native scheduling (ScheduleWakeup,
-      CronCreate) replaces homegrown periodic task system.
-    tags: [pm, process, lifecycle]
-    maps_to: [project:G2, project:D18, project:V6]
+    decision: |
+      PM operates in two modes via CC native scheduling. Mode 1 (continuous work): ScheduleWakeup for adaptive pacing through the backlog (60-270s intervals, cache-aware). Mode 2 (periodic review): CronCreate with durable=true for daily wake-ups (47 8 * * *). Stable state = ideas triaged + tickets actioned + blockers reported. Supersedes D42 (homegrown periodic tasks) and D44 (off-hours cron shell script). CronCreate durable tasks persist across --resume via per-project .claude/scheduled_tasks.json.
+    origin: |
+      Ticket #064 (2026-04-13). PM needed autonomous work loop without human nudges. CC native scheduling (ScheduleWakeup, CronCreate) replaces homegrown periodic task system.
+    tags:
+      - pm
+      - process
+      - lifecycle
+    maps_to:
+      - project:G2
+      - project:D18
+      - project:V6
     refs:
       - file: claude_worker/identities/pm.md
         identifier: Autonomous Work Loop
@@ -1797,21 +1447,19 @@ observations:
       - file: claude_worker/cli.py
         identifier: PM_INTERNALIZE_MESSAGE
         role: extends
-
   - id: D66
     name: deterministic-migration-system
-    decision: >
-      Versioned migration scripts at ~/.cwork/migrations/NNN-description.sh
-      applied deterministically across registered projects. Per-project
-      .cwork/.migration-version tracks applied level. claude-worker migrate
-      discovers projects via registry, syncs bundled scripts from the
-      package, runs pending migrations in order. Scripts must be idempotent.
-      First migration: 001-roles-directory-rename (D62 prerequisite).
-    origin: >
-      Ticket #061 (2026-04-13). Convention changes don't propagate to
-      existing projects. RHC + human design session identified the need.
-    tags: [architecture, durability]
-    maps_to: [project:G4, project:V3, project:G2]
+    decision: |
+      Versioned migration scripts at ~/.cwork/migrations/NNN-description.sh applied deterministically across registered projects. Per-project .cwork/.migration-version tracks applied level. claude-worker migrate discovers projects via registry, syncs bundled scripts from the package, runs pending migrations in order. Scripts must be idempotent. First migration: 001-roles-directory-rename (D62 prerequisite).
+    origin: |
+      Ticket #061 (2026-04-13). Convention changes don't propagate to existing projects. RHC + human design session identified the need.
+    tags:
+      - architecture
+      - durability
+    maps_to:
+      - project:G4
+      - project:V3
+      - project:G2
     refs:
       - file: claude_worker/cli.py
         identifier: cmd_migrate
@@ -1822,22 +1470,18 @@ observations:
       - file: tests/test_migrate.py
         identifier: migration system tests
         role: implements
-
   - id: D67
     name: roles-directory-rename
-    decision: >
-      Project-level identity runtime state moves from
-      .cwork/<identity>/ to .cwork/roles/<role>/. The "pm" role
-      dir keeps its name; "technical-lead" shortens to "tl".
-      Global identity definitions at ~/.cwork/identities/ are
-      unchanged. Migration 001 handles existing projects.
-      _identity_role_dir() maps identity names to role dir names.
-    origin: >
-      Ticket #062 (2026-04-13). Separation between identity
-      definitions (identities/) and runtime state (roles/).
-      Human approved rename in RHC design session.
-    tags: [architecture, identity]
-    maps_to: [project:V5, project:G4]
+    decision: |
+      Project-level identity runtime state moves from .cwork/<identity>/ to .cwork/roles/<role>/. The "pm" role dir keeps its name; "technical-lead" shortens to "tl". Global identity definitions at ~/.cwork/identities/ are unchanged. Migration 001 handles existing projects. _identity_role_dir() maps identity names to role dir names.
+    origin: |
+      Ticket #062 (2026-04-13). Separation between identity definitions (identities/) and runtime state (roles/). Human approved rename in RHC design session.
+    tags:
+      - architecture
+      - identity
+    maps_to:
+      - project:V5
+      - project:G4
     refs:
       - file: claude_worker/cli.py
         identifier: _identity_role_dir
@@ -1848,20 +1492,19 @@ observations:
       - file: claude_worker/migrations/001-roles-directory-rename.sh
         identifier: first migration script
         role: uses
-
   - id: D68
     name: cairn-validate-enforcement-hook
-    decision: >
-      Extend commit_checker.py PostToolUse hook to run cairn validate
-      when a commit touches .gvp/library/ files. Warns if validation
-      fails. Silently skips if cairn is not installed. 10s timeout.
-      This enforces GVP structural integrity at commit time without
-      blocking (PostToolUse fires after execution).
-    origin: >
-      Ticket #063 (2026-04-13). Agents hand-editing GVP YAML
-      bypassed validation. RHC audit identified the gap.
-    tags: [gvp, process, observability]
-    maps_to: [project:G2, project:D45]
+    decision: |
+      Extend commit_checker.py PostToolUse hook to run cairn validate when a commit touches .gvp/library/ files. Warns if validation fails. Silently skips if cairn is not installed. 10s timeout. This enforces GVP structural integrity at commit time without blocking (PostToolUse fires after execution).
+    origin: |
+      Ticket #063 (2026-04-13). Agents hand-editing GVP YAML bypassed validation. RHC audit identified the gap.
+    tags:
+      - gvp
+      - process
+      - observability
+    maps_to:
+      - project:G2
+      - project:D45
     refs:
       - file: claude_worker/commit_checker.py
         identifier: _check_commit
@@ -1869,21 +1512,19 @@ observations:
       - file: tests/test_commit_checker.py
         identifier: cairn enforcement tests
         role: implements
-
   - id: D69
     name: archive-metadata-preservation
-    decision: >
-      Archived worker directories include metadata.json with audit
-      trail: worker_name, archive_reason (stop/replaceme/exit/unknown),
-      archive_timestamp, session_id, identity, and successor name.
-      archive_runtime_dir accepts reason and successor params.
-      cleanup_runtime_dir forwards the reason. Best-effort write —
-      metadata failure doesn't prevent archival.
-    origin: >
-      Ticket #060 (2026-04-13). Archived dirs had no context about
-      why they were archived. RHC audit identified the gap.
-    tags: [observability, durability]
-    maps_to: [project:G2, project:V3, project:D46]
+    decision: |
+      Archived worker directories include metadata.json with audit trail: worker_name, archive_reason (stop/replaceme/exit/unknown), archive_timestamp, session_id, identity, and successor name. archive_runtime_dir accepts reason and successor params. cleanup_runtime_dir forwards the reason. Best-effort write — metadata failure doesn't prevent archival.
+    origin: |
+      Ticket #060 (2026-04-13). Archived dirs had no context about why they were archived. RHC audit identified the gap.
+    tags:
+      - observability
+      - durability
+    maps_to:
+      - project:G2
+      - project:V3
+      - project:D46
     refs:
       - file: claude_worker/manager.py
         identifier: archive_runtime_dir
@@ -1891,65 +1532,50 @@ observations:
       - file: tests/test_archive_metadata.py
         identifier: archive metadata tests
         role: implements
-
   - id: D70
     name: designer-identity
-    decision: >
-      Designer identity for upstream requirements gathering.
-      Socratic proposal-and-refine approach — proposes options
-      with trade-offs, never asks open-ended questions. Tracks
-      flex points (FP-N) and assumptions (A-N). Produces
-      structured prose design docs per #051 format. Never
-      touches code. Hands off locked design docs to PM for
-      mechanical GVP translation. Helper agent protocol uses
-      delta-based vocabulary for rendering tasks.
-    origin: >
-      Ticket #049 (2026-04-13). TAStest Director identified
-      the gap — no identity for the upstream design stage.
-      Dependencies #050 (flex-point) and #051 (artifact format)
-      completed first.
-    tags: [identity, architecture]
-    maps_to: [project:G4, project:V5, project:D29]
+    decision: |
+      Designer identity for upstream requirements gathering. Socratic proposal-and-refine approach — proposes options with trade-offs, never asks open-ended questions. Tracks flex points (FP-N) and assumptions (A-N). Produces structured prose design docs per #051 format. Never touches code. Hands off locked design docs to PM for mechanical GVP translation. Helper agent protocol uses delta-based vocabulary for rendering tasks.
+    origin: |
+      Ticket #049 (2026-04-13). TAStest Director identified the gap — no identity for the upstream design stage. Dependencies #050 (flex-point) and #051 (artifact format) completed first.
+    tags:
+      - identity
+      - architecture
+    maps_to:
+      - project:G4
+      - project:V5
+      - project:D29
     refs:
       - file: .cwork/tickets/051-designer-artifact-format/TECHNICAL.md
         identifier: Designer Artifact Format
         role: uses
-
   - id: D71
     name: s2-design-discussion-protocol
-    decision: >
-      PM-led design discussions follow the S2 protocol: 7-step
-      analytical process with specific lenses. Core steps: formulate
-      position (grounded in GVP), brief TL, DRY lens, anti-realist
-      lens (challenge boundaries), boundary analysis (enumerate break
-      points, classify as handle-now/flex-point/accept-risk),
-      adversarial review (ephemeral agent prompted to find breaks),
-      synthesize into design report. Software-specific extensions
-      add API, backwards-compat, testing, CLI, and performance
-      lenses. Stored as global GVP at ~/.cwork/gvp/library/design/.
-    origin: >
-      Ticket #065 (2026-04-13). Anti-realist lens and boundary
-      analysis are novel additions to PM methodology. RHC + human
-      design session.
-    tags: [process, gvp]
-    maps_to: [project:G2, project:V1]
+    decision: |
+      PM-led design discussions follow the S2 protocol: 7-step analytical process with specific lenses. Core steps: formulate position (grounded in GVP), brief TL, DRY lens, anti-realist lens (challenge boundaries), boundary analysis (enumerate break points, classify as handle-now/flex-point/accept-risk), adversarial review (ephemeral agent prompted to find breaks), synthesize into design report. Software-specific extensions add API, backwards-compat, testing, CLI, and performance lenses. Stored as global GVP at ~/.cwork/gvp/library/design/.
+    origin: |
+      Ticket #065 (2026-04-13). Anti-realist lens and boundary analysis are novel additions to PM methodology. RHC + human design session.
+    tags:
+      - process
+      - gvp
+    maps_to:
+      - project:G2
+      - project:V1
     refs:
       - file: .cwork/tickets/065-design-discussion-protocol/TICKET.md
         identifier: design discussion protocol
         role: defines
-
   - id: D72
     name: commit-log-in-cwork
-    decision: >
-      The commit_checker PostToolUse hook appends each commit to
-      .cwork/commits.log (timestamp + short hash + subject). Gives
-      the .cwork/ monitor a file change to detect when commits
-      happen. Best-effort, no crash on failure.
-    origin: >
-      TL idea triage (2026-04-13). Small extension of existing
-      commit_checker with immediate observability value.
-    tags: [observability]
-    maps_to: [project:G2, project:D15]
+    decision: |
+      The commit_checker PostToolUse hook appends each commit to .cwork/commits.log (timestamp + short hash + subject). Gives the .cwork/ monitor a file change to detect when commits happen. Best-effort, no crash on failure.
+    origin: |
+      TL idea triage (2026-04-13). Small extension of existing commit_checker with immediate observability value.
+    tags:
+      - observability
+    maps_to:
+      - project:G2
+      - project:D15
     refs:
       - file: claude_worker/commit_checker.py
         identifier: _log_commit
@@ -1957,20 +1583,18 @@ observations:
       - file: tests/test_commit_checker.py
         identifier: TestCommitLog
         role: implements
-
   - id: D73
     name: todowrite-workflow-instructions
-    decision: >
-      PM and TL identity files instruct agents to use TodoWrite
-      at key workflow points: ticket assignment, multi-step tasks,
-      and wrap-up. Lightweight enforcement via prose guidance
-      rather than hooks. Adds visibility into work-in-progress
-      without additional infrastructure.
-    origin: >
-      TL idea triage (2026-04-13). TodoWrite was available but
-      identities didn't instruct when to use it.
-    tags: [identity, process]
-    maps_to: [project:G2, project:V1]
+    decision: |
+      PM and TL identity files instruct agents to use TodoWrite at key workflow points: ticket assignment, multi-step tasks, and wrap-up. Lightweight enforcement via prose guidance rather than hooks. Adds visibility into work-in-progress without additional infrastructure.
+    origin: |
+      TL idea triage (2026-04-13). TodoWrite was available but identities didn't instruct when to use it.
+    tags:
+      - identity
+      - process
+    maps_to:
+      - project:G2
+      - project:V1
     refs:
       - file: claude_worker/identities/pm.md
         identifier: Task Tracking (TodoWrite)
@@ -1978,128 +1602,110 @@ observations:
       - file: claude_worker/identities/technical-lead.md
         identifier: Task Tracking (TodoWrite)
         role: defines
-
   - id: D74
     name: unified-thread-data-model
-    decision: >
-      Replace six ad-hoc messaging mechanisms (FIFO direct write,
-      queue dir, chat transcripts, per-consumer chat files, missing-
-      tag monitoring, broadcast) with one thread primitive. Thread =
-      append-only JSONL file + atomic index.json for metadata.
-      Project-scoped at .cwork/threads/.
-    origin: >
-      Inbox/threads S2 design (2026-04-13). Human-approved after
-      anti-realist analysis dissolved four concepts into one.
-    tags: [architecture, fifo]
-    maps_to: [project:V1, project:V5, project:G4, project:P5]
+    decision: |
+      Replace six ad-hoc messaging mechanisms (FIFO direct write, queue dir, chat transcripts, per-consumer chat files, missing- tag monitoring, broadcast) with one thread primitive. Thread = append-only JSONL file + atomic index.json for metadata. Project-scoped at .cwork/threads/.
+    origin: |
+      Inbox/threads S2 design (2026-04-13). Human-approved after anti-realist analysis dissolved four concepts into one.
+    tags:
+      - architecture
+      - fifo
+    maps_to:
+      - project:V1
+      - project:V5
+      - project:G4
+      - project:P5
     refs:
       - file: .cwork/pm/ideas/inbox-threads-redesign-s2.md
         identifier: Inbox Threads Redesign S2 Analysis
         role: defines
-
   - id: D75
     name: n-party-thread-participants
-    decision: >
-      Thread data model supports N participants from day one.
-      Schema: participants list on every thread. The N-party use
-      case (design discussions, RHC cross-project visibility) is
-      identified, not speculative. One extra field now vs schema
-      migration later.
-    origin: >
-      Inbox/threads S2 design (2026-04-13). Grounded in main:P8
-      (implement known future needs at low marginal cost).
-    tags: [architecture]
-    maps_to: [project:G4, project:V2]
+    decision: |
+      Thread data model supports N participants from day one. Schema: participants list on every thread. The N-party use case (design discussions, RHC cross-project visibility) is identified, not speculative. One extra field now vs schema migration later.
+    origin: |
+      Inbox/threads S2 design (2026-04-13). Grounded in main:P8 (implement known future needs at low marginal cost).
+    tags:
+      - architecture
+    maps_to:
+      - project:G4
+      - project:V2
     refs:
       - file: .cwork/pm/ideas/inbox-threads-redesign-s2.md
         identifier: Inbox Threads Redesign S2 Analysis
         role: defines
-
   - id: D76
     name: clean-jump-thread-migration
-    decision: >
-      Migrate from FIFO/queue to thread model via clean A→B jump,
-      not incremental dual-write. No live threads exist to preserve.
-      Dual-write intermediate state is its own complexity source.
-      Surface area is bounded (send/read/reply callers).
-    origin: >
-      Inbox/threads S2 design (2026-04-13). Human explicitly
-      rejected incremental approach.
-    tags: [architecture, process]
-    maps_to: [project:P11]
+    decision: |
+      Migrate from FIFO/queue to thread model via clean A→B jump, not incremental dual-write. No live threads exist to preserve. Dual-write intermediate state is its own complexity source. Surface area is bounded (send/read/reply callers).
+    origin: |
+      Inbox/threads S2 design (2026-04-13). Human explicitly rejected incremental approach.
+    tags:
+      - architecture
+      - process
+    maps_to:
+      - project:P11
     refs:
       - file: .cwork/pm/ideas/inbox-threads-redesign-s2.md
         identifier: Inbox Threads Redesign S2 Analysis
         role: defines
-
   - id: D77
     name: tickets-compose-with-threads
-    decision: >
-      Tickets are structured project metadata (INDEX.md + TICKET.md).
-      Threads are the conversation primitive. A ticket references a
-      thread for its discussion; threads don't replace tickets.
-      The anti-realist analysis partially dissolved this boundary —
-      tickets are threads WITH metadata — but the INDEX.md query
-      interface justifies keeping them as a separate view.
-    origin: >
-      Inbox/threads S2 design (2026-04-13). Boundary analysis
-      confirmed tickets have relational metadata that threads lack.
-    tags: [architecture]
-    maps_to: [project:V5]
+    decision: |
+      Tickets are structured project metadata (INDEX.md + TICKET.md). Threads are the conversation primitive. A ticket references a thread for its discussion; threads don't replace tickets. The anti-realist analysis partially dissolved this boundary — tickets are threads WITH metadata — but the INDEX.md query interface justifies keeping them as a separate view.
+    origin: |
+      Inbox/threads S2 design (2026-04-13). Boundary analysis confirmed tickets have relational metadata that threads lack.
+    tags:
+      - architecture
+    maps_to:
+      - project:V5
     refs:
       - file: .cwork/pm/ideas/inbox-threads-redesign-s2.md
         identifier: Inbox Threads Redesign S2 Analysis
         role: defines
-
   - id: D78
     name: thread-files-project-scoped
-    decision: >
-      Thread files live at .cwork/threads/ within each project.
-      Project-scoped because thread participants are project-scoped
-      workers. Cross-project threads (FP-2) deferred until RHC
-      needs them.
-    origin: >
+    decision: |
+      Thread files live at .cwork/threads/ within each project. Project-scoped because thread participants are project-scoped workers. Cross-project threads (FP-2) deferred until RHC needs them.
+    origin: |
       Inbox/threads S2 design (2026-04-13).
-    tags: [architecture]
-    maps_to: [project:V2]
+    tags:
+      - architecture
+    maps_to:
+      - project:V2
     refs:
       - file: .cwork/pm/ideas/inbox-threads-redesign-s2.md
         identifier: Inbox Threads Redesign S2 Analysis
         role: defines
-
   - id: D79
     name: always-lightweight-thread-notifications
-    decision: >
-      Thread notifications use consistent lightweight format:
-      [system:new-message] Thread <id> from <sender>: <preview>.
-      Same format regardless of agent state (idle vs working).
-      Agent reads full thread content when ready to act.
-      Grounded in OBS3 (flow interruption causes step-dropping)
-      and OBS4 (token-distance recall is lossy).
-    origin: >
-      Inbox/threads S2 design (2026-04-13). Human approved
-      always-lightweight over context-dependent.
-    tags: [architecture, coordination]
-    maps_to: [project:P12]
+    decision: |
+      Thread notifications use consistent lightweight format: [system:new-message] Thread <id> from <sender>: <preview>. Same format regardless of agent state (idle vs working). Agent reads full thread content when ready to act. Grounded in OBS3 (flow interruption causes step-dropping) and OBS4 (token-distance recall is lossy).
+    origin: |
+      Inbox/threads S2 design (2026-04-13). Human approved always-lightweight over context-dependent.
+    tags:
+      - architecture
+      - coordination
+    maps_to:
+      - project:P12
     refs:
       - file: .cwork/pm/ideas/inbox-threads-redesign-s2.md
         identifier: Inbox Threads Redesign S2 Analysis
         role: defines
   - id: D80
     name: thread-store-module
-    decision: >
-      Thread primitive implemented in claude_worker/thread_store.py.
-      Append-only JSONL per thread (.cwork/threads/<id>.jsonl) +
-      atomic index.json for metadata. CLI via claude-worker thread
-      {create|send|read|list|close}. N-party participant list on
-      every thread. Messages have unique IDs for since-marker
-      pagination. Index uses atomic sibling-tmp write.
-    origin: >
-      Phase 1 implementation of the inbox/threads S2 design
-      (2026-04-13). Clean-jump: new module, not incremental
-      modification of existing send/reply.
-    tags: [architecture, fifo]
-    maps_to: [project:D74, project:D75, project:D76]
+    decision: |
+      Thread primitive implemented in claude_worker/thread_store.py. Append-only JSONL per thread (.cwork/threads/<id>.jsonl) + atomic index.json for metadata. CLI via claude-worker thread {create|send|read|list|close}. N-party participant list on every thread. Messages have unique IDs for since-marker pagination. Index uses atomic sibling-tmp write.
+    origin: |
+      Phase 1 implementation of the inbox/threads S2 design (2026-04-13). Clean-jump: new module, not incremental modification of existing send/reply.
+    tags:
+      - architecture
+      - fifo
+    maps_to:
+      - project:D74
+      - project:D75
+      - project:D76
     refs:
       - file: claude_worker/thread_store.py
         identifier: thread store module
@@ -2110,40 +1716,33 @@ observations:
       - file: tests/test_thread_store.py
         identifier: thread store tests
         role: implements
-
   - id: D81
     name: remote-control-via-ccr-cost-driven
-    decision: >
-      Remote control uses Claude Code's built-in CCR (Cloud Container
-      Runtime) via the -p mode control_request stdin message. This
-      enables the Claude mobile app as the UI. This is a cost-driven
-      architectural compromise (C1: Max subscription tokens only via
-      CC), not a preference. The preferred architecture would be
-      LangChain/LangGraph with deterministic flows and direct API.
-      CCR gets replaced when C1 is lifted.
-    origin: >
-      Human decision via RHC (2026-04-13). Option C from #057
-      research. "I'm already leveraging Anthropic's infra and
-      dependent on it. This lets me use the Claude mobile app."
-    tags: [architecture]
-    maps_to: [project:C1, project:G4]
+    decision: |
+      Remote control uses Claude Code's built-in CCR (Cloud Container Runtime) via the -p mode control_request stdin message. This enables the Claude mobile app as the UI. This is a cost-driven architectural compromise (C1: Max subscription tokens only via CC), not a preference. The preferred architecture would be LangChain/LangGraph with deterministic flows and direct API. CCR gets replaced when C1 is lifted.
+    origin: |
+      Human decision via RHC (2026-04-13). Option C from #057 research. "I'm already leveraging Anthropic's infra and dependent on it. This lets me use the Claude mobile app."
+    tags:
+      - architecture
+    maps_to:
+      - project:C1
+      - project:G4
     refs:
       - file: .cwork/tickets/067-remote-control-ccr-implementation/TICKET.md
         identifier: Option C implementation plan
         role: defines
-
   - id: D82
     name: resume-archives-stale-dead-workers
-    decision: >
-      start --resume detects dead workers with stale runtime dirs,
-      archives them (reason: stale-resume), and proceeds. Alive
-      workers still error. Fixes the "already exists" error on
-      crash recovery.
-    origin: >
-      Ticket #068 (2026-04-13). Human hit "already exists" when
-      resuming a dead worker after crash.
-    tags: [lifecycle, durability]
-    maps_to: [project:G2, project:V3]
+    decision: |
+      start --resume detects dead workers with stale runtime dirs, archives them (reason: stale-resume), and proceeds. Alive workers still error. Fixes the "already exists" error on crash recovery.
+    origin: |
+      Ticket #068 (2026-04-13). Human hit "already exists" when resuming a dead worker after crash.
+    tags:
+      - lifecycle
+      - durability
+    maps_to:
+      - project:G2
+      - project:V3
     refs:
       - file: claude_worker/cli.py
         identifier: cmd_start
@@ -2151,37 +1750,34 @@ observations:
       - file: tests/test_resume_recovery.py
         identifier: resume recovery tests
         role: implements
-
   - id: D83
     name: fix-legacy-paths-in-saved-args
-    decision: >
-      On --resume, saved claude_args from .sessions.json are scanned
-      for legacy /tmp/claude-workers/ paths and replaced with the
-      current ~/.cwork/workers/ base. Ensures identity.md and
-      settings.json paths resolve after migration.
-    origin: >
-      Ticket #069 (2026-04-13). Migration left stale /tmp/ paths
-      in .sessions.json claude_args.
-    tags: [durability, architecture]
-    maps_to: [project:V3, project:D47]
+    decision: |
+      On --resume, saved claude_args from .sessions.json are scanned for legacy /tmp/claude-workers/ paths and replaced with the current ~/.cwork/workers/ base. Ensures identity.md and settings.json paths resolve after migration.
+    origin: |
+      Ticket #069 (2026-04-13). Migration left stale /tmp/ paths in .sessions.json claude_args.
+    tags:
+      - durability
+      - architecture
+    maps_to:
+      - project:V3
+      - project:D47
     refs:
       - file: claude_worker/cli.py
         identifier: _fix_legacy_paths_in_args
         role: implements
-
   - id: D84
     name: resume-from-latest-archive
-    decision: >
-      start --resume falls back to the latest archive when
-      .sessions.json has no entry. Scans get_base_dir() for
-      <name>.<timestamp>.* dirs, reads the session file from
-      the newest. Enables the stop → resume workflow even when
-      .sessions.json was not updated.
-    origin: >
-      Ticket #070 (2026-04-13). stop archives runtime dir but
-      --resume couldn't find the session.
-    tags: [lifecycle, durability]
-    maps_to: [project:G2, project:D46]
+    decision: |
+      start --resume falls back to the latest archive when .sessions.json has no entry. Scans get_base_dir() for <name>.<timestamp>.* dirs, reads the session file from the newest. Enables the stop → resume workflow even when .sessions.json was not updated.
+    origin: |
+      Ticket #070 (2026-04-13). stop archives runtime dir but --resume couldn't find the session.
+    tags:
+      - lifecycle
+      - durability
+    maps_to:
+      - project:G2
+      - project:D46
     refs:
       - file: claude_worker/cli.py
         identifier: _find_latest_archive
@@ -2189,24 +1785,18 @@ observations:
       - file: tests/test_resume_recovery.py
         identifier: resume recovery tests
         role: implements
-
   - id: D85
     name: ccr-remote-control-implementation
-    decision: >
-      Implement remote control via CCR control_request (Option C
-      from #057 research). --remote flag on start injects a
-      control_request message on claude's stdin after startup,
-      polls the log for the matching control_response, and prints
-      session_url/connect_url to stderr for connecting via the
-      Claude mobile app. Composes with --foreground for systemd
-      deployment. Non-fatal: timeout or error prints warning but
-      lets the worker continue without remote control.
-    origin: >
-      Ticket #067 (2026-04-14). Max subscription tokens only
-      usable via Claude Code; CCR bridge enables mobile app UI.
-      Cost-driven architectural compromise (not preferred arch).
-    tags: [architecture, observability]
-    maps_to: [project:G4, project:D81]
+    decision: |
+      Implement remote control via CCR control_request (Option C from #057 research). --remote flag on start injects a control_request message on claude's stdin after startup, polls the log for the matching control_response, and prints session_url/connect_url to stderr for connecting via the Claude mobile app. Composes with --foreground for systemd deployment. Non-fatal: timeout or error prints warning but lets the worker continue without remote control.
+    origin: |
+      Ticket #067 (2026-04-14). Max subscription tokens only usable via Claude Code; CCR bridge enables mobile app UI. Cost-driven architectural compromise (not preferred arch).
+    tags:
+      - architecture
+      - observability
+    maps_to:
+      - project:G4
+      - project:D81
     refs:
       - file: claude_worker/manager.py
         identifier: _enable_remote_control
@@ -2217,23 +1807,18 @@ observations:
       - file: tests/test_remote_control.py
         identifier: remote control tests
         role: implements
-
   - id: D86
     name: discoverability-commands
-    decision: >
-      claude-worker provides 4 standard discoverability commands:
-      `version`/`--version` prints semver, `changelog [--since V]`
-      prints CHANGELOG.md filtered by version, `docs` prints path
-      to README.md, `skill` prints path to installed skill
-      (~/.claude/skills/claude-worker/SKILL.md). CHANGELOG.md
-      created at project root, maintained per-release. Implements
-      the global P10 discoverability principle.
-    origin: >
-      Ticket #071 (2026-04-15). RHC identified friction: no
-      canonical way to discover tool state, changes, docs, or
-      skill sync status.
-    tags: [observability, architecture]
-    maps_to: [project:V2, main:P10]
+    decision: |
+      claude-worker provides 4 standard discoverability commands: `version`/`--version` prints semver, `changelog [--since V]` prints CHANGELOG.md filtered by version, `docs` prints path to README.md, `skill` prints path to installed skill (~/.claude/skills/claude-worker/SKILL.md). CHANGELOG.md created at project root, maintained per-release. Implements the global P10 discoverability principle.
+    origin: |
+      Ticket #071 (2026-04-15). RHC identified friction: no canonical way to discover tool state, changes, docs, or skill sync status.
+    tags:
+      - observability
+      - architecture
+    maps_to:
+      - project:V2
+      - main:P10
     refs:
       - file: claude_worker/cli.py
         identifier: cmd_version
@@ -2253,23 +1838,20 @@ observations:
       - file: tests/test_discoverability.py
         identifier: discoverability tests
         role: implements
-
   - id: D87
     name: thread-notifications-via-file-watcher
-    decision: >
-      The manager polls .cwork/threads/ every 5s (THREAD_MONITOR_
-      INTERVAL_SECONDS) and compares snapshots. On new messages in
-      threads where the worker is a participant, injects a
-      lightweight [system:new-message] notification via FIFO:
-      "Thread <id> from <sender>: <first 80 chars>". Does not
-      notify the sender about their own messages. Worker reads the
-      full thread on demand. Participants checked via thread index.
-    origin: >
-      Phase 2 of inbox/threads (2026-04-15). Implements the
-      notification side of the thread primitive per D79, P12,
-      main:OBS3, main:OBS4.
-    tags: [fifo, coordination, observability]
-    maps_to: [project:D74, project:D79, project:P12]
+    decision: |
+      The manager polls .cwork/threads/ every 5s (THREAD_MONITOR_ INTERVAL_SECONDS) and compares snapshots. On new messages in threads where the worker is a participant, injects a lightweight [system:new-message] notification via FIFO: "Thread <id> from <sender>: <first 80 chars>". Does not notify the sender about their own messages. Worker reads the full thread on demand. Participants checked via thread index.
+    origin: |
+      Phase 2 of inbox/threads (2026-04-15). Implements the notification side of the thread primitive per D79, P12, main:OBS3, main:OBS4.
+    tags:
+      - fifo
+      - coordination
+      - observability
+    maps_to:
+      - project:D74
+      - project:D79
+      - project:P12
     refs:
       - file: claude_worker/manager.py
         identifier: check_thread_changes
@@ -2277,34 +1859,22 @@ observations:
       - file: tests/test_thread_notifications.py
         identifier: thread notification tests
         role: implements
-
   - id: D88
     name: thread-migration-phase-3-with-response-tee
-    decision: >
-      send/reply/read migrated from FIFO/queue/log to the thread
-      primitive (D74) via clean-jump (D76). Per-pair thread IDs
-      (pair-<a>-<b>, sorted/symmetric) and per-chat IDs
-      (chat-<id>) provide deterministic routing; ensure_thread is
-      idempotent and extends participants when new senders join.
-      The manager's stdout_to_log thread tees assistant responses
-      with stop_reason=end_turn to the active thread
-      (runtime/active-thread tracks the most recent inbound
-      thread, updated by check_thread_changes on successful FIFO
-      writes). check_thread_changes gained a `seeded` flag so the
-      manager's startup-time pre-seed doesn't get absorbed as
-      "first scan, no diff" — fixes a genuine delivery race where
-      writes landing before the first 5s poll were silently
-      dropped. `read --log` retains raw log access. `read`
-      auto-detects the pair thread and silently falls back to the
-      log when no saved cwd exists (tests, fresh workers). Phase 2
-      notifications remain lightweight (P12, OBS4) — full content
-      read on demand via thread read.
-    origin: >
-      Phase 3 of inbox/threads (2026-04-15). Human approved
-      Option B (full migration with response tee) over storage-
-      only or user-side-only alternatives.
-    tags: [architecture, fifo, coordination]
-    maps_to: [project:D74, project:D76, project:D77, project:D79, project:P12]
+    decision: |
+      send/reply/read migrated from FIFO/queue/log to the thread primitive (D74) via clean-jump (D76). Per-pair thread IDs (pair-<a>-<b>, sorted/symmetric) and per-chat IDs (chat-<id>) provide deterministic routing; ensure_thread is idempotent and extends participants when new senders join. The manager's stdout_to_log thread tees assistant responses with stop_reason=end_turn to the active thread (runtime/active-thread tracks the most recent inbound thread, updated by check_thread_changes on successful FIFO writes). check_thread_changes gained a `seeded` flag so the manager's startup-time pre-seed doesn't get absorbed as "first scan, no diff" — fixes a genuine delivery race where writes landing before the first 5s poll were silently dropped. `read --log` retains raw log access. `read` auto-detects the pair thread and silently falls back to the log when no saved cwd exists (tests, fresh workers). Phase 2 notifications remain lightweight (P12, OBS4) — full content read on demand via thread read.
+    origin: |
+      Phase 3 of inbox/threads (2026-04-15). Human approved Option B (full migration with response tee) over storage- only or user-side-only alternatives.
+    tags:
+      - architecture
+      - fifo
+      - coordination
+    maps_to:
+      - project:D74
+      - project:D76
+      - project:D77
+      - project:D79
+      - project:P12
     refs:
       - file: claude_worker/thread_store.py
         identifier: pair_thread_id
@@ -2342,21 +1912,19 @@ observations:
       - file: tests/test_thread_migration.py
         identifier: migration tests
         role: implements
-
   - id: D89
     name: thread-phase-4-fifo-internal-only
-    decision: >
-      Phase 4 of inbox/threads: user-facing references to "FIFO"
-      removed from README.md and CLI help text. "Thread" is the
-      only communication concept users see. FIFO stays as internal
-      plumbing (manager writes to claude's stdin). Internal docs
-      (CLAUDE.md, docs/architecture.md) retain FIFO mentions — they
-      describe the architecture, not the user model.
-    origin: >
-      Phase 4 of inbox/threads (2026-04-15). Finalizes D74 anti-
-      realist unification — users see one concept, not six.
-    tags: [observability, craftsmanship]
-    maps_to: [project:D74, project:D88, project:V1]
+    decision: |
+      Phase 4 of inbox/threads: user-facing references to "FIFO" removed from README.md and CLI help text. "Thread" is the only communication concept users see. FIFO stays as internal plumbing (manager writes to claude's stdin). Internal docs (CLAUDE.md, docs/architecture.md) retain FIFO mentions — they describe the architecture, not the user model.
+    origin: |
+      Phase 4 of inbox/threads (2026-04-15). Finalizes D74 anti- realist unification — users see one concept, not six.
+    tags:
+      - observability
+      - craftsmanship
+    maps_to:
+      - project:D74
+      - project:D88
+      - project:V1
     refs:
       - file: README.md
         identifier: claude-worker documentation
@@ -2364,26 +1932,20 @@ observations:
       - file: claude_worker/cli.py
         identifier: reply help text
         role: extends
-
   - id: D90
     name: replaceme-always-fresh-never-resumes
-    decision: >
-      replaceme ALWAYS starts a fresh session. Zero conversation
-      carryover from the prior worker. No --resume flag, no
-      configurable preservation. The replacement PM reads the
-      latest handoff file as its continuity mechanism — the handoff
-      is the design, conversation preservation is not. cmd_replaceme
-      code path must NEVER produce --resume in claude_args. start
-      --resume is a separate command, separate verb, separate
-      intent; implementations must NOT share code that could leak
-      --resume into replaceme.
-    origin: >
-      Ticket #072 (2026-04-15). RHC identified the bug: replaceme
-      at cli.py:3230 used --resume, silently preserving 6 days
-      of conversation across "replacements". The 85% → 65%
-      context drop was ephemeral cache expiry, not fresh context.
-    tags: [architecture, lifecycle, context]
-    maps_to: [project:V2, project:V6, project:D51]
+    decision: |
+      replaceme ALWAYS starts a fresh session. Zero conversation carryover from the prior worker. No --resume flag, no configurable preservation. The replacement PM reads the latest handoff file as its continuity mechanism — the handoff is the design, conversation preservation is not. cmd_replaceme code path must NEVER produce --resume in claude_args. start --resume is a separate command, separate verb, separate intent; implementations must NOT share code that could leak --resume into replaceme.
+    origin: |
+      Ticket #072 (2026-04-15). RHC identified the bug: replaceme at cli.py:3230 used --resume, silently preserving 6 days of conversation across "replacements". The 85% → 65% context drop was ephemeral cache expiry, not fresh context.
+    tags:
+      - architecture
+      - lifecycle
+      - context
+    maps_to:
+      - project:V2
+      - project:V6
+      - project:D51
     refs:
       - file: claude_worker/cli.py
         identifier: cmd_replaceme
@@ -2394,24 +1956,20 @@ observations:
       - file: tests/test_replaceme_fresh.py
         identifier: fresh-start tests
         role: implements
-
   - id: D91
     name: identity-drift-detection
-    decision: >
-      Identity files (pm.md, technical-lead.md, custom identities)
-      are hashed at copy time during cmd_start and cmd_replaceme.
-      Hash stored in runtime/identity.hash. Manager's poll loop
-      compares stored hash against current source hash every 30s
-      (IDENTITY_DRIFT_CHECK_INTERVAL_SECONDS); on drift, injects
-      a [system:identity-drift] notification (lightweight per P12).
-      Worker takes action via replaceme — no auto-update. Notification
-      deduped per divergence (one warning per divergence cycle).
-    origin: >
-      Ticket #066 (2026-04-15). TL filed after manually copying
-      stale identity files to claugs/playlite workers. Drift was
-      previously discovered only by manual inspection.
-    tags: [observability, identity, lifecycle]
-    maps_to: [project:G2, project:V2, project:P12]
+    decision: |
+      Identity files (pm.md, technical-lead.md, custom identities) are hashed at copy time during cmd_start and cmd_replaceme. Hash stored in runtime/identity.hash. Manager's poll loop compares stored hash against current source hash every 30s (IDENTITY_DRIFT_CHECK_INTERVAL_SECONDS); on drift, injects a [system:identity-drift] notification (lightweight per P12). Worker takes action via replaceme — no auto-update. Notification deduped per divergence (one warning per divergence cycle).
+    origin: |
+      Ticket #066 (2026-04-15). TL filed after manually copying stale identity files to claugs/playlite workers. Drift was previously discovered only by manual inspection.
+    tags:
+      - observability
+      - identity
+      - lifecycle
+    maps_to:
+      - project:G2
+      - project:V2
+      - project:P12
     refs:
       - file: claude_worker/manager.py
         identifier: check_identity_drift
@@ -2428,23 +1986,57 @@ observations:
       - file: tests/test_identity_drift.py
         identifier: drift detection tests
         role: implements
-
   - id: D92
     name: clear-worker-env-in-tests
-    rationale: >
-      Worker env vars (CW_WORKER_NAME, CW_IDENTITY, CW_PARENT_WORKER)
-      leak into test processes when pytest runs inside a worker context,
-      changing _resolve_sender() output and producing non-deterministic
-      thread pair names. An autouse session-scoped fixture clears these
-      vars for the entire suite and restores on teardown.
-    alternatives: >
-      1. Function-scoped monkeypatch.delenv in each affected fixture —
-      rejected: only protects tests using that fixture (violates P5).
-      2. Hardcode dynamic pair names in assertions — rejected: papers
-      over the real problem (env contamination).
-    tags: [testing]
-    maps_to: [project:G3, project:P4, project:P5]
+    rationale: |
+      Worker env vars (CW_WORKER_NAME, CW_IDENTITY, CW_PARENT_WORKER) leak into test processes when pytest runs inside a worker context, changing _resolve_sender() output and producing non-deterministic thread pair names. An autouse session-scoped fixture clears these vars for the entire suite and restores on teardown.
+    alternatives: |
+      1. Function-scoped monkeypatch.delenv in each affected fixture — rejected: only protects tests using that fixture (violates P5). 2. Hardcode dynamic pair names in assertions — rejected: papers over the real problem (env contamination).
+    tags:
+      - testing
+    maps_to:
+      - project:G3
+      - project:P4
+      - project:P5
     refs:
       - file: tests/conftest.py
         identifier: _clear_worker_env
+        role: implements
+
+  - id: D93
+    name: centralize-thread-storage-global
+    rationale: >
+      Thread files moved from per-project <cwd>/.cwork/threads/ to global
+      ~/.cwork/threads/. Removes cwd parameter from all thread_store
+      public functions. Eliminates the CWD-dependent storage path that
+      caused worker-to-interactive-session replies to land in the wrong
+      location. Threads are globally-unique pairs (worker names are
+      globally unique), so project context in the key is unnecessary.
+      Clean-jump migration per P11: migrate_from_project() moves existing
+      per-project files at manager startup. _THREADS_DIR_OVERRIDE module
+      var provides test isolation without monkeypatching call sites.
+    alternatives: >
+      1. Keep per-project storage, add symlinks for cross-project — rejected:
+      complex and fragile.
+      2. Dual-write to both locations during transition — rejected: P11
+      says clean-jump when no live state preservation is needed.
+      3. Make cwd optional with global default — rejected: leaves implicit
+      path resolution, violates V2.
+    tags: [architecture, threads]
+    maps_to: [project:V5, project:P5, project:P11]
+    refs:
+      - file: claude_worker/thread_store.py
+        identifier: _threads_dir
+        role: implements
+      - file: claude_worker/thread_store.py
+        identifier: migrate_from_project
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: snapshot_threads
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: check_thread_changes
+        role: implements
+      - file: tests/conftest.py
+        identifier: _isolate_global_threads
         role: implements

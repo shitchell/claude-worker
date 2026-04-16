@@ -108,21 +108,22 @@ class TestCmdReply:
     """
 
     def test_reply_appends_to_pair_thread(self, tmp_path: Path, monkeypatch):
+        from claude_worker import thread_store
         from claude_worker.cli import cmd_reply
         from claude_worker.thread_store import pair_thread_id, read_messages
+
+        # Isolate threads to tmp dir
+        threads_dir = tmp_path / "threads"
+        monkeypatch.setattr(thread_store, "_THREADS_DIR_OVERRIDE", threads_dir)
 
         monkeypatch.setattr("claude_worker.manager.Path.home", lambda: tmp_path)
         monkeypatch.setattr("claude_worker.cli._find_worker_by_ancestry", lambda: None)
 
-        # Saved session gives the recipient a cwd; threads live there
+        # Saved session gives the recipient a cwd
         base_dir = tmp_path / ".cwork" / "workers"
         base_dir.mkdir(parents=True)
-        project_cwd = tmp_path / "project"
-        project_cwd.mkdir()
         (base_dir / ".sessions.json").write_text(
-            json.dumps(
-                {"target-worker": {"cwd": str(project_cwd), "identity": "worker"}}
-            )
+            json.dumps({"target-worker": {"cwd": str(tmp_path), "identity": "worker"}})
         )
 
         args = argparse.Namespace(
@@ -133,7 +134,7 @@ class TestCmdReply:
         cmd_reply(args)
 
         tid = pair_thread_id("test-sender", "target-worker")
-        messages = read_messages(str(project_cwd), tid)
+        messages = read_messages(tid)
         assert len(messages) == 1
         assert messages[0]["sender"] == "test-sender"
         assert messages[0]["content"] == "hello from reply"

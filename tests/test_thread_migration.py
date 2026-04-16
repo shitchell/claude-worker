@@ -19,6 +19,7 @@ import pytest
 
 from claude_worker import cli as cw_cli
 from claude_worker import manager as cw_manager
+from claude_worker import thread_store
 from claude_worker.manager import (
     _get_active_thread,
     _set_active_thread,
@@ -33,6 +34,13 @@ from claude_worker.thread_store import (
     pair_thread_id,
     read_messages,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_threads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point thread_store at a tmp dir so tests never touch ~/.cwork/."""
+    threads_dir = tmp_path / "threads"
+    monkeypatch.setattr(thread_store, "_THREADS_DIR_OVERRIDE", threads_dir)
 
 
 # -- Thread ID helpers -----------------------------------------------------
@@ -65,43 +73,39 @@ def test_chat_thread_id_format():
 
 def test_ensure_thread_creates_new(tmp_path: Path):
     """First call creates the thread file + index entry."""
-    cwd = str(tmp_path)
-    tid = ensure_thread(cwd, "pair-a-b", participants=["a", "b"])
+    tid = ensure_thread("pair-a-b", participants=["a", "b"])
     assert tid == "pair-a-b"
-    assert (tmp_path / ".cwork" / "threads" / "pair-a-b.jsonl").exists()
-    index = load_index(cwd)
+    assert (tmp_path / "threads" / "pair-a-b.jsonl").exists()
+    index = load_index()
     assert index["pair-a-b"]["participants"] == ["a", "b"]
 
 
 def test_ensure_thread_existing_no_op(tmp_path: Path):
     """Second call with same participants leaves the index untouched."""
-    cwd = str(tmp_path)
-    ensure_thread(cwd, "pair-a-b", participants=["a", "b"])
-    index_before = load_index(cwd)
+    ensure_thread("pair-a-b", participants=["a", "b"])
+    index_before = load_index()
 
-    ensure_thread(cwd, "pair-a-b", participants=["a", "b"])
-    index_after = load_index(cwd)
+    ensure_thread("pair-a-b", participants=["a", "b"])
+    index_after = load_index()
 
     assert index_before == index_after
 
 
 def test_ensure_thread_adds_new_participant(tmp_path: Path):
     """Calling with a new participant extends the list in place."""
-    cwd = str(tmp_path)
-    ensure_thread(cwd, "chat-xyz", participants=["pm", "tl"])
+    ensure_thread("chat-xyz", participants=["pm", "tl"])
 
-    ensure_thread(cwd, "chat-xyz", participants=["pm", "tl", "rhc"])
-    participants = load_index(cwd)["chat-xyz"]["participants"]
+    ensure_thread("chat-xyz", participants=["pm", "tl", "rhc"])
+    participants = load_index()["chat-xyz"]["participants"]
     assert participants == ["pm", "tl", "rhc"]
 
 
 def test_ensure_thread_preserves_order(tmp_path: Path):
     """New participants are appended; existing order is preserved."""
-    cwd = str(tmp_path)
-    ensure_thread(cwd, "pair-x-y", participants=["x", "y"])
+    ensure_thread("pair-x-y", participants=["x", "y"])
 
-    ensure_thread(cwd, "pair-x-y", participants=["z", "y"])
-    participants = load_index(cwd)["pair-x-y"]["participants"]
+    ensure_thread("pair-x-y", participants=["z", "y"])
+    participants = load_index()["pair-x-y"]["participants"]
     assert participants == ["x", "y", "z"]
 
 
@@ -149,15 +153,13 @@ def test_send_writes_to_thread_not_fifo(
     runtime.mkdir(parents=True)
     (runtime / "log").write_text("")
 
-    # Saved session entry with a cwd under tmp_path — threads live there
-    project_cwd = tmp_path / "project"
-    project_cwd.mkdir()
+    # Saved session entry — threads are now global, not per-cwd
     sessions_path = base_dir / ".sessions.json"
     sessions_path.write_text(
-        json.dumps({"tl": {"cwd": str(project_cwd), "identity": "worker"}})
+        json.dumps({"tl": {"cwd": str(tmp_path), "identity": "worker"}})
     )
 
-    # Bypass the status gate (no pid → "dead") by using --queue
+    # Bypass the status gate (no pid -> "dead") by using --queue
     monkeypatch.setenv("CW_WORKER_NAME", "pm")
 
     # Track FIFO writes: raise if anyone opens the 'in' FIFO for writing
@@ -181,7 +183,7 @@ def test_send_writes_to_thread_not_fifo(
 
     # The thread should exist and contain our message
     thread_id = pair_thread_id("pm", "tl")
-    messages = read_messages(str(project_cwd), thread_id)
+    messages = read_messages(thread_id)
     assert len(messages) == 1
     assert messages[0]["sender"] == "pm"
     assert "hello from pm" in messages[0]["content"]
@@ -201,11 +203,9 @@ def test_send_uses_pair_thread_id(
     runtime.mkdir(parents=True)
     (runtime / "log").write_text("")
 
-    project_cwd = tmp_path / "project"
-    project_cwd.mkdir()
     sessions_path = base_dir / ".sessions.json"
     sessions_path.write_text(
-        json.dumps({"tl": {"cwd": str(project_cwd), "identity": "worker"}})
+        json.dumps({"tl": {"cwd": str(tmp_path), "identity": "worker"}})
     )
 
     monkeypatch.setenv("CW_WORKER_NAME", "pm")
@@ -217,7 +217,7 @@ def test_send_uses_pair_thread_id(
     assert rc == 0
 
     # Verify the resulting thread ID
-    index = load_index(str(project_cwd))
+    index = load_index()
     assert "pair-pm-tl" in index
     assert sorted(index["pair-pm-tl"]["participants"]) == ["pm", "tl"]
 
@@ -237,11 +237,9 @@ def test_send_dry_run_does_not_write(
     runtime.mkdir(parents=True)
     (runtime / "log").write_text("")
 
-    project_cwd = tmp_path / "project"
-    project_cwd.mkdir()
     sessions_path = base_dir / ".sessions.json"
     sessions_path.write_text(
-        json.dumps({"tl": {"cwd": str(project_cwd), "identity": "worker"}})
+        json.dumps({"tl": {"cwd": str(tmp_path), "identity": "worker"}})
     )
 
     monkeypatch.setenv("CW_WORKER_NAME", "pm")
@@ -249,7 +247,7 @@ def test_send_dry_run_does_not_write(
     rc = cw_cli._send_to_single_worker("tl", "dry", args)
     assert rc == 0
 
-    threads_dir = project_cwd / ".cwork" / "threads"
+    threads_dir = tmp_path / "threads"
     assert not threads_dir.exists() or not any(threads_dir.glob("*.jsonl"))
 
 
@@ -297,18 +295,16 @@ def test_read_reads_from_thread(
     runtime.mkdir(parents=True)
     (runtime / "log").write_text("")
 
-    project_cwd = tmp_path / "project"
-    project_cwd.mkdir()
     sessions_path = base_dir / ".sessions.json"
     sessions_path.write_text(
-        json.dumps({"tl": {"cwd": str(project_cwd), "identity": "worker"}})
+        json.dumps({"tl": {"cwd": str(tmp_path), "identity": "worker"}})
     )
 
     # Pre-populate the pair thread with two messages
     tid = pair_thread_id("pm", "tl")
-    ensure_thread(str(project_cwd), tid, participants=["pm", "tl"])
-    append_message(str(project_cwd), tid, sender="pm", content="question?")
-    append_message(str(project_cwd), tid, sender="tl", content="answer.")
+    ensure_thread(tid, participants=["pm", "tl"])
+    append_message(tid, sender="pm", content="question?")
+    append_message(tid, sender="tl", content="answer.")
 
     monkeypatch.setenv("CW_WORKER_NAME", "pm")
     args = _make_read_args("tl")
@@ -343,11 +339,9 @@ def test_read_log_flag_falls_back_to_log(
     }
     (runtime / "log").write_text(json.dumps(log_entry) + "\n")
 
-    project_cwd = tmp_path / "project"
-    project_cwd.mkdir()
     sessions_path = base_dir / ".sessions.json"
     sessions_path.write_text(
-        json.dumps({"tl": {"cwd": str(project_cwd), "identity": "worker"}})
+        json.dumps({"tl": {"cwd": str(tmp_path), "identity": "worker"}})
     )
 
     args = _make_read_args("tl", log=True)
@@ -372,11 +366,9 @@ def test_read_explicit_thread_missing_prints_no_messages(
     runtime.mkdir(parents=True)
     (runtime / "log").write_text("")
 
-    project_cwd = tmp_path / "project"
-    project_cwd.mkdir()
     sessions_path = base_dir / ".sessions.json"
     sessions_path.write_text(
-        json.dumps({"tl": {"cwd": str(project_cwd), "identity": "worker"}})
+        json.dumps({"tl": {"cwd": str(tmp_path), "identity": "worker"}})
     )
 
     monkeypatch.setenv("CW_WORKER_NAME", "pm")
@@ -411,11 +403,9 @@ def test_read_missing_thread_falls_back_to_log(
     }
     (runtime / "log").write_text(json.dumps(log_entry) + "\n")
 
-    project_cwd = tmp_path / "project"
-    project_cwd.mkdir()
     sessions_path = base_dir / ".sessions.json"
     sessions_path.write_text(
-        json.dumps({"tl": {"cwd": str(project_cwd), "identity": "worker"}})
+        json.dumps({"tl": {"cwd": str(tmp_path), "identity": "worker"}})
     )
 
     monkeypatch.setenv("CW_WORKER_NAME", "pm")
@@ -440,11 +430,9 @@ def test_reply_appends_to_pair_thread(
     monkeypatch.setattr(cw_manager, "get_base_dir", lambda: base_dir)
     monkeypatch.setattr(cw_cli, "get_base_dir", lambda: base_dir)
 
-    project_cwd = tmp_path / "project"
-    project_cwd.mkdir()
     sessions_path = base_dir / ".sessions.json"
     sessions_path.write_text(
-        json.dumps({"pm": {"cwd": str(project_cwd), "identity": "pm"}})
+        json.dumps({"pm": {"cwd": str(tmp_path), "identity": "pm"}})
     )
 
     monkeypatch.setenv("CW_WORKER_NAME", "tl")
@@ -459,7 +447,7 @@ def test_reply_appends_to_pair_thread(
     cw_cli.cmd_reply(args)
 
     tid = pair_thread_id("tl", "pm")
-    messages = read_messages(str(project_cwd), tid)
+    messages = read_messages(tid)
     assert len(messages) == 1
     assert messages[0]["sender"] == "tl"
     assert "the answer is 42" in messages[0]["content"]
@@ -511,20 +499,18 @@ def _assistant_jsonl(
 
 def test_tee_end_turn_appends_to_active_thread(tmp_path: Path):
     """A stop_reason=end_turn assistant message is appended to the thread."""
-    cwd = tmp_path / "project"
-    cwd.mkdir()
     runtime = tmp_path / "runtime"
     runtime.mkdir()
 
     # Set active thread + create the thread file
-    create_thread(str(cwd), participants=["worker1"], thread_id="pair-pm-worker1")
+    create_thread(participants=["worker1"], thread_id="pair-pm-worker1")
     _set_active_thread(runtime, "pair-pm-worker1")
 
     line = _assistant_jsonl("hello world", stop_reason="end_turn")
-    teed = _tee_assistant_to_thread(line, runtime, str(cwd), "worker1")
+    teed = _tee_assistant_to_thread(line, runtime, "worker1")
     assert teed is True
 
-    messages = read_messages(str(cwd), "pair-pm-worker1")
+    messages = read_messages("pair-pm-worker1")
     assert len(messages) == 1
     assert messages[0]["sender"] == "worker1"
     assert messages[0]["content"] == "hello world"
@@ -533,29 +519,25 @@ def test_tee_end_turn_appends_to_active_thread(tmp_path: Path):
 
 def test_tee_skips_partial_chunks(tmp_path: Path):
     """Mid-turn chunks (stop_reason=None) are not teed."""
-    cwd = tmp_path / "project"
-    cwd.mkdir()
     runtime = tmp_path / "runtime"
     runtime.mkdir()
 
-    create_thread(str(cwd), participants=["w"], thread_id="pair-pm-w")
+    create_thread(participants=["w"], thread_id="pair-pm-w")
     _set_active_thread(runtime, "pair-pm-w")
 
     line = _assistant_jsonl("streaming partial", stop_reason=None)
-    assert _tee_assistant_to_thread(line, runtime, str(cwd), "w") is False
+    assert _tee_assistant_to_thread(line, runtime, "w") is False
 
-    messages = read_messages(str(cwd), "pair-pm-w")
+    messages = read_messages("pair-pm-w")
     assert messages == []
 
 
 def test_tee_skips_tool_use_turns(tmp_path: Path):
     """Tool-use-only assistant turns (no text block) are not teed."""
-    cwd = tmp_path / "project"
-    cwd.mkdir()
     runtime = tmp_path / "runtime"
     runtime.mkdir()
 
-    create_thread(str(cwd), participants=["w"], thread_id="pair-pm-w")
+    create_thread(participants=["w"], thread_id="pair-pm-w")
     _set_active_thread(runtime, "pair-pm-w")
 
     envelope = {
@@ -572,28 +554,24 @@ def test_tee_skips_tool_use_turns(tmp_path: Path):
         "uuid": "uuid-tool-use",
     }
     line = json.dumps(envelope) + "\n"
-    assert _tee_assistant_to_thread(line, runtime, str(cwd), "w") is False
+    assert _tee_assistant_to_thread(line, runtime, "w") is False
 
 
 def test_tee_no_active_thread_is_noop(tmp_path: Path):
     """Without an active thread set, tee is a no-op."""
-    cwd = tmp_path / "project"
-    cwd.mkdir()
     runtime = tmp_path / "runtime"
     runtime.mkdir()
 
     line = _assistant_jsonl("nowhere to go")
-    assert _tee_assistant_to_thread(line, runtime, str(cwd), "w") is False
+    assert _tee_assistant_to_thread(line, runtime, "w") is False
 
 
 def test_tee_skips_non_assistant_messages(tmp_path: Path):
     """User / system / result messages are not teed."""
-    cwd = tmp_path / "project"
-    cwd.mkdir()
     runtime = tmp_path / "runtime"
     runtime.mkdir()
 
-    create_thread(str(cwd), participants=["w"], thread_id="pair-pm-w")
+    create_thread(participants=["w"], thread_id="pair-pm-w")
     _set_active_thread(runtime, "pair-pm-w")
 
     user_line = (
@@ -606,28 +584,24 @@ def test_tee_skips_non_assistant_messages(tmp_path: Path):
         )
         + "\n"
     )
-    assert _tee_assistant_to_thread(user_line, runtime, str(cwd), "w") is False
+    assert _tee_assistant_to_thread(user_line, runtime, "w") is False
 
 
 def test_tee_handles_malformed_line(tmp_path: Path):
     """A non-JSON line returns False (doesn't raise)."""
-    cwd = tmp_path / "project"
-    cwd.mkdir()
     runtime = tmp_path / "runtime"
     runtime.mkdir()
 
     _set_active_thread(runtime, "pair-pm-w")
-    assert _tee_assistant_to_thread("not json at all", runtime, str(cwd), "w") is False
+    assert _tee_assistant_to_thread("not json at all", runtime, "w") is False
 
 
 def test_tee_concatenates_multiple_text_blocks(tmp_path: Path):
     """An assistant message with several text blocks concatenates them."""
-    cwd = tmp_path / "project"
-    cwd.mkdir()
     runtime = tmp_path / "runtime"
     runtime.mkdir()
 
-    create_thread(str(cwd), participants=["w"], thread_id="pair-pm-w")
+    create_thread(participants=["w"], thread_id="pair-pm-w")
     _set_active_thread(runtime, "pair-pm-w")
 
     envelope = {
@@ -646,9 +620,9 @@ def test_tee_concatenates_multiple_text_blocks(tmp_path: Path):
         "uuid": "uuid-multi",
     }
     line = json.dumps(envelope) + "\n"
-    assert _tee_assistant_to_thread(line, runtime, str(cwd), "w") is True
+    assert _tee_assistant_to_thread(line, runtime, "w") is True
 
-    messages = read_messages(str(cwd), "pair-pm-w")
+    messages = read_messages("pair-pm-w")
     assert len(messages) == 1
     assert "first half" in messages[0]["content"]
     assert "second half" in messages[0]["content"]

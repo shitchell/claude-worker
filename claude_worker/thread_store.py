@@ -4,14 +4,15 @@ Unified messaging primitive: threads replace FIFO direct writes,
 queue dirs, chat transcripts, and per-consumer chat files. Each
 thread is an append-only JSONL file + metadata in an atomic index.
 
-Thread files: .cwork/threads/<id>.jsonl
-Thread index: .cwork/threads/index.json
+Thread files: ~/.cwork/threads/<id>.jsonl
+Thread index: ~/.cwork/threads/index.json
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -20,14 +21,21 @@ THREADS_DIR_NAME: str = "threads"
 INDEX_FILE_NAME: str = "index.json"
 MESSAGE_PREVIEW_LENGTH: int = 80
 
+# Test-injection override: when set, _threads_dir() returns this path
+# instead of the real ~/.cwork/threads/.  Same pattern as get_base_dir
+# for worker dirs.
+_THREADS_DIR_OVERRIDE: Path | None = None
 
-def _threads_dir(cwd: str) -> Path:
-    """Return the threads directory for a project."""
-    return Path(cwd) / ".cwork" / THREADS_DIR_NAME
+
+def _threads_dir() -> Path:
+    """Return the global threads directory (~/.cwork/threads/)."""
+    if _THREADS_DIR_OVERRIDE is not None:
+        return _THREADS_DIR_OVERRIDE
+    return Path.home() / ".cwork" / THREADS_DIR_NAME
 
 
-def _index_path(cwd: str) -> Path:
-    return _threads_dir(cwd) / INDEX_FILE_NAME
+def _index_path() -> Path:
+    return _threads_dir() / INDEX_FILE_NAME
 
 
 def _now_iso() -> str:
@@ -39,9 +47,9 @@ def _generate_thread_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-def load_index(cwd: str) -> dict:
+def load_index() -> dict:
     """Load the thread index. Returns {} if missing."""
-    path = _index_path(cwd)
+    path = _index_path()
     if not path.exists():
         return {}
     try:
@@ -50,9 +58,9 @@ def load_index(cwd: str) -> dict:
         return {}
 
 
-def _save_index(cwd: str, index: dict) -> None:
+def _save_index(index: dict) -> None:
     """Atomically save the thread index."""
-    path = _index_path(cwd)
+    path = _index_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Atomic write via sibling .tmp file
     tmp = path.with_name(path.name + ".tmp")
@@ -68,7 +76,6 @@ def _save_index(cwd: str, index: dict) -> None:
 
 
 def create_thread(
-    cwd: str,
     participants: list[str],
     thread_type: str = "chat",
     thread_id: str | None = None,
@@ -76,7 +83,7 @@ def create_thread(
 ) -> str:
     """Create a new thread. Returns the thread ID."""
     tid = thread_id or _generate_thread_id()
-    threads_dir = _threads_dir(cwd)
+    threads_dir = _threads_dir()
     threads_dir.mkdir(parents=True, exist_ok=True)
 
     # Create empty JSONL file
@@ -84,7 +91,7 @@ def create_thread(
     thread_file.touch()
 
     # Update index
-    index = load_index(cwd)
+    index = load_index()
     index[tid] = {
         "participants": participants,
         "type": thread_type,
@@ -93,19 +100,18 @@ def create_thread(
         "last_message": _now_iso(),
         "metadata": metadata or {},
     }
-    _save_index(cwd, index)
+    _save_index(index)
     return tid
 
 
 def append_message(
-    cwd: str,
     thread_id: str,
     sender: str,
     content: str,
     tags: list[str] | None = None,
 ) -> dict:
     """Append a message to a thread. Returns the message dict."""
-    threads_dir = _threads_dir(cwd)
+    threads_dir = _threads_dir()
     thread_file = threads_dir / f"{thread_id}.jsonl"
 
     if not thread_file.exists():
@@ -124,16 +130,15 @@ def append_message(
         f.write(json.dumps(message) + "\n")
 
     # Update index last_message timestamp
-    index = load_index(cwd)
+    index = load_index()
     if thread_id in index:
         index[thread_id]["last_message"] = message["timestamp"]
-        _save_index(cwd, index)
+        _save_index(index)
 
     return message
 
 
 def read_messages(
-    cwd: str,
     thread_id: str,
     since_id: str | None = None,
     limit: int | None = None,
@@ -143,7 +148,7 @@ def read_messages(
     If since_id is provided, returns messages after that ID.
     If limit is provided, returns the last N messages.
     """
-    thread_file = _threads_dir(cwd) / f"{thread_id}.jsonl"
+    thread_file = _threads_dir() / f"{thread_id}.jsonl"
     if not thread_file.exists():
         raise FileNotFoundError(f"Thread '{thread_id}' not found")
 
@@ -173,12 +178,12 @@ def read_messages(
     return messages
 
 
-def list_threads(cwd: str, status: str | None = None) -> list[dict]:
+def list_threads(status: str | None = None) -> list[dict]:
     """List all threads, optionally filtered by status.
 
     Returns list of dicts with thread_id + index metadata.
     """
-    index = load_index(cwd)
+    index = load_index()
     result = []
     for tid, meta in index.items():
         if status and meta.get("status") != status:
@@ -187,18 +192,18 @@ def list_threads(cwd: str, status: str | None = None) -> list[dict]:
     return result
 
 
-def close_thread(cwd: str, thread_id: str) -> None:
+def close_thread(thread_id: str) -> None:
     """Close a thread (set status to 'closed')."""
-    index = load_index(cwd)
+    index = load_index()
     if thread_id not in index:
         raise KeyError(f"Thread '{thread_id}' not in index")
     index[thread_id]["status"] = "closed"
-    _save_index(cwd, index)
+    _save_index(index)
 
 
-def get_thread_participants(cwd: str, thread_id: str) -> list[str]:
+def get_thread_participants(thread_id: str) -> list[str]:
     """Get the participant list for a thread."""
-    index = load_index(cwd)
+    index = load_index()
     if thread_id not in index:
         return []
     return index[thread_id].get("participants", [])
@@ -224,7 +229,6 @@ def chat_thread_id(chat_id: str) -> str:
 
 
 def ensure_thread(
-    cwd: str,
     thread_id: str,
     participants: list[str],
     thread_type: str = "chat",
@@ -235,7 +239,7 @@ def ensure_thread(
     When the thread already exists, any participants not already in
     the stored list are appended (order-preserving).
     """
-    index = load_index(cwd)
+    index = load_index()
     if thread_id in index:
         existing = index[thread_id].get("participants") or []
         updated = list(existing)
@@ -244,11 +248,63 @@ def ensure_thread(
                 updated.append(p)
         if updated != existing:
             index[thread_id]["participants"] = updated
-            _save_index(cwd, index)
+            _save_index(index)
         return thread_id
     return create_thread(
-        cwd,
         participants=participants,
         thread_type=thread_type,
         thread_id=thread_id,
     )
+
+
+# -- Migration helper (per-project → global) ------------------------------
+
+
+def migrate_from_project(project_cwd: str) -> int:
+    """Migrate per-project threads to global storage.
+
+    Moves .jsonl files and merges index.json. Returns the number
+    of threads migrated. Idempotent — skips files that already exist
+    in the global store.
+    """
+    project_threads = Path(project_cwd) / ".cwork" / THREADS_DIR_NAME
+    if not project_threads.exists():
+        return 0
+
+    global_dir = _threads_dir()
+    global_dir.mkdir(parents=True, exist_ok=True)
+
+    # Merge index entries
+    project_index_path = project_threads / INDEX_FILE_NAME
+    project_index: dict = {}
+    if project_index_path.exists():
+        try:
+            project_index = json.loads(project_index_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    global_index = load_index()
+    merged_count = 0
+
+    for jsonl_file in project_threads.glob("*.jsonl"):
+        thread_id = jsonl_file.stem
+        global_file = global_dir / jsonl_file.name
+        if global_file.exists():
+            continue  # idempotent — skip already-migrated
+        shutil.move(str(jsonl_file), str(global_file))
+        merged_count += 1
+
+        # Merge this thread's index entry if present
+        if thread_id in project_index and thread_id not in global_index:
+            global_index[thread_id] = project_index[thread_id]
+
+    if merged_count > 0:
+        _save_index(global_index)
+
+    # Clean up the project threads directory
+    try:
+        shutil.rmtree(project_threads)
+    except OSError:
+        pass
+
+    return merged_count

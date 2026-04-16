@@ -84,7 +84,6 @@ def _get_active_thread(runtime: Path) -> str | None:
 def _tee_assistant_to_thread(
     line: str,
     runtime: Path,
-    cwd: str,
     worker_name: str,
 ) -> bool:
     """Parse a raw JSONL line; if it's a final-turn assistant text message,
@@ -127,7 +126,6 @@ def _tee_assistant_to_thread(
         from claude_worker.thread_store import append_message as _append
 
         _append(
-            cwd=cwd,
             thread_id=active_thread,
             sender=worker_name,
             content=combined,
@@ -311,14 +309,16 @@ def check_cwork_changes(
         return prev_snapshot
 
 
-def snapshot_threads(cwd: str) -> dict[str, tuple[float, int]]:
-    """Snapshot .cwork/threads/*.jsonl files: {thread_id: (mtime, size)}.
+def snapshot_threads() -> dict[str, tuple[float, int]]:
+    """Snapshot ~/.cwork/threads/*.jsonl files: {thread_id: (mtime, size)}.
 
     Returns {} if the threads dir doesn't exist. Non-JSONL files (e.g.
     the index.json) are ignored so the snapshot tracks only message
     streams.
     """
-    threads_dir = Path(cwd) / ".cwork" / "threads"
+    from claude_worker.thread_store import _threads_dir
+
+    threads_dir = _threads_dir()
     if not threads_dir.exists():
         return {}
     result: dict[str, tuple[float, int]] = {}
@@ -334,16 +334,16 @@ def snapshot_threads(cwd: str) -> dict[str, tuple[float, int]]:
     return result
 
 
-def _read_new_messages_since_size(
-    cwd: str, thread_id: str, old_size: int
-) -> list[dict]:
+def _read_new_messages_since_size(thread_id: str, old_size: int) -> list[dict]:
     """Read messages that appeared after the given file size.
 
     Reads the JSONL file, skips the first ``old_size`` bytes, parses
     the rest as new messages. Returns a list of message dicts.
     Best-effort: corrupt lines are skipped silently.
     """
-    thread_file = Path(cwd) / ".cwork" / "threads" / f"{thread_id}.jsonl"
+    from claude_worker.thread_store import _threads_dir
+
+    thread_file = _threads_dir() / f"{thread_id}.jsonl"
     if not thread_file.exists():
         return []
     messages: list[dict] = []
@@ -365,7 +365,6 @@ def _read_new_messages_since_size(
 
 
 def check_thread_changes(
-    cwd: str,
     worker_name: str,
     in_fifo: Path,
     prev_snapshot: dict[str, tuple[float, int]],
@@ -400,7 +399,7 @@ def check_thread_changes(
     never crashes the caller.
     """
     try:
-        new_snapshot = snapshot_threads(cwd)
+        new_snapshot = snapshot_threads()
         if not seeded and not prev_snapshot:
             return new_snapshot  # first scan, no diff
 
@@ -411,7 +410,7 @@ def check_thread_changes(
         try:
             from claude_worker.thread_store import load_index
 
-            index = load_index(cwd)
+            index = load_index()
         except Exception:
             return new_snapshot
 
@@ -433,7 +432,7 @@ def check_thread_changes(
                 continue
 
             # Read the new messages and notify for each
-            new_messages = _read_new_messages_since_size(cwd, thread_id, old_size)
+            new_messages = _read_new_messages_since_size(thread_id, old_size)
             for msg in new_messages:
                 sender = msg.get("sender", "?")
                 if sender == worker_name:
@@ -609,9 +608,7 @@ def write_identity_hash(runtime: Path, content: str) -> None:
     check silently no-ops (see ``read_identity_hash``).
     """
     try:
-        (runtime / IDENTITY_HASH_FILE).write_text(
-            hash_identity_content(content) + "\n"
-        )
+        (runtime / IDENTITY_HASH_FILE).write_text(hash_identity_content(content) + "\n")
     except OSError:
         pass
 
@@ -650,10 +647,7 @@ def _read_source_identity(identity: str) -> str | None:
         try:
             from importlib.resources import files
 
-            return (
-                (files("claude_worker") / "identities" / resource)
-                .read_text()
-            )
+            return (files("claude_worker") / "identities" / resource).read_text()
         except Exception:
             pass
     return None
@@ -1278,7 +1272,7 @@ def _run_manager_forkless(
                 # to the active thread, if one is set. Best-effort — any
                 # parse or I/O error is swallowed by the helper.
                 try:
-                    _tee_assistant_to_thread(line, runtime, resolved_cwd, name)
+                    _tee_assistant_to_thread(line, runtime, name)
                 except Exception:
                     pass
 
@@ -1314,7 +1308,24 @@ def _run_manager_forkless(
         # between manager start and the first 5s poll would be absorbed
         # into the baseline and never notify (a genuine delivery bug
         # for tests and fresh workers that are sent to immediately).
-        thread_snapshot: dict[str, tuple[float, int]] = snapshot_threads(resolved_cwd)
+        # Migrate per-project threads to global storage before first
+        # snapshot. Best-effort: a failure here doesn't block startup.
+        try:
+            from claude_worker.thread_store import migrate_from_project
+
+            migrated = migrate_from_project(resolved_cwd)
+            if migrated > 0:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "Migrated %d thread(s) from %s to global storage",
+                    migrated,
+                    resolved_cwd,
+                )
+        except Exception:
+            pass
+
+        thread_snapshot: dict[str, tuple[float, int]] = snapshot_threads()
         # Flag: the manager has already taken a baseline snapshot. Passed
         # to check_thread_changes so it doesn't short-circuit on the
         # defensive "empty prev_snapshot → skip notifications" branch.
@@ -1358,7 +1369,6 @@ def _run_manager_forkless(
                 if now - last_thread_check >= THREAD_MONITOR_INTERVAL_SECONDS:
                     last_thread_check = now
                     thread_snapshot = check_thread_changes(
-                        resolved_cwd,
                         name,
                         in_fifo,
                         thread_snapshot,

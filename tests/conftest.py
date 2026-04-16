@@ -31,6 +31,23 @@ def _clear_worker_env():
     os.environ.update(saved)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_global_threads(tmp_path: Path, monkeypatch):
+    """Point thread_store at a tmp dir so tests never read/write real
+    ~/.cwork/threads/ (D74).
+
+    Threads moved from per-project to global storage. Without this fixture
+    any test that walks the read path (cmd_read, etc.) would pick up real
+    threads from the host machine and produce non-deterministic output.
+    Per-test isolation keeps each test's thread store empty and scoped
+    to the test's own tmp_path.
+    """
+    from claude_worker import thread_store
+
+    threads_dir = tmp_path / "_global_threads"
+    monkeypatch.setattr(thread_store, "_THREADS_DIR_OVERRIDE", threads_dir)
+
+
 def _write_jsonl(path: Path, entries: list[dict[str, Any]]) -> None:
     """Write a list of dicts as JSONL to the given path."""
     with path.open("w") as f:
