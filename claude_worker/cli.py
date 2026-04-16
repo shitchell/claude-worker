@@ -4672,6 +4672,237 @@ def cmd_stats(args: argparse.Namespace) -> None:
     print(format_stats(rows))
 
 
+# -- subagents subcommand (#083, D100) -----------------------------------
+#
+# Expose Claude Code's per-session subagent JSONL files as a structured
+# summary (what's running, for how long, doing what). Complements D98's
+# `ls` tool-call display — ls tells you "what tool", this tells you
+# "what's inside the Task subagent". The subagent files live at
+#   ~/.claude/projects/<slug>/<session>/subagents/agent-*.{jsonl,meta.json}
+# where <slug> is cwd.replace("/", "-").replace(".", "-").
+
+
+def _cwd_to_project_slug(cwd: str) -> str:
+    """Replicate Claude Code's cwd -> project-slug transformation.
+
+    Empirically derived from ``~/.claude/projects/`` contents: every
+    ``/`` and ``.`` in the absolute cwd becomes ``-``. Case is
+    preserved. Nothing else is transformed.
+
+    Symlinks are NOT resolved — Claude Code uses the literal cwd it
+    was given, and so do we (so the stored cwd and the on-disk slug
+    stay in sync).
+    """
+    if not cwd:
+        return ""
+    return cwd.replace("/", "-").replace(".", "-")
+
+
+def _resolve_subagents_dir(name: str) -> tuple[Path | None, str | None, str | None]:
+    """Return (subagents_dir, session_id, cwd) for a worker, or (None, …).
+
+    Reads ``runtime/session`` and the session's saved ``cwd``; joins
+    them via ``_cwd_to_project_slug`` to locate
+    ``~/.claude/projects/<slug>/<session>/subagents/``. Returns None
+    for ``subagents_dir`` when the session isn't captured yet or the
+    directory doesn't exist — the session_id and cwd are still
+    returned so callers can render a meaningful "no subagents" line.
+    """
+    runtime = get_runtime_dir(name)
+    if not runtime.exists():
+        return None, None, None
+
+    session_file = runtime / "session"
+    session_id: str | None = None
+    if session_file.exists():
+        try:
+            session_id = session_file.read_text().strip() or None
+        except OSError:
+            session_id = None
+
+    saved = get_saved_worker(name) or {}
+    cwd = saved.get("cwd") or None
+
+    if not session_id or not cwd:
+        return None, session_id, cwd
+
+    slug = _cwd_to_project_slug(cwd)
+    subagents_dir = (
+        Path.home() / ".claude" / "projects" / slug / session_id / "subagents"
+    )
+    if not subagents_dir.exists():
+        return None, session_id, cwd
+    return subagents_dir, session_id, cwd
+
+
+def _summarize_subagent(
+    meta_path: Path, jsonl_path: Path, now: float | None = None
+) -> dict:
+    """Summarize one (meta.json, jsonl) subagent pair.
+
+    Defensive — all fields degraded gracefully when missing. Returns
+    a dict matching the JSON schema documented in the TECHNICAL.md.
+    """
+    if now is None:
+        now = time.time()
+
+    meta: dict = {}
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+            if not isinstance(meta, dict):
+                meta = {}
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+
+    agent_id = jsonl_path.stem
+    if agent_id.startswith("agent-"):
+        agent_id = agent_id[len("agent-") :]
+
+    started_at: str | None = None
+    last_action_at: str | None = None
+    tool_call_count = 0
+    last_action: str | None = None
+    last_tool_use_block: dict | None = None
+
+    if jsonl_path.exists():
+        try:
+            with open(jsonl_path) as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    ts = entry.get("timestamp")
+                    if isinstance(ts, str):
+                        if started_at is None:
+                            started_at = ts
+                        last_action_at = ts
+                    message = entry.get("message") or {}
+                    content = message.get("content") or []
+                    if isinstance(content, list):
+                        for block in content:
+                            if (
+                                isinstance(block, dict)
+                                and block.get("type") == "tool_use"
+                            ):
+                                tool_call_count += 1
+                                last_tool_use_block = block
+        except OSError:
+            pass
+
+    if last_tool_use_block is not None:
+        last_action = _format_tool_call(last_tool_use_block)
+
+    return {
+        "agent_id": agent_id,
+        "type": meta.get("agentType") or "unknown",
+        "description": meta.get("description") or "",
+        "started_at": started_at,
+        "last_action_at": last_action_at,
+        "tool_call_count": tool_call_count,
+        "last_action": last_action,
+    }
+
+
+def _format_subagent_duration_since_iso(ts: str | None, now: float) -> str:
+    """Render '2m 14s ago' from an ISO timestamp, or '' if missing."""
+    if not ts:
+        return ""
+    try:
+        from datetime import datetime
+
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        elapsed = max(0.0, now - dt.timestamp())
+    except (ValueError, TypeError):
+        return ""
+    return _format_tool_call_duration(elapsed).strip("()")
+
+
+def cmd_subagents(args: argparse.Namespace) -> None:
+    """Summarize Claude Code subagents launched by a worker (#083, D100).
+
+    Defaults to text output. ``--format json`` emits a single JSON
+    envelope with a ``subagents`` array. ``--limit N`` caps the count.
+    """
+    subagents_dir, session_id, cwd = _resolve_subagents_dir(args.name)
+
+    if session_id is None:
+        print(
+            f"Error: worker '{args.name}' has no session yet (not started).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    fmt = getattr(args, "format", None) or "text"
+    limit = getattr(args, "limit", None)
+
+    summaries: list[dict] = []
+    if subagents_dir is not None:
+        now = time.time()
+        metas = sorted(subagents_dir.glob("agent-*.meta.json"))
+        for meta_path in metas:
+            jsonl_path = meta_path.with_suffix("")  # drop .json
+            if jsonl_path.suffix != ".jsonl":
+                # meta.json has double-suffix; strip explicitly.
+                jsonl_path = meta_path.with_name(
+                    meta_path.name.replace(".meta.json", ".jsonl")
+                )
+            summaries.append(_summarize_subagent(meta_path, jsonl_path, now=now))
+
+        # Also pick up any jsonl files without a sibling meta (rare, but
+        # defensively handle partial writes).
+        seen_ids = {s["agent_id"] for s in summaries}
+        for jsonl_path in sorted(subagents_dir.glob("agent-*.jsonl")):
+            aid = jsonl_path.stem.removeprefix("agent-")
+            if aid in seen_ids:
+                continue
+            meta_path = jsonl_path.with_name(
+                jsonl_path.name.replace(".jsonl", ".meta.json")
+            )
+            summaries.append(_summarize_subagent(meta_path, jsonl_path, now=now))
+
+        # Most recent activity first.
+        summaries.sort(key=lambda s: s.get("last_action_at") or "", reverse=True)
+
+        if isinstance(limit, int) and limit > 0:
+            summaries = summaries[:limit]
+
+    if fmt == "json":
+        envelope = {
+            "worker": args.name,
+            "session": session_id,
+            "cwd": cwd,
+            "subagents": summaries,
+        }
+        print(json.dumps(envelope, indent=2))
+        return
+
+    print(f"worker: {args.name}")
+    print(f"session: {session_id}")
+    count = len(summaries)
+    if subagents_dir is None:
+        print(f"subagents: {count}  (no subagents directory for this session)")
+        return
+    print(f"subagents: {count}")
+
+    now_float = time.time()
+    for s in summaries:
+        print()
+        print(f"  agent-{s['agent_id']}  {s['type']}")
+        if s["description"]:
+            print(f"    description: \"{s['description']}\"")
+        age = _format_subagent_duration_since_iso(s.get("started_at"), now_float)
+        last = s.get("last_action") or "(no tool calls)"
+        tc = s["tool_call_count"]
+        call_word = "call" if tc == 1 else "calls"
+        prefix = f"started {age} ago, " if age else ""
+        print(f"    {prefix}{tc} tool {call_word}, last: {last}")
+
+
 # -- Discoverability commands (#071, D86) --
 # Every custom CLI utility should expose:
 #   version / --version      → semver
@@ -6076,6 +6307,25 @@ def main():
         help="Print summary statistics from session analyses (cost, tokens, per identity/project)",
     )
 
+    # -- subagents (#083, D100) --
+    p_subagents = sub.add_parser(
+        "subagents",
+        help="Summarize Claude Code subagents launched by a worker's session",
+    )
+    p_subagents.add_argument("name", help="Worker name")
+    p_subagents.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    p_subagents.add_argument(
+        "--limit",
+        type=int,
+        metavar="N",
+        help="Show only the N most-recently-active subagents",
+    )
+
     # -- grant --
     p_grant = sub.add_parser(
         "grant",
@@ -6420,6 +6670,7 @@ def main():
         "repl": cmd_repl,
         "tokens": cmd_tokens,
         "stats": cmd_stats,
+        "subagents": cmd_subagents,
         "projects": cmd_projects,
         "grant": cmd_grant,
         "grants": cmd_grants,

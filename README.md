@@ -546,6 +546,46 @@ Print summary statistics from session analyses (cost, tokens, per
 identity/project). Reads the `~/.cwork/analyses/summary.csv` populated
 by the analyze-session skill during wrap-up.
 
+### `subagents`
+
+```
+claude-worker subagents [--format text|json] [--limit N] NAME
+```
+
+Summarize Claude Code Task/Agent subagents launched by a worker's
+session (D100, #083). Reads Claude Code's private subagent files at
+`~/.claude/projects/<slug>/<session-uuid>/subagents/agent-*.{jsonl,meta.json}`,
+where `<slug>` is the worker's cwd with every `/` and `.` replaced by
+`-`. Per agent, shows: type, description, tool-call count, last tool
+call, start-time relative-to-now.
+
+- `--format text` (default) — human table.
+- `--format json` — single JSON envelope with a `subagents` array.
+- `--limit N` — show only the N most-recently-active.
+
+Example:
+
+```
+$ claude-worker subagents cw-lead
+worker: cw-lead
+session: 86c9ce5a-8223-4164-a794-48a3b89a4901
+subagents: 2
+
+  agent-a45f8406bf6ad9b40  Explore
+    description: "PID ancestry investigation"
+    started 2m 14s ago, 12 tool calls, last: Bash(ps -ef | head)
+
+  agent-a8eb304b0bc43bee5  general-purpose
+    description: "pytest baseline"
+    started 45s ago, 1 tool call, last: Bash(pytest tests/)
+```
+
+Complements `ls`'s `tool:` line (D98) — ls tells you "what tool is
+this worker in right now?", subagents tells you "what's happening
+inside the Task subagent". Since D97 (ephemeral workers) is the
+preferred delegation path, this command is primarily useful for
+debugging Task usage in legacy paths.
+
 ### `grant`
 
 ```

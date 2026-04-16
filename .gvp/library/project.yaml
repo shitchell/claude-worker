@@ -2416,3 +2416,66 @@ observations:
       - file: claude_worker/migrations/001-roles-directory-rename.sh
         identifier: idempotent migration script (no change)
         role: depends-on
+  - id: D100
+    name: subagents-subcommand
+    rationale: >
+      Adds `claude-worker subagents <name>` to summarize Claude Code's
+      per-session Task/Agent subagents. Reads Claude Code's private
+      files at ``~/.claude/projects/<slug>/<session>/subagents/agent-
+      *.{jsonl,meta.json}``. Per agent, reports: agentType, description,
+      tool-call count, last tool call, start time, last-action time.
+
+      Project-slug algorithm: empirically derived from on-disk sampling
+      across 20+ projects — every ``/`` and ``.`` in the literal cwd
+      becomes ``-``. Case is preserved. Symlinks are NOT resolved.
+      A `.worktrees/` directory produces a double-dash (`--worktrees`)
+      because both the slash and the dot independently map to `-`;
+      this is literal, not a bug.
+
+      Text output shows a human table sorted by most-recent-activity
+      descending. `--format json` emits a single JSON envelope with
+      a `subagents` array for scripts. `--limit N` caps the count.
+
+      Phase B of the #081 design. Phase A (ls current tool call,
+      D98) shipped separately to keep the diffs reviewable.
+
+      Reuses `_format_tool_call` from D98 — no duplicate tool-
+      rendering logic.
+    alternatives: >
+      1. Build our own subagent JSONL writer / registry — rejected:
+      Claude Code is already the source of truth; parallel storage
+      would drift. Read-only summarization is the right abstraction.
+      2. Resolve symlinks before computing the slug — rejected:
+      Claude Code doesn't, so the slug on disk tracks the literal
+      cwd. Resolving would produce a wrong path.
+      3. Call a public Claude Code API for the slug — rejected:
+      no such API exists. The transformation is simple enough to
+      replicate; if Claude Code changes it, we'll get a clean "no
+      subagents at <path>" error instead of silent corruption.
+      4. Per-agent JSON output (one line per agent) — rejected:
+      most JSON-consuming scripts want the envelope (worker,
+      session, cwd) plus the array. Single envelope is simpler.
+    tags: [observability, subagents, diagnostics]
+    maps_to: [project:G2]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _cwd_to_project_slug
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _resolve_subagents_dir
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _summarize_subagent
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_subagents
+        role: implements
+      - file: tests/test_subagents_command.py
+        identifier: TestCwdToSlug
+        role: tests
+      - file: tests/test_subagents_command.py
+        identifier: TestCmdSubagents
+        role: tests
+      - file: README.md
+        identifier: subagents
+        role: documents
