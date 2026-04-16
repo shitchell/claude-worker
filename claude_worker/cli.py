@@ -52,6 +52,11 @@ QUEUE_WAIT_TIMEOUT_SECONDS: float = 600.0
 
 # Stop wrap-up — two-phase shutdown sends a wrap-up message before SIGTERM
 STOP_WRAPUP_TIMEOUT_SECONDS: float = 900.0
+
+# Grace window after writing to the FIFO before waiting on the log —
+# closes the #082 race (D101) where the reverse walk + forward scan
+# could both run before the stub/claude response lands in the log.
+FIFO_HANDOFF_GRACE_SECONDS: float = 0.2
 ANALYZE_SESSION_SKILL_RESOURCE: str = "analyze-session.md"
 
 
@@ -968,6 +973,69 @@ def _message_has_chat_tag(data: dict, chat_tag: str) -> bool:
     return False
 
 
+def _forward_scan_for_turn_end(
+    log_file: Path,
+    after_uuid: str | None,
+    chat_tag: str | None = None,
+) -> dict | None:
+    """Forward-scan the log once, starting after ``after_uuid``, for a turn-end.
+
+    Closes the race in ``_wait_for_turn`` between the reverse walk and
+    the tail-poll loop (#082, D101). The reverse walk captures file
+    size at open time; if the log writer appends between the reverse
+    walk closing and the tail loop opening, the tail's seek-to-end
+    misses those appends and polls forever.
+
+    This forward scan runs once, in O(log-size-after-marker), which
+    is bounded to a single turn of output for realistic callers
+    (marker captured just before the triggering write).
+
+    Returns the turn-end entry (`result` or `assistant` with
+    `stop_reason == "end_turn"`) that appears strictly after the
+    marker, or None. When ``chat_tag`` is set, turns whose assistant
+    content doesn't include the tag are skipped.
+    """
+    if not log_file.exists():
+        return None
+
+    past_marker = after_uuid is None
+    last_assistant: dict | None = None
+    try:
+        with open(log_file) as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if not past_marker:
+                    if _uuid_matches(data.get("uuid", ""), after_uuid):
+                        past_marker = True
+                    continue
+
+                msg_type = data.get("type")
+                if msg_type == "assistant":
+                    last_assistant = data
+                    sr = data.get("message", {}).get("stop_reason")
+                    if sr == "end_turn":
+                        if chat_tag and not _message_has_chat_tag(data, chat_tag):
+                            continue
+                        return data
+                elif msg_type == "result":
+                    if chat_tag:
+                        check = last_assistant or data
+                        if not _message_has_chat_tag(check, chat_tag):
+                            continue
+                    return data
+    except OSError:
+        return None
+
+    return None
+
+
 def _wait_for_turn(
     name: str,
     timeout: float | None = None,
@@ -1069,6 +1137,18 @@ def _wait_for_turn(
             return 0
         # Fell through: new activity during settle — drop into tail loop to
         # wait for the next turn boundary.
+
+    # Race mitigation (#082, D101): the reverse walk may have run BEFORE
+    # the log writer appended the turn-end, while the tail loop below
+    # would then seek to end and miss it. Forward-scan the log once from
+    # the marker to catch any writes that landed in that window.
+    if turn_end_after_last_user is None:
+        turn_end_after_last_user = _forward_scan_for_turn_end(
+            log_file, after_uuid, chat_tag
+        )
+        if turn_end_after_last_user is not None:
+            if _settle_is_stable(log_file, settle, deadline=deadline):
+                return 0
 
     if not _manager_alive():
         print("Error: worker process died", file=sys.stderr)
@@ -3288,6 +3368,12 @@ def cmd_stop(args: argparse.Namespace) -> None:
                 print(
                     f"Sent wrap-up message to '{args.name}', waiting for completion..."
                 )
+                # Grace window: let the FIFO pump + claude + log-writer land
+                # the response in the log before _wait_for_turn opens it.
+                # Without this, the #082 race can leave tail_loop seeking
+                # to an "end" that gets overtaken by the writer a few ms
+                # later, causing the poll to miss the turn entirely.
+                time.sleep(FIFO_HANDOFF_GRACE_SECONDS)
                 _wait_for_turn(
                     args.name,
                     timeout=timeout,

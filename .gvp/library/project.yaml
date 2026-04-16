@@ -2479,3 +2479,78 @@ observations:
       - file: README.md
         identifier: subagents
         role: documents
+  - id: D101
+    name: fix-wait-for-turn-race
+    rationale: >
+      Fixes the timing race that made test_live_worker_gets_wrapup_before_sigterm
+      flaky (40-50% failure rate, confirmed pre-existing via git-stash
+      baseline and reproduced via repeated-run sweep).
+
+      Root cause: cmd_stop wrote the wrap-up message to the FIFO and
+      immediately called _wait_for_turn. The worker's response path is
+      asynchronous (fifo-pump thread forwards to claude, claude writes
+      to stdout, stdout_to_log_body writes to log). If the reverse
+      walk in _wait_for_turn runs BEFORE the response lands in the
+      log, it finds no turn-end. The tail loop then does `seek(0, 2)`
+      which can overtake the writer — any data that lands between the
+      scan and the first readline is missed, and the tail polls
+      forever waiting for more data that already arrived.
+
+      Fix is two-layer:
+
+      1. `FIFO_HANDOFF_GRACE_SECONDS = 0.2` sleep between cmd_stop's
+         FIFO write and `_wait_for_turn`. Gives the async response
+         path time to land before the scan starts. This alone got
+         10/10 on the repro.
+
+      2. `_forward_scan_for_turn_end(log, after_uuid, chat_tag)`
+         helper that scans the log forward from the marker before
+         falling through to the tail-poll loop. Defense in depth
+         for cases where the grace window isn't enough (heavily
+         loaded system, larger log, etc.). Also helps cmd_send
+         and other _wait_for_turn callers.
+
+      Verified via a gated regression test (`CW_FLAKE_CHECK=1`) that
+      runs the formerly-flaky live-worker test 10 times and asserts
+      all pass. Gated so it doesn't slow down normal pytest runs.
+
+      Instrumentation approach: the bug was diagnosed by adding
+      temporary debug logging to stub_claude.py (STUB_DEBUG_LOG env
+      var), which confirmed the stub was receiving and responding
+      to both messages — isolating the bug to the wait-for-turn
+      path rather than the FIFO forwarding or the stub. Debug
+      instrumentation was removed before commit.
+    alternatives: >
+      1. Forward scan alone without the grace window — tested: 8/10,
+      not stable enough. The scan can still race with the writer.
+      2. Grace window alone without forward scan — tested: 10/10
+      (isolation) but less resilient to unusual timing (large log,
+      slow machine). Keeping both layers for defense in depth.
+      3. Rewrite the tail loop to use polling-with-size-check
+      (re-stat the file each iteration) — rejected: more invasive,
+      adds filesystem calls per poll, and the grace+scan combo
+      already achieves 10/10.
+      4. Longer sleep (e.g., 1s) — rejected: adds user-visible
+      latency to every `claude-worker stop` without proportional
+      benefit. 200ms is enough for the FIFO roundtrip.
+    tags: [reliability, testing, race-condition]
+    maps_to: [project:G3, project:P4]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _forward_scan_for_turn_end
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _wait_for_turn
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_stop
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: FIFO_HANDOFF_GRACE_SECONDS
+        role: implements
+      - file: tests/test_wait_for_turn_race.py
+        identifier: TestForwardScanForTurnEnd
+        role: tests
+      - file: tests/test_wait_for_turn_race.py
+        identifier: test_stop_wrapup_is_stable_across_10_runs
+        role: tests

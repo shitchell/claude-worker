@@ -83,8 +83,8 @@
 | 079 | migrate-old-role-dirs | done | medium | lead | human | repl:20333-pts33 | - | pm |
 | 080 | replace-task-with-ephemeral-workers | done | **high** | lead | human | repl:20333-pts33 | - | human |
 | 081 | worker-tool-call-visibility | done | medium-high | lead | human | repl:20333-pts33 | - | human |
-| 082 | stop-wrapup-test-flakiness | todo | medium | - | PM | - | - | pm |
-| 083 | subagents-subcommand | review | medium | lead | TL | - | - | pm |
+| 082 | stop-wrapup-test-flakiness | review | medium | lead | PM | - | - | pm |
+| 083 | subagents-subcommand | done | medium | lead | TL | - | - | pm |
 
 ## Done (migrated from future-queries)
 
