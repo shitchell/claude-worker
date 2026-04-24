@@ -88,7 +88,7 @@
 | 084 | ephemeral-completion-notify | todo | medium-high | - | TL | - | - | pm |
 | 085 | show-response-thread-routing | review | **high** | lead | human | repl:18793-pts45 | - | pm |
 | 086 | thread-since-prefix-match | todo | medium | - | human | repl:18793-pts45 | - | pm |
-| 087 | thread-auto-detection-consumer | todo | medium-high | - | human | repl:18793-pts45 | - | pm |
+| 087 | thread-auto-detection-consumer | review | medium-high | lead | human | repl:18793-pts45 | - | pm |
 | 088 | manager-hot-reload | todo | medium-high | - | human | repl:18793-pts45 | - | pm |
 
 ## Done (migrated from future-queries)

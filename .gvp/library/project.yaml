@@ -2606,3 +2606,41 @@ observations:
       - file: tests/test_show_response_routing.py
         identifier: TestMultiThreadRouting
         role: tests
+  - id: D103
+    name: thread-read-existence-fallback
+    rationale: >
+      Adds existence-based fallback to _resolve_read_thread_id so
+      `thread read <worker>` auto-detects the caller's pair thread
+      even when the sender identity has changed between sessions.
+      Common case: human sends from plain terminal (identity=human,
+      thread=pair-gvp-human), later reads from Claude Code (identity=
+      CLAUDE_SESSION_UUID, primary thread=pair-<UUID>-gvp doesn't
+      exist). The fallback checks the thread index for "human"-based
+      pair thread and reroutes transparently.
+
+      A one-line stderr notice is emitted when the fallback fires
+      (per V2 explicit-over-implicit / G2 loud-over-silent) so the
+      user knows the read was rerouted and the primary thread was
+      missing.
+
+      CW_WORKER_NAME fallback was initially planned but proven dead
+      code: _resolve_sender returns CW_WORKER_NAME as priority 1,
+      so the primary pair-thread already uses it. Removed before
+      commit per P13.
+    alternatives: >
+      1. Change _resolve_sender to always return "human" for
+      interactive users — rejected: breaks PM chat routing which
+      uses CLAUDE_SESSION_UUID for per-consumer isolation.
+      2. Search ALL threads by participant list — rejected: O(n)
+      in thread count, could match multiple threads, non-deterministic.
+      3. Prompt the user to specify --thread — rejected: the auto-
+      detection should handle the common case.
+    tags: [messaging, threads, ux]
+    maps_to: [project:V1, project:V2]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _resolve_read_thread_id
+        role: implements
+      - file: tests/test_thread_auto_detection.py
+        identifier: TestResolveReadThreadId
+        role: tests

@@ -1978,9 +1978,17 @@ def _resolve_read_thread_id(args: argparse.Namespace) -> str:
     Priority:
       1. ``--thread ID`` explicit override
       2. ``--chat ID`` / auto-detected chat (PM workers) → ``chat-<id>``
-      3. ``pair-<sender>-<target>`` where sender is ``_resolve_sender()``
+      3. ``pair-<sender>-<target>`` where sender is ``_resolve_sender()``,
+         with existence-based fallback to common identities (D103, #087).
+
+    The fallback chain (step 3) handles the case where the sender
+    identity is ephemeral (e.g., CLAUDE_SESSION_UUID that changes per
+    session). If the primary pair-thread doesn't exist in the thread
+    index, the fallback tries "human" and then CW_WORKER_NAME. A stderr
+    notice is emitted when a fallback fires so the reroute is visible
+    (V2 explicit-over-implicit, G2 loud-over-silent).
     """
-    from claude_worker.thread_store import chat_thread_id, pair_thread_id
+    from claude_worker.thread_store import chat_thread_id, load_index, pair_thread_id
 
     override = getattr(args, "thread", None)
     if override:
@@ -1995,7 +2003,35 @@ def _resolve_read_thread_id(args: argparse.Namespace) -> str:
         return chat_thread_id(chat_id)
 
     sender = _resolve_sender()
-    return pair_thread_id(sender, args.name)
+    primary = pair_thread_id(sender, args.name)
+
+    # Existence-based fallback (#087, D103): if the primary thread
+    # doesn't exist, try common fallback identities. This handles
+    # the case where the sender identity changes between sessions
+    # (e.g., CLAUDE_SESSION_UUID from Claude Code vs. "human" from
+    # a plain terminal).
+    index = load_index()
+    if primary in index:
+        return primary
+
+    # Fallback: "human" (interactive terminal identity). Covers the
+    # common case where the sender identity changed between sessions
+    # (e.g., CLAUDE_SESSION_UUID from Claude Code vs. "human" from
+    # a plain terminal). CW_WORKER_NAME fallback is unnecessary
+    # because _resolve_sender() returns it as priority 1 — if it's
+    # set, it IS the primary sender, so the primary pair-thread
+    # already uses it.
+    human_thread = pair_thread_id("human", args.name)
+    if human_thread != primary and human_thread in index:
+        print(
+            f"note: thread read {args.name} -> {human_thread} "
+            f"(primary {primary} not found, using 'human' identity)",
+            file=sys.stderr,
+        )
+        return human_thread
+
+    # Nothing matched — return primary (clean "no messages" output)
+    return primary
 
 
 def _format_thread_message(msg: dict) -> str:
