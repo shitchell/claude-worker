@@ -140,6 +140,103 @@ def _reap_ephemeral_worker(
         pass
 
 
+def _last_assistant_text_from_log(log_path: Path, max_chars: int = 160) -> str:
+    """Extract the last assistant text from the log (local helper).
+
+    Reads the tail of the log backward looking for an assistant message
+    with text content blocks. Returns the concatenated text truncated
+    to ``max_chars``, or "" if no assistant message is found.
+
+    NOTE: cli.py has a similar ``_get_last_assistant_preview`` backed by
+    ``_iter_log_reverse``. This is a local copy for manager.py to avoid
+    a circular import. If a third caller appears, extract to a shared
+    ``claude_worker._logutil`` module (per P8 proactive-reusability).
+    """
+    if not log_path.exists():
+        return ""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, 2)
+            tail_size = min(16384, f.tell())
+            f.seek(-tail_size, 2)
+            raw = f.read()
+        for line in reversed(raw.split(b"\n")):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if data.get("type") != "assistant":
+                continue
+            contents = (data.get("message") or {}).get("content") or []
+            if not isinstance(contents, list):
+                continue
+            text_parts = [
+                c.get("text", "")
+                for c in contents
+                if isinstance(c, dict) and c.get("type") == "text"
+            ]
+            combined = " ".join(t.strip() for t in text_parts if t.strip())
+            if not combined:
+                continue
+            if len(combined) > max_chars:
+                return combined[:max_chars] + "..."
+            return combined
+    except OSError:
+        pass
+    return ""
+
+
+WORKER_STATUS_PREFIX: str = "[worker-status]"
+
+
+def _notify_parent_on_exit(
+    name: str,
+    log_path: Path,
+    reaped: bool,
+    idle_seconds: float | None = None,
+) -> None:
+    """Send a [worker-status] completion notification to the parent worker.
+
+    Called right before cleanup_runtime_dir so the log is still
+    readable for the preview. No-op if CW_PARENT_WORKER is unset
+    (human-started workers). Best-effort: never crashes the caller.
+    (#084, D104)
+    """
+    parent = os.environ.get("CW_PARENT_WORKER", "").strip()
+    if not parent:
+        return
+
+    if reaped and idle_seconds is not None:
+        idle_min = max(1, int(idle_seconds // 60))
+        reason = f"reaped after {idle_min}m idle"
+    elif reaped:
+        reason = "reaped (idle timeout)"
+    else:
+        reason = "clean exit"
+
+    preview = _last_assistant_text_from_log(log_path)
+    msg_parts = [f"{WORKER_STATUS_PREFIX} {name} completed ({reason})."]
+    if preview:
+        msg_parts.append(f'Last message: "{preview}"')
+    content = "\n".join(msg_parts)
+
+    try:
+        from claude_worker.thread_store import (
+            append_message,
+            ensure_thread,
+            pair_thread_id,
+        )
+
+        thread_id = pair_thread_id(name, parent)
+        ensure_thread(thread_id, participants=sorted([name, parent]))
+        append_message(thread_id, sender=name, content=content)
+    except Exception:
+        pass  # best-effort
+
+
 def _resolve_claude_bin() -> str:
     """Return the claude binary path, honoring the CLAUDE_WORKER_CLAUDE_BIN
     env var for test injection. Defaults to ``"claude"`` (PATH lookup)."""
@@ -1402,6 +1499,11 @@ def _run_manager_forkless(
     # Thread: read from `in` FIFO → claude stdin
     # Uses a dummy write fd to prevent EOF when writers close.
     # Start this immediately so external senders don't block.
+    # Ephemeral-reap state — shared between fifo_to_stdin_body (inner)
+    # and _notify_parent_on_exit (outer) via nonlocal (#084, D104).
+    ephemeral_reaped = False
+    ephemeral_idle_elapsed: float = 0.0
+
     def fifo_to_stdin_body():
         # Open read end non-blocking first
         rd_fd = os.open(str(in_fifo), os.O_RDONLY | os.O_NONBLOCK)
@@ -1417,6 +1519,9 @@ def _run_manager_forkless(
         # Read the ephemeral idle-timeout once at startup. None means
         # the worker is not ephemeral. (#080, D97)
         ephemeral_idle_timeout = _read_ephemeral_sentinel(runtime)
+        # Access the outer-scope reap state so _notify_parent_on_exit
+        # can distinguish clean-exit from idle-reap (#084, D104).
+        nonlocal ephemeral_reaped, ephemeral_idle_elapsed
         # One-shot dedup flag: set when a drift notification has been
         # delivered for the current divergence, cleared when the source
         # hash matches the stored hash again.
@@ -1530,6 +1635,8 @@ def _run_manager_forkless(
                             idle_elapsed = time.time() - mtime
                         except OSError:
                             idle_elapsed = ephemeral_idle_timeout
+                        ephemeral_reaped = True
+                        ephemeral_idle_elapsed = idle_elapsed
                         _reap_ephemeral_worker(name, proc, in_fifo, idle_elapsed)
                         # The reaper's SIGTERM causes proc.poll() to
                         # transition; the loop condition catches it
@@ -1567,4 +1674,14 @@ def _run_manager_forkless(
     # Wait for claude to exit
     proc.wait()
     log_thread.join(timeout=LOG_THREAD_JOIN_TIMEOUT_SECONDS)
+
+    # Notify the parent worker that this child has completed (#084, D104).
+    # Must happen BEFORE cleanup (log is still on disk for the preview).
+    _notify_parent_on_exit(
+        name,
+        log_path,
+        reaped=ephemeral_reaped,
+        idle_seconds=ephemeral_idle_elapsed if ephemeral_reaped else None,
+    )
+
     cleanup_runtime_dir(name, reason="exit")

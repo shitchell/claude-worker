@@ -2644,3 +2644,52 @@ observations:
       - file: tests/test_thread_auto_detection.py
         identifier: TestResolveReadThreadId
         role: tests
+  - id: D104
+    name: ephemeral-completion-notify
+    rationale: >
+      Ephemeral workers (D97) now send a [worker-status] completion
+      notification to their parent worker via the thread system when
+      they exit (clean or reaped). The parent previously had no
+      notification path — it had to poll `ls` to discover the
+      ephemeral finished.
+
+      The notification fires between log_thread.join (log complete)
+      and cleanup_runtime_dir (log still on disk for preview) in
+      _run_manager_forkless. Both clean-exit and idle-reap converge
+      to this path. An ephemeral_reaped flag (set inside the reap
+      block, shared with the outer scope via nonlocal) distinguishes
+      the two cases.
+
+      Message format follows P12 (consistent-lightweight-notifications):
+      "[worker-status] <name> completed (<reason>). Last message: ..."
+      The preview is extracted from the log tail via a local helper
+      (_last_assistant_text_from_log). NOTE: cli.py has a similar
+      helper (_get_last_assistant_preview backed by _iter_log_reverse);
+      this is a local copy to avoid circular import. If a third
+      caller appears, extract to claude_worker._logutil (P8).
+    alternatives: >
+      1. Poll-based discovery (parent checks ls periodically) —
+      rejected: wastes cycles, violates G2.
+      2. FIFO-based notification (write to parent's FIFO) — rejected:
+      thread system is the canonical messaging layer post-D88/D95.
+      3. Shared-module log-tail helper — viable but larger blast
+      radius for this ticket; deferred per the PM's "your call"
+      directive.
+    tags: [lifecycle, ephemeral, notifications]
+    maps_to: [project:G2, project:P12]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: _notify_parent_on_exit
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: _last_assistant_text_from_log
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: _run_manager_forkless
+        role: implements
+      - file: tests/test_ephemeral_notify.py
+        identifier: TestNotifyParentOnExit
+        role: tests
+      - file: tests/test_ephemeral_notify.py
+        identifier: TestLifecycleEphemeralReapNotify
+        role: tests

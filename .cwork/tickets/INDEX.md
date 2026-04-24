@@ -85,7 +85,7 @@
 | 081 | worker-tool-call-visibility | done | medium-high | lead | human | repl:20333-pts33 | - | human |
 | 082 | stop-wrapup-test-flakiness | done | medium | lead | PM | - | - | pm |
 | 083 | subagents-subcommand | done | medium | lead | TL | - | - | pm |
-| 084 | ephemeral-completion-notify | todo | medium-high | - | TL | - | - | pm |
+| 084 | ephemeral-completion-notify | review | medium-high | lead | TL | - | - | pm |
 | 085 | show-response-thread-routing | review | **high** | lead | human | repl:18793-pts45 | - | pm |
 | 086 | thread-since-prefix-match | todo | medium | - | human | repl:18793-pts45 | - | pm |
 | 087 | thread-auto-detection-consumer | review | medium-high | lead | human | repl:18793-pts45 | - | pm |
