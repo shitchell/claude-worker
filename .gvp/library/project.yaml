@@ -2773,3 +2773,65 @@ observations:
       - file: tests/test_thread_since_prefix.py
         identifier: TestReadMessagesPrefix
         role: tests
+  - id: D107
+    name: thread-read-mark-plumbing
+    rationale: >
+      `thread read --mark` saves the last-seen UUID/message ID so the
+      paired `--new` flag can later filter out already-read messages.
+      Two bugs blocked this pre-D107:
+
+      1. (Crash) `_render_read_output` called `_save_read_marker(runtime,
+      args, last_uuid)` but `runtime` was never in the function's scope
+      — any `read --mark` that reached the log-render path raised
+      `NameError: name 'runtime' is not defined`. Fix: thread `runtime`
+      through the signatures of `_render_read_output`, `_read_static`,
+      and `_read_follow` from `cmd_read` (where it is already computed
+      via `resolve_worker(args.name)`).
+
+      2. (Silent no-op) `_read_from_thread` (the default read path
+      post-D88) returned without calling `_save_read_marker` at all.
+      `--mark` silently did nothing on the path users actually hit.
+      Fix: add a `--mark`-guarded save at the end of `_read_from_thread`
+      with `runtime` now in scope.
+
+      The marker-save behavior is identical across paths — a
+      consumer-keyed file under `runtime/read-markers/` containing the
+      last rendered ID. The log path stores UUIDs; the thread path
+      stores thread-message IDs. These live in the same per-consumer
+      file but callers reading via a single path see consistent
+      round-trip behavior (save last, re-read with --new, get only
+      newer). Cross-path interop (save on thread, load on log) is
+      out of scope for this ticket.
+    alternatives: >
+      1. Drop `--mark` on the fast path — rejected: `--mark` is a
+      passive side effect, not a feature-toggled behavior. Callers
+      setting `--mark` expect it to fire regardless of which scan
+      path was chosen for the render.
+      2. Extract a shared post-render helper that both paths call —
+      considered but deferred: the thread and log paths already
+      differ meaningfully in what they return (thread IDs vs UUIDs,
+      different pre-filtering), and a helper would mostly wrap a
+      two-line guarded call. P8 reusability bar not met yet.
+      3. Fix only the crash and leave `--mark` silent on the thread
+      path — rejected: `--mark` is the default read path's primary
+      consumer, and the ticket's requirement #2 (`--new --mark`
+      typical paired usage) cannot be satisfied if the save is
+      skipped.
+    tags: [bugfix, read, markers]
+    maps_to: [project:G2, project:V2]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _render_read_output
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _read_static
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _read_from_thread
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_read
+        role: implements
+      - file: tests/test_read_markers.py
+        identifier: TestMarkThroughCmdRead
+        role: tests

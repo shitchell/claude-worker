@@ -2055,6 +2055,7 @@ def _format_thread_message(msg: dict) -> str:
 
 def _read_from_thread(
     args: argparse.Namespace,
+    runtime: Path,
     fallback_to_log: bool = False,
 ) -> tuple[str | None, str | None] | None:
     """Read messages from the active thread (post-D88 default).
@@ -2114,6 +2115,14 @@ def _read_from_thread(
 
     first_id = str(messages[0].get("id", "")) or None
     last_id = str(messages[-1].get("id", "")) or None
+
+    # Save read marker if --mark was passed. Mirrors the log-path
+    # _render_read_output behavior so --mark works regardless of which
+    # read path ran (thread is the default post-D88, log is the
+    # --log/--follow/--verbose escape hatch).
+    if getattr(args, "mark", False) and last_id:
+        _save_read_marker(runtime, args, last_id)
+
     return first_id, last_id
 
 
@@ -2163,7 +2172,7 @@ def cmd_read(args: argparse.Namespace) -> tuple[str | None, str | None]:
         or getattr(args, "verbose", False)
     )
     if not use_log:
-        thread_result = _read_from_thread(args, fallback_to_log=True)
+        thread_result = _read_from_thread(args, runtime, fallback_to_log=True)
         if thread_result is not None:
             return thread_result
         # Fell through — continue into log rendering below.
@@ -2253,9 +2262,11 @@ def cmd_read(args: argparse.Namespace) -> tuple[str | None, str | None]:
         formatter = ANSIFormatter()
 
     if args.follow:
-        _read_follow(log_file, config, formatter, since_uuid, since_ts, args)
+        _read_follow(log_file, config, formatter, since_uuid, since_ts, args, runtime)
         return None, None
-    return _read_static(log_file, config, formatter, since_uuid, since_ts, args)
+    return _read_static(
+        log_file, config, formatter, since_uuid, since_ts, args, runtime
+    )
 
 
 def _uuid_matches(msg_uuid: str, target: str) -> bool:
@@ -2692,7 +2703,7 @@ def _read_static_fast_path(
 
 
 def _render_read_output(
-    messages: list[tuple[int, dict, object]], formatter, config, args
+    messages: list[tuple[int, dict, object]], formatter, config, args, runtime: Path
 ) -> tuple[str | None, str | None]:
     """Render a prepared messages list according to args and return
     (first_uuid, last_uuid) of what was emitted.
@@ -2757,7 +2768,7 @@ def _render_read_output(
 
 
 def _read_static(
-    log_file, config, formatter, since_uuid, since_ts, args
+    log_file, config, formatter, since_uuid, since_ts, args, runtime: Path
 ) -> tuple[str | None, str | None]:
     """Read log file statically.
 
@@ -2802,7 +2813,7 @@ def _read_static(
             messages = fast_messages
             # Jump past the forward scan and the post-scan filters that
             # were already applied inside the fast path.
-            return _render_read_output(messages, formatter, config, args)
+            return _render_read_output(messages, formatter, config, args, runtime)
     current_turn_chat_id: str | None = None
     last_assistant_in_turn: dict | None = None
     missing_tag_reports: list[dict] = []
@@ -2964,16 +2975,18 @@ def _read_static(
             print("No new messages after that point.", file=sys.stderr)
         return None, None
 
-    return _render_read_output(messages, formatter, config, args)
+    return _render_read_output(messages, formatter, config, args, runtime)
 
 
-def _read_follow(log_file, config, formatter, since_uuid, since_ts, args):
+def _read_follow(
+    log_file, config, formatter, since_uuid, since_ts, args, runtime: Path
+):
     """Tail the log file, printing new messages as they appear."""
     from claude_logs import parse_message, should_show_message
     import time as _time
 
     # First, print existing content
-    _read_static(log_file, config, formatter, since_uuid, since_ts, args)
+    _read_static(log_file, config, formatter, since_uuid, since_ts, args, runtime)
 
     # Then tail
     with open(log_file) as f:
