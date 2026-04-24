@@ -46,10 +46,16 @@ EPHEMERAL_WRAPUP_POLL_INTERVAL: float = 0.5
 # [system:identity-drift] notification if they diverge.
 IDENTITY_HASH_FILE: str = "identity.hash"
 
-# Active-thread sidecar (Phase 3): records the thread ID of the most
-# recent inbound notification so the response tee knows where to append
-# the worker's assistant reply. Lives under <runtime>/active-thread.
-ACTIVE_THREAD_FILE: str = "active-thread"
+# Response-tee thread resolution (#085, D102): extract the thread_id
+# from the most recent [system:new-message] notification in the log.
+# Replaces the old global active-thread sidecar which raced on multi-
+# consumer workers. Format: "[system:new-message] Thread <id> from ..."
+import re as _re
+
+THREAD_NOTIFICATION_RE: "re.Pattern[str]" = _re.compile(
+    r"\[system:new-message\] Thread (\S+) from"
+)
+TEE_LOG_SCAN_LINES: int = 30
 
 # Env var override for the claude binary path. Tests set this to point at
 # a stub-claude script that emits canned JSONL output; production leaves
@@ -140,38 +146,61 @@ def _resolve_claude_bin() -> str:
     return os.environ.get(CLAUDE_BIN_ENV_VAR) or DEFAULT_CLAUDE_BIN
 
 
-def _set_active_thread(runtime: Path, thread_id: str) -> None:
-    """Record the worker's active thread (last inbound thread).
+def _resolve_tee_thread(log_path: Path) -> str | None:
+    """Derive the response-tee target from the worker's own log.
 
-    Phase 3 response tee uses this to know where to append assistant
-    replies. Best-effort: runtime may briefly not exist during startup
-    or shutdown, so OSError is swallowed.
+    Walks the last ``TEE_LOG_SCAN_LINES`` lines backward looking for a
+    ``[system:new-message] Thread <id> from ...`` user message — the
+    notification that triggered the current turn. Returns the thread_id
+    or None if no match (e.g., the worker is processing an initial
+    prompt or a direct FIFO write with no thread context).
+
+    Per-turn, not global — immune to the active-thread sidecar race
+    that caused #085. See D102.
     """
+    if not log_path.exists():
+        return None
     try:
-        (runtime / ACTIVE_THREAD_FILE).write_text(thread_id)
+        lines: list[str] = []
+        with open(log_path, "rb") as f:
+            f.seek(0, 2)
+            remaining = f.tell()
+            buf = b""
+            while remaining > 0 and len(lines) < TEE_LOG_SCAN_LINES:
+                chunk_size = min(4096, remaining)
+                remaining -= chunk_size
+                f.seek(remaining)
+                buf = f.read(chunk_size) + buf
+                lines = buf.split(b"\n")
+            # Walk newest-first
+            for raw in reversed(lines):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    data = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if data.get("type") != "user":
+                    continue
+                content = (data.get("message") or {}).get("content") or ""
+                if not isinstance(content, str):
+                    continue
+                m = THREAD_NOTIFICATION_RE.search(content)
+                if m:
+                    return m.group(1)
     except OSError:
         pass
-
-
-def _get_active_thread(runtime: Path) -> str | None:
-    """Return the worker's active thread ID, or None if not set."""
-    p = runtime / ACTIVE_THREAD_FILE
-    if not p.exists():
-        return None
-    try:
-        text = p.read_text().strip()
-        return text or None
-    except OSError:
-        return None
+    return None
 
 
 def _tee_assistant_to_thread(
     line: str,
-    runtime: Path,
+    log_path: Path,
     worker_name: str,
 ) -> bool:
     """Parse a raw JSONL line; if it's a final-turn assistant text message,
-    append its text to the worker's active thread.
+    append its text to the thread that triggered this turn.
 
     Only tees messages where ``stop_reason == "end_turn"`` so one assistant
     text per turn is appended (mid-turn streaming chunks and tool-use
@@ -179,8 +208,12 @@ def _tee_assistant_to_thread(
     in the message's content list; non-text blocks (tool_use, thinking)
     are ignored.
 
+    The target thread is derived per-turn from the log via
+    ``_resolve_tee_thread`` (D102, #085) — NOT from the old global
+    active-thread sidecar, which raced on multi-consumer workers.
+
     Returns True if a message was teed, False otherwise. Best-effort:
-    parse errors and missing active thread both silently return False.
+    parse errors and missing thread both silently return False.
     """
     try:
         data = json.loads(line)
@@ -203,14 +236,14 @@ def _tee_assistant_to_thread(
     combined = "\n".join(text_parts).strip()
     if not combined:
         return False
-    active_thread = _get_active_thread(runtime)
-    if not active_thread:
+    target_thread = _resolve_tee_thread(log_path)
+    if not target_thread:
         return False
     try:
         from claude_worker.thread_store import append_message as _append
 
         _append(
-            thread_id=active_thread,
+            thread_id=target_thread,
             sender=worker_name,
             content=combined,
             tags=["assistant"],
@@ -452,7 +485,6 @@ def check_thread_changes(
     worker_name: str,
     in_fifo: Path,
     prev_snapshot: dict[str, tuple[float, int]],
-    runtime: Path | None = None,
     seeded: bool = False,
 ) -> dict[str, tuple[float, int]]:
     """Check for new messages in threads the worker participates in.
@@ -477,10 +509,9 @@ def check_thread_changes(
     empty — used by the manager, which pre-seeds a snapshot at startup
     so writes that land before the first 5s poll are still delivered.
 
-    When ``runtime`` is provided, records the most recent inbound
-    thread ID to ``<runtime>/active-thread`` so the response tee knows
-    where to append the worker's assistant reply (Phase 3). Best-effort:
-    never crashes the caller.
+    The response tee now derives its target thread from the log per-turn
+    (``_resolve_tee_thread``, D102) instead of a global sidecar, so
+    this function no longer maintains an active-thread sidecar.
     """
     try:
         new_snapshot = snapshot_threads()
@@ -544,11 +575,6 @@ def check_thread_changes(
                         os.write(wr, (notification + "\n").encode())
                     finally:
                         os.close(wr)
-                    # Record this thread as active so the response tee
-                    # appends the worker's reply here. Only updates on
-                    # successful FIFO writes (genuine new-message events).
-                    if runtime is not None:
-                        _set_active_thread(runtime, thread_id)
                 except OSError:
                     # FIFO not writable (no reader, etc.) — skip,
                     # snapshot still advances so we don't re-notify.
@@ -1362,7 +1388,7 @@ def _run_manager_forkless(
                 # to the active thread, if one is set. Best-effort — any
                 # parse or I/O error is swallowed by the helper.
                 try:
-                    _tee_assistant_to_thread(line, runtime, name)
+                    _tee_assistant_to_thread(line, log_path, name)
                 except Exception:
                     pass
 
@@ -1456,17 +1482,15 @@ def _run_manager_forkless(
 
                 # Periodic thread monitoring — inject new-message
                 # notifications for threads the worker participates in.
-                # Pass runtime so the active-thread sidecar is updated for
-                # Phase 3's response tee. ``seeded=True`` tells
-                # check_thread_changes the baseline is already established,
-                # so it should not skip notifications on an empty snapshot.
+                # ``seeded=True`` tells check_thread_changes the baseline
+                # is already established, so it should not skip
+                # notifications on an empty snapshot.
                 if now - last_thread_check >= THREAD_MONITOR_INTERVAL_SECONDS:
                     last_thread_check = now
                     thread_snapshot = check_thread_changes(
                         name,
                         in_fifo,
                         thread_snapshot,
-                        runtime,
                         seeded=thread_baseline_seeded,
                     )
 

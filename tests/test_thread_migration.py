@@ -5,7 +5,7 @@ Covers:
   - ensure_thread create/no-op/extend semantics
   - cmd_send writes to threads rather than FIFOs
   - cmd_read reads from threads, --log falls back to the log
-  - active-thread sidecar + response tee
+  - response tee (D102: log-based thread resolution, no global sidecar)
 """
 
 from __future__ import annotations
@@ -21,8 +21,7 @@ from claude_worker import cli as cw_cli
 from claude_worker import manager as cw_manager
 from claude_worker import thread_store
 from claude_worker.manager import (
-    _get_active_thread,
-    _set_active_thread,
+    _resolve_tee_thread,
     _tee_assistant_to_thread,
 )
 from claude_worker.thread_store import (
@@ -416,27 +415,24 @@ def test_read_missing_thread_falls_back_to_log(
     assert "LOG_FALLBACK_MARKER" in out
 
 
-# -- Active-thread sidecar -------------------------------------------------
+# -- Response tee (D102: log-based thread resolution) ---------------------
 
 
-def test_set_get_active_thread(tmp_path: Path):
-    """Write active-thread, read it back."""
-    _set_active_thread(tmp_path, "pair-pm-tl")
-    assert _get_active_thread(tmp_path) == "pair-pm-tl"
-
-
-def test_get_active_thread_missing_returns_none(tmp_path: Path):
-    """No file -> None."""
-    assert _get_active_thread(tmp_path) is None
-
-
-def test_get_active_thread_empty_returns_none(tmp_path: Path):
-    """Empty file -> None."""
-    (tmp_path / "active-thread").write_text("")
-    assert _get_active_thread(tmp_path) is None
-
-
-# -- Response tee ---------------------------------------------------------
+def _notification_jsonl(thread_id: str, sender: str = "human") -> str:
+    """Build a JSONL notification line matching the manager's format."""
+    return (
+        json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": f"[system:new-message] Thread {thread_id} from {sender}: hi...",
+                },
+                "uuid": f"notif-{thread_id}",
+            }
+        )
+        + "\n"
+    )
 
 
 def _assistant_jsonl(
@@ -459,17 +455,22 @@ def _assistant_jsonl(
     return json.dumps(envelope) + "\n"
 
 
-def test_tee_end_turn_appends_to_active_thread(tmp_path: Path):
-    """A stop_reason=end_turn assistant message is appended to the thread."""
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
+def _write_log(path, *lines):
+    """Write lines to a log file."""
+    path.write_text("".join(lines))
 
-    # Set active thread + create the thread file
+
+def test_tee_end_turn_appends_to_correct_thread(tmp_path: Path):
+    """A stop_reason=end_turn assistant message is tee'd to the thread
+    identified by the most recent [system:new-message] in the log."""
+    log = tmp_path / "log"
     create_thread(participants=["worker1"], thread_id="pair-pm-worker1")
-    _set_active_thread(runtime, "pair-pm-worker1")
 
-    line = _assistant_jsonl("hello world", stop_reason="end_turn")
-    teed = _tee_assistant_to_thread(line, runtime, "worker1")
+    notif = _notification_jsonl("pair-pm-worker1")
+    assistant = _assistant_jsonl("hello world", stop_reason="end_turn")
+    _write_log(log, notif, assistant)
+
+    teed = _tee_assistant_to_thread(assistant.strip(), log, "worker1")
     assert teed is True
 
     messages = read_messages("pair-pm-worker1")
@@ -481,14 +482,12 @@ def test_tee_end_turn_appends_to_active_thread(tmp_path: Path):
 
 def test_tee_skips_partial_chunks(tmp_path: Path):
     """Mid-turn chunks (stop_reason=None) are not teed."""
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-
+    log = tmp_path / "log"
     create_thread(participants=["w"], thread_id="pair-pm-w")
-    _set_active_thread(runtime, "pair-pm-w")
+    _write_log(log, _notification_jsonl("pair-pm-w"))
 
     line = _assistant_jsonl("streaming partial", stop_reason=None)
-    assert _tee_assistant_to_thread(line, runtime, "w") is False
+    assert _tee_assistant_to_thread(line, log, "w") is False
 
     messages = read_messages("pair-pm-w")
     assert messages == []
@@ -496,11 +495,9 @@ def test_tee_skips_partial_chunks(tmp_path: Path):
 
 def test_tee_skips_tool_use_turns(tmp_path: Path):
     """Tool-use-only assistant turns (no text block) are not teed."""
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-
+    log = tmp_path / "log"
     create_thread(participants=["w"], thread_id="pair-pm-w")
-    _set_active_thread(runtime, "pair-pm-w")
+    _write_log(log, _notification_jsonl("pair-pm-w"))
 
     envelope = {
         "type": "assistant",
@@ -516,25 +513,23 @@ def test_tee_skips_tool_use_turns(tmp_path: Path):
         "uuid": "uuid-tool-use",
     }
     line = json.dumps(envelope) + "\n"
-    assert _tee_assistant_to_thread(line, runtime, "w") is False
+    assert _tee_assistant_to_thread(line, log, "w") is False
 
 
-def test_tee_no_active_thread_is_noop(tmp_path: Path):
-    """Without an active thread set, tee is a no-op."""
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-
-    line = _assistant_jsonl("nowhere to go")
-    assert _tee_assistant_to_thread(line, runtime, "w") is False
+def test_tee_no_notification_in_log_is_noop(tmp_path: Path):
+    """Without a [system:new-message] in the log, tee is a no-op."""
+    log = tmp_path / "log"
+    # Log has only the assistant line, no notification
+    assistant = _assistant_jsonl("nowhere to go")
+    _write_log(log, assistant)
+    assert _tee_assistant_to_thread(assistant.strip(), log, "w") is False
 
 
 def test_tee_skips_non_assistant_messages(tmp_path: Path):
     """User / system / result messages are not teed."""
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-
+    log = tmp_path / "log"
     create_thread(participants=["w"], thread_id="pair-pm-w")
-    _set_active_thread(runtime, "pair-pm-w")
+    _write_log(log, _notification_jsonl("pair-pm-w"))
 
     user_line = (
         json.dumps(
@@ -546,25 +541,21 @@ def test_tee_skips_non_assistant_messages(tmp_path: Path):
         )
         + "\n"
     )
-    assert _tee_assistant_to_thread(user_line, runtime, "w") is False
+    assert _tee_assistant_to_thread(user_line, log, "w") is False
 
 
 def test_tee_handles_malformed_line(tmp_path: Path):
     """A non-JSON line returns False (doesn't raise)."""
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-
-    _set_active_thread(runtime, "pair-pm-w")
-    assert _tee_assistant_to_thread("not json at all", runtime, "w") is False
+    log = tmp_path / "log"
+    _write_log(log, _notification_jsonl("pair-pm-w"))
+    assert _tee_assistant_to_thread("not json at all", log, "w") is False
 
 
 def test_tee_concatenates_multiple_text_blocks(tmp_path: Path):
     """An assistant message with several text blocks concatenates them."""
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-
+    log = tmp_path / "log"
     create_thread(participants=["w"], thread_id="pair-pm-w")
-    _set_active_thread(runtime, "pair-pm-w")
+    _write_log(log, _notification_jsonl("pair-pm-w"))
 
     envelope = {
         "type": "assistant",
@@ -582,7 +573,7 @@ def test_tee_concatenates_multiple_text_blocks(tmp_path: Path):
         "uuid": "uuid-multi",
     }
     line = json.dumps(envelope) + "\n"
-    assert _tee_assistant_to_thread(line, runtime, "w") is True
+    assert _tee_assistant_to_thread(line, log, "w") is True
 
     messages = read_messages("pair-pm-w")
     assert len(messages) == 1

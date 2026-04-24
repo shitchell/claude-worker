@@ -83,8 +83,13 @@
 | 079 | migrate-old-role-dirs | done | medium | lead | human | repl:20333-pts33 | - | pm |
 | 080 | replace-task-with-ephemeral-workers | done | **high** | lead | human | repl:20333-pts33 | - | human |
 | 081 | worker-tool-call-visibility | done | medium-high | lead | human | repl:20333-pts33 | - | human |
-| 082 | stop-wrapup-test-flakiness | review | medium | lead | PM | - | - | pm |
+| 082 | stop-wrapup-test-flakiness | done | medium | lead | PM | - | - | pm |
 | 083 | subagents-subcommand | done | medium | lead | TL | - | - | pm |
+| 084 | ephemeral-completion-notify | todo | medium-high | - | TL | - | - | pm |
+| 085 | show-response-thread-routing | review | **high** | lead | human | repl:18793-pts45 | - | pm |
+| 086 | thread-since-prefix-match | todo | medium | - | human | repl:18793-pts45 | - | pm |
+| 087 | thread-auto-detection-consumer | todo | medium-high | - | human | repl:18793-pts45 | - | pm |
+| 088 | manager-hot-reload | todo | medium-high | - | human | repl:18793-pts45 | - | pm |
 
 ## Done (migrated from future-queries)
 

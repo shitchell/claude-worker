@@ -2554,3 +2554,55 @@ observations:
       - file: tests/test_wait_for_turn_race.py
         identifier: test_stop_wrapup_is_stable_across_10_runs
         role: tests
+  - id: D102
+    name: fix-response-tee-thread-routing
+    rationale: >
+      Fixes --show-response returning empty output when the worker's
+      response exists in the session log but was tee'd to the WRONG
+      thread (#085). Root cause: the global active-thread sidecar
+      flipped on every inbound thread notification (any thread, any
+      sender) via check_thread_changes, so for PM workers with
+      multiple concurrent threads the tee target was non-deterministic.
+
+      Fix: delete the active-thread sidecar entirely. Replace with
+      per-turn log-walk: _resolve_tee_thread reads the last ~30 lines
+      of the worker's log backward, finds the most recent
+      [system:new-message] Thread <id> notification, extracts the
+      thread_id via THREAD_NOTIFICATION_RE regex, and returns it.
+      The tee then appends to THAT thread — the one whose notification
+      triggered the current turn, not whichever thread happened to be
+      notified last globally.
+
+      Clean break per P13: _set_active_thread, _get_active_thread,
+      ACTIVE_THREAD_FILE constant, and the runtime sidecar file are
+      all deleted. check_thread_changes loses its runtime parameter.
+      All callers updated. Old sidecar tests replaced with log-based
+      equivalents.
+    alternatives: >
+      1. Only update active-thread for non-system messages — rejected:
+      all thread messages are real user content (system messages are
+      FIFO-injected, not thread-appended). Would not address the race
+      between multiple real user messages on different threads.
+      2. Parse thread from FIFO forwarding time — viable but still
+      races when multiple notifications are forwarded back-to-back.
+      3. Per-turn sidecar (write thread_id into the sidecar at FIFO
+      forward time, not at detection time) — viable but still a
+      global singleton; one more concurrent notification overwrites.
+    tags: [messaging, threads, bugfix]
+    maps_to: [project:G2, project:V2]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: _resolve_tee_thread
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: _tee_assistant_to_thread
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: check_thread_changes
+        role: implements
+      - file: tests/test_show_response_routing.py
+        identifier: TestResolveTeeThread
+        role: tests
+      - file: tests/test_show_response_routing.py
+        identifier: TestMultiThreadRouting
+        role: tests
