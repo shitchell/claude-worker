@@ -2693,3 +2693,44 @@ observations:
       - file: tests/test_ephemeral_notify.py
         identifier: TestLifecycleEphemeralReapNotify
         role: tests
+  - id: D105
+    name: manager-version-drift-detection
+    rationale: >
+      Detects when a running manager's code is outdated relative to
+      the installed version. Stamps version + git_hash at startup
+      in runtime/version.json. Periodic 30s check compares against
+      a fresh _compute_version_stamp(). On mismatch, injects a
+      one-shot [system:manager-outdated] FIFO notification telling
+      the worker to use `replaceme` or `stop + start`. Dual-stamp
+      (package version + git hash) catches both version bumps and
+      dev commits without version bump — the 5-day silent drift
+      that motivated this ticket was code-change-without-bump.
+    alternatives: >
+      1. Manager self-restart (hot-reload) — rejected for now:
+      child PID preservation + FIFO state transfer is complex.
+      Better suited to v2 thin-shim architecture (Option 4).
+      2. importlib.reload — rejected: fragile for production
+      (module-level state, closures don't update).
+      3. File-mtime-based detection — rejected: less precise than
+      git hash, false positives from non-code file touches.
+    tags: [lifecycle, manager, diagnostics]
+    maps_to: [project:G2, project:P10]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: _compute_version_stamp
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: _check_version_drift
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: _run_manager_forkless
+        role: implements
+      - file: tests/test_version_drift.py
+        identifier: TestComputeVersionStamp
+        role: tests
+      - file: tests/test_version_drift.py
+        identifier: TestCheckVersionDrift
+        role: tests
+      - file: tests/test_version_drift.py
+        identifier: TestManagerVersionFile
+        role: tests

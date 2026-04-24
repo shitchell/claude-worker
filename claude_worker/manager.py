@@ -32,6 +32,11 @@ REMOTE_CONTROL_TIMEOUT_SECONDS: float = 30.0
 REMOTE_CONTROL_POLL_INTERVAL: float = 0.2
 IDENTITY_DRIFT_CHECK_INTERVAL_SECONDS: float = 30.0
 
+# Version drift detection (#088, D105): manager stamps its version at
+# startup and checks periodically whether the installed code has changed.
+VERSION_CHECK_INTERVAL_SECONDS: float = 30.0
+VERSION_STAMP_FILENAME: str = "version.json"
+
 # Ephemeral workers (#080, D97): the reaper runs in the same poll
 # loop as the cwork/thread/periodic checks. Sentinel file at
 # <runtime>/ephemeral contains the idle timeout in seconds.
@@ -235,6 +240,50 @@ def _notify_parent_on_exit(
         append_message(thread_id, sender=name, content=content)
     except Exception:
         pass  # best-effort
+
+
+def _compute_version_stamp() -> dict:
+    """Build a version stamp dict for the running code.
+
+    Contains ``version`` (from ``claude_worker.__version__``) and
+    optionally ``git_hash`` (short HEAD hash if running in a git repo).
+    Used both at manager startup (write to runtime/version.json) and
+    at check time (compare against the running stamp). (#088, D105)
+    """
+    import claude_worker
+
+    stamp: dict = {"version": claude_worker.__version__}
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=Path(claude_worker.__file__).parent,
+        )
+        if result.returncode == 0:
+            stamp["git_hash"] = result.stdout.strip()
+    except Exception:
+        pass
+    return stamp
+
+
+def _check_version_drift(running_stamp: dict) -> dict | None:
+    """Return the current installed stamp if it differs, else None.
+
+    Checks ``version`` first (catches version bumps), then ``git_hash``
+    (catches dev commits without a version bump). Returns None if both
+    match or if comparison is impossible (e.g., no git at check time
+    AND same version string). (#088, D105)
+    """
+    current = _compute_version_stamp()
+    if current.get("version") != running_stamp.get("version"):
+        return current
+    running_hash = running_stamp.get("git_hash")
+    current_hash = current.get("git_hash")
+    if running_hash and current_hash and running_hash != current_hash:
+        return current
+    return None
 
 
 def _resolve_claude_bin() -> str:
@@ -1359,6 +1408,17 @@ def _run_manager_forkless(
 
     # Write manager PID
     pid_file.write_text(str(os.getpid()))
+
+    # Version stamp (#088, D105): written once at startup. The
+    # periodic check in the main loop compares the running stamp
+    # against a fresh _compute_version_stamp() to detect code drift.
+    running_version_stamp = _compute_version_stamp()
+    running_version_stamp["started_at"] = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+    )
+    version_file = runtime / VERSION_STAMP_FILENAME
+    _atomic_write_text(version_file, json.dumps(running_version_stamp, indent=2))
+
     resolved_cwd = cwd or os.getcwd()
 
     # Build environment — unset ANTHROPIC_API_KEY to force subscription auth
@@ -1516,16 +1576,17 @@ def _run_manager_forkless(
         last_periodic_check = time.monotonic()
         last_identity_drift_check = time.monotonic()
         last_ephemeral_check = time.monotonic()
+        last_version_check = time.monotonic()
         # Read the ephemeral idle-timeout once at startup. None means
         # the worker is not ephemeral. (#080, D97)
         ephemeral_idle_timeout = _read_ephemeral_sentinel(runtime)
         # Access the outer-scope reap state so _notify_parent_on_exit
         # can distinguish clean-exit from idle-reap (#084, D104).
         nonlocal ephemeral_reaped, ephemeral_idle_elapsed
-        # One-shot dedup flag: set when a drift notification has been
-        # delivered for the current divergence, cleared when the source
-        # hash matches the stored hash again.
+        # One-shot dedup flags: set when a drift notification has been
+        # delivered for the current divergence. (#066 identity, #088 version)
         identity_drift_notified: bool = False
+        version_drift_notified: bool = False
         cwork_snapshot: dict[str, tuple[float, int]] = {}
         # Seed the thread snapshot synchronously at startup so existing
         # threads form the baseline — any file growth from this moment on
@@ -1621,6 +1682,43 @@ def _run_manager_forkless(
                     identity_drift_notified = check_identity_drift(
                         identity, runtime, in_fifo, identity_drift_notified
                     )
+
+                # Version drift detection (#088, D105). Compare the
+                # running stamp against a fresh computation; notify once.
+                if (
+                    not version_drift_notified
+                    and now - last_version_check >= VERSION_CHECK_INTERVAL_SECONDS
+                ):
+                    last_version_check = now
+                    drift = _check_version_drift(running_version_stamp)
+                    if drift is not None:
+                        version_drift_notified = True
+                        running_v = running_version_stamp.get(
+                            "git_hash", running_version_stamp.get("version", "?")
+                        )
+                        current_v = drift.get("git_hash", drift.get("version", "?"))
+                        notification = json.dumps(
+                            {
+                                "type": "user",
+                                "message": {
+                                    "role": "user",
+                                    "content": (
+                                        f"[system:manager-outdated] Manager code is "
+                                        f"outdated (running {running_v}, installed "
+                                        f"{current_v}). Use `claude-worker replaceme` "
+                                        f"or `stop + start` to pick up new code."
+                                    ),
+                                },
+                            }
+                        )
+                        try:
+                            wr = os.open(str(in_fifo), os.O_WRONLY | os.O_NONBLOCK)
+                            try:
+                                os.write(wr, (notification + "\n").encode())
+                            finally:
+                                os.close(wr)
+                        except OSError:
+                            pass
 
                 # Ephemeral inactivity reap (#080, D97). Runs only when
                 # the ephemeral sentinel was present at startup.
