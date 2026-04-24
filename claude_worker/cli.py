@@ -5931,7 +5931,7 @@ def _watch_thread(
                 printed_ids.add(msg.get("id", ""))
                 # When --since is given, stop prefilling after the marker
                 # so subsequent messages are printed as "new".
-                if since_id is not None and msg.get("id") == since_id:
+                if since_id is not None and _uuid_matches(msg.get("id", ""), since_id):
                     break
     except OSError:
         pass

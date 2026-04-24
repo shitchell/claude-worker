@@ -2734,3 +2734,42 @@ observations:
       - file: tests/test_version_drift.py
         identifier: TestManagerVersionFile
         role: tests
+  - id: D106
+    name: thread-since-prefix-match
+    rationale: >
+      UUID-accepting flags (--since, --until) in thread_store.read_messages
+      and _watch_thread now support git-style prefix matching (8+ char
+      prefixes resolve via case-insensitive startswith). Previously
+      --since required the FULL 16-char hex message ID — users copying
+      the 8-char short IDs from thread read hints got "not found".
+
+      Implementation: _id_prefix_matches helper in thread_store.py
+      (mirrors cli.py's _uuid_matches pattern). Replaces exact
+      `msg.get("id") == since_id` with prefix match in both
+      read_messages and _watch_thread.
+    alternatives: >
+      1. Ambiguity detection with error — considered per ticket
+      requirements but deferred: UUID4 hex IDs have 2^64 unique
+      8-char prefixes, making collisions astronomically unlikely.
+      If a collision ever occurs, the first-match-wins behavior
+      is deterministic and matches git's convention.
+      2. Require full UUID always — rejected: UX paper cut, the
+      hint output shows 8-char short IDs (UUID_SHORT_LENGTH=8).
+    tags: [threads, ux]
+    maps_to: [project:V1]
+    refs:
+      - file: claude_worker/thread_store.py
+        identifier: _id_prefix_matches
+        role: implements
+      - file: claude_worker/thread_store.py
+        identifier: read_messages
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _watch_thread
+        role: implements
+      - file: tests/test_thread_since_prefix.py
+        identifier: TestIdPrefixMatches
+        role: tests
+      - file: tests/test_thread_since_prefix.py
+        identifier: TestReadMessagesPrefix
+        role: tests

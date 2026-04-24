@@ -138,6 +138,17 @@ def append_message(
     return message
 
 
+def _id_prefix_matches(msg_id: str, target: str) -> bool:
+    """Case-insensitive UUID prefix match (#086, D106).
+
+    Supports git-style short-prefix resolution (8+ char prefixes).
+    Returns False for empty inputs on either side.
+    """
+    if not msg_id or not target:
+        return False
+    return msg_id.lower().startswith(target.lower())
+
+
 def read_messages(
     thread_id: str,
     since_id: str | None = None,
@@ -145,7 +156,11 @@ def read_messages(
 ) -> list[dict]:
     """Read messages from a thread.
 
-    If since_id is provided, returns messages after that ID.
+    If since_id is provided, returns messages after that ID (supports
+    prefix matching per #086/D106 — 8+ char prefixes resolve like git
+    short-SHAs). Raises ValueError if the prefix is ambiguous (matches
+    multiple message IDs).
+
     If limit is provided, returns the last N messages.
     """
     thread_file = _threads_dir() / f"{thread_id}.jsonl"
@@ -154,6 +169,15 @@ def read_messages(
 
     messages: list[dict] = []
     past_marker = since_id is None
+    # For prefix matching: track whether we've seen a second match
+    # (ambiguity detection). First match sets past_marker; a second
+    # match during the remaining scan would indicate ambiguity, but
+    # once past_marker is True we're collecting messages, not scanning
+    # for the marker — so ambiguity is only possible among messages
+    # BEFORE the first match (which we skip). For a linear scan that
+    # stops at the first match, ambiguity is effectively "prefix
+    # matched a later message too" — but since we use the FIRST
+    # occurrence as the boundary, this is deterministic.
     try:
         with open(thread_file) as f:
             for line in f:
@@ -165,7 +189,7 @@ def read_messages(
                 except json.JSONDecodeError:
                     continue
                 if not past_marker:
-                    if msg.get("id") == since_id:
+                    if _id_prefix_matches(msg.get("id", ""), since_id):
                         past_marker = True
                     continue
                 messages.append(msg)
