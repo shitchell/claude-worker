@@ -261,6 +261,59 @@ class TestCmdSendEndToEnd:
         handle.stop()
 
 
+class TestThreadRoundtripFullContent:
+    """A 2KB message sent via cmd_send arrives in the recipient's thread
+    store verbatim — the FIFO notification carries the truncation hint
+    (D108), but the thread JSONL is the source of truth and keeps the
+    full content. Also exercises the round-trip path between two fake
+    workers (sender resolves to ``human`` per ``_resolve_sender``)."""
+
+    def test_2kb_message_full_content_in_thread(self, running_worker):
+        import argparse
+        from claude_worker.cli import _resolve_sender, cmd_send
+        from claude_worker.thread_store import pair_thread_id, read_messages
+
+        handle = running_worker(name="recv-2kb")
+        assert handle.wait_for_log('"type": "system"', timeout=5.0)
+
+        big_msg = ("payload-line " * 200).strip()  # ~2.4KB
+        assert len(big_msg) > 2048
+
+        args = argparse.Namespace(
+            name=handle.name,
+            message=[big_msg],
+            queue=False,
+            show_response=False,
+            show_full_response=False,
+            chat=None,
+            all_chats=False,
+            dry_run=False,
+            verbose=False,
+            broadcast=False,
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_send(args)
+        assert exc_info.value.code == 0
+
+        # FIFO notification carries the truncation hint that names the
+        # exact CLI invocation to fetch the rest.
+        assert handle.wait_for_log("[truncated", timeout=10.0)
+        assert handle.wait_for_log("claude-worker thread read", timeout=2.0)
+
+        # The thread JSONL — the source of truth — has the full message
+        # verbatim, regardless of the FIFO preview length.
+        sender = _resolve_sender()
+        tid = pair_thread_id(sender, handle.name)
+        msgs = read_messages(tid)
+        contents = [m.get("content", "") for m in msgs]
+        assert big_msg in contents, (
+            f"thread {tid} did not contain the full 2KB message; "
+            f"saw lengths={[len(c) for c in contents]}"
+        )
+
+        handle.stop()
+
+
 class TestShutdownCleanup:
     """Manager should clean up its runtime dir on clean exit."""
 

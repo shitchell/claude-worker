@@ -25,7 +25,7 @@ LOG_THREAD_JOIN_TIMEOUT_SECONDS: float = 5.0
 QUEUE_DRAIN_INTERVAL_SECONDS: float = 5.0
 CWORK_MONITOR_INTERVAL_SECONDS: float = 30.0
 THREAD_MONITOR_INTERVAL_SECONDS: float = 5.0
-THREAD_NOTIFICATION_PREVIEW_LENGTH: int = 80
+THREAD_NOTIFICATION_PREVIEW_LENGTH: int = 200
 PERIODIC_CHECK_INTERVAL_SECONDS: float = 30.0
 PERIODIC_SUBPROCESS_TIMEOUT_SECONDS: float = 10.0
 REMOTE_CONTROL_TIMEOUT_SECONDS: float = 30.0
@@ -700,18 +700,30 @@ def check_thread_changes(
                     # Don't notify the sender about their own message
                     continue
                 content = msg.get("content", "") or ""
+                truncated = len(content) > THREAD_NOTIFICATION_PREVIEW_LENGTH
                 preview = content[:THREAD_NOTIFICATION_PREVIEW_LENGTH]
-                if len(content) > THREAD_NOTIFICATION_PREVIEW_LENGTH:
-                    preview += "..."
+                # Loud, self-documenting truncation (D108): when the preview
+                # cuts off the body, append an explicit instruction line in
+                # the same envelope so the recipient knows there's more and
+                # exactly how to fetch it. Replaces the silent "..." that
+                # made truncation indistinguishable from a complete message
+                # (G2 loud-over-silent, V2 explicit-over-implicit).
+                notification_body = (
+                    f"[system:new-message] Thread {thread_id} "
+                    f"from {sender}: {preview}"
+                )
+                if truncated:
+                    notification_body += (
+                        f"...\n[truncated — full message in thread; "
+                        f"read with: claude-worker thread read "
+                        f"{worker_name} --thread {thread_id}]"
+                    )
                 notification = json.dumps(
                     {
                         "type": "user",
                         "message": {
                             "role": "user",
-                            "content": (
-                                f"[system:new-message] Thread {thread_id} "
-                                f"from {sender}: {preview}"
-                            ),
+                            "content": notification_body,
                         },
                     }
                 )

@@ -166,7 +166,8 @@ def test_check_thread_changes_ignores_non_participant(
 def test_check_thread_changes_preview_truncation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Content longer than PREVIEW_LENGTH is truncated with ellipsis."""
+    """Content longer than PREVIEW_LENGTH is truncated and an explicit
+    instruction line is appended (D108)."""
     tid = create_thread(participants=["pm", "tl"])
     prev = snapshot_threads()
 
@@ -179,10 +180,12 @@ def test_check_thread_changes_preview_truncation(
     assert len(writes) == 1
     envelope = json.loads(writes[0].decode().strip())
     content = envelope["message"]["content"]
-    # Truncated preview + "..." ends the preview portion
-    assert content.endswith("...")
+    # Preview cuts off at PREVIEW_LENGTH and is followed by "..." then
+    # the explicit truncation instruction line on its own line.
     truncated = "x" * THREAD_NOTIFICATION_PREVIEW_LENGTH
     assert truncated in content
+    assert "..." in content
+    assert "[truncated" in content
     # The full original string should not appear in the notification
     assert long_content not in content
 
@@ -324,3 +327,117 @@ def test_read_new_messages_since_size_skips_corrupt_lines(tmp_path: Path):
 
     new_msgs = _read_new_messages_since_size(tid, 0)
     assert [m["content"] for m in new_msgs] == ["ok1", "ok2"]
+
+
+# -- Loud truncation hint (#090, D108) ------------------------------------
+
+
+def test_long_message_persists_full_content(tmp_path: Path):
+    """A >1KB message is persisted to the thread JSONL verbatim — the
+    truncation lives in the FIFO notification, not in storage."""
+    tid = create_thread(participants=["pm", "tl"])
+    long_content = "abcdefghij" * 200  # 2000 chars
+    assert len(long_content) > 1024
+    append_message(tid, sender="pm", content=long_content)
+
+    # Read the thread file directly and verify the full content survived.
+    thread_file = tmp_path / "threads" / f"{tid}.jsonl"
+    lines = thread_file.read_text().splitlines()
+    assert len(lines) == 1
+    msg = json.loads(lines[0])
+    assert msg["content"] == long_content
+
+
+def test_long_message_notification_includes_truncation_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Long-message notification carries the 200-char preview AND an
+    explicit instruction line naming the recipient and thread_id."""
+    tid = create_thread(participants=["pm", "tl"])
+    prev = snapshot_threads()
+
+    long_content = "Z" * 1500
+    append_message(tid, sender="pm", content=long_content)
+
+    writes = _install_fd_capture(monkeypatch)
+    check_thread_changes("tl", tmp_path / "in", prev)
+
+    assert len(writes) == 1
+    envelope = json.loads(writes[0].decode().strip())
+    content = envelope["message"]["content"]
+    # 200-char preview present
+    assert "Z" * THREAD_NOTIFICATION_PREVIEW_LENGTH in content
+    # Truncation marker + literal instruction line on its own line
+    assert "...\n[truncated" in content
+    assert "claude-worker thread read" in content
+    # Names the recipient and the thread_id
+    assert f"thread read tl --thread {tid}" in content
+    # Full content not inlined
+    assert long_content not in content
+
+
+def test_short_message_no_truncation_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A message under PREVIEW_LENGTH gets no truncation instruction line."""
+    tid = create_thread(participants=["pm", "tl"])
+    prev = snapshot_threads()
+
+    short = "hello, this is a short message"
+    assert len(short) < THREAD_NOTIFICATION_PREVIEW_LENGTH
+    append_message(tid, sender="pm", content=short)
+
+    writes = _install_fd_capture(monkeypatch)
+    check_thread_changes("tl", tmp_path / "in", prev)
+
+    assert len(writes) == 1
+    envelope = json.loads(writes[0].decode().strip())
+    content = envelope["message"]["content"]
+    assert short in content
+    assert "..." not in content
+    assert "[truncated" not in content
+    assert "claude-worker thread read" not in content
+
+
+def test_stdin_path_long_message(tmp_path: Path):
+    """The persistence test (#1) re-cast for the stdin-style send code
+    path: append_message is the same primitive both positional-arg and
+    stdin paths feed into in _send_to_single_worker. Verifies a >1KB
+    message stays intact across the path."""
+    tid = create_thread(participants=["sender", "recv"])
+    big = ("stdin-payload " * 100).strip()  # ~1.4KB
+    assert len(big) > 1024
+    append_message(tid, sender="sender", content=big)
+
+    thread_file = tmp_path / "threads" / f"{tid}.jsonl"
+    msgs = [json.loads(line) for line in thread_file.read_text().splitlines()]
+    assert msgs[-1]["content"] == big
+
+
+def test_thread_monitor_injection_long_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Direct test of check_thread_changes with a synthetic 5KB thread
+    message: assert the FIFO write contains the truncation hint and the
+    thread JSONL is intact."""
+    tid = create_thread(participants=["pm", "tl"])
+    prev = snapshot_threads()
+
+    huge = "Q" * 5000
+    append_message(tid, sender="pm", content=huge)
+
+    writes = _install_fd_capture(monkeypatch)
+    check_thread_changes("tl", tmp_path / "in", prev)
+
+    # Notification carries the truncation hint
+    assert len(writes) == 1
+    envelope = json.loads(writes[0].decode().strip())
+    content = envelope["message"]["content"]
+    assert "[truncated" in content
+    assert "claude-worker thread read" in content
+    assert f"--thread {tid}" in content
+
+    # Thread JSONL still has the full 5KB content verbatim
+    thread_file = tmp_path / "threads" / f"{tid}.jsonl"
+    msgs = [json.loads(line) for line in thread_file.read_text().splitlines()]
+    assert msgs[-1]["content"] == huge

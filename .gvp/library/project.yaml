@@ -2835,3 +2835,74 @@ observations:
       - file: tests/test_read_markers.py
         identifier: TestMarkThroughCmdRead
         role: tests
+  - id: D108
+    name: loud-thread-notification-truncation
+    extends: D79
+    rationale: >
+      Thread-monitor notifications now carry an explicit truncation hint
+      when the FIFO preview cuts off the message body. Bumps the
+      `THREAD_NOTIFICATION_PREVIEW_LENGTH` from 80 to 200 chars and, when
+      the source content exceeds that, appends a newline-separated
+      instruction line in the same JSON envelope:
+
+        [system:new-message] Thread <id> from <sender>: <200-char preview>...
+        [truncated — full message in thread; read with: claude-worker thread read <recipient> --thread <id>]
+
+      Both lines live in a single `content` string so they reach the
+      worker atomically through the FIFO. Replaces the silent `...`
+      that previously made truncation indistinguishable from a complete
+      message — the bug a real human operator hit while orchestrating
+      the TAStest DWP3 batch (chat:dwp3-bug-report-2026-04-29).
+
+      The thread JSONL remains the source of truth; the FIFO ping is
+      explicit pointer with the exact CLI invocation to fetch the rest.
+      Preserves D79/P12 (still lightweight, still read-on-demand) while
+      fixing the loud-failure (G2) and explicit-over-implicit (V2) gaps
+      D79 left implicit.
+    alternatives: >
+      1. Inline the full message in the notification — rejected: D79
+      and P12 explicitly grounded the lightweight format in main:OBS3
+      (flow interruption causes step-dropping) and main:OBS4
+      (token-distance recall is lossy). The architecture argument
+      that produced D79 still holds.
+      2. Drop the limit entirely — same rejection. The preview length
+      is a flow-protection threshold, not a transport limit.
+      3. Always-on reply hint (Fix-2.1 in TECHNICAL.md) — deferred by
+      PM. Per-notification overhead with weaker payoff than the
+      truncation hint; revisit when a separate friction signal comes
+      in for plain-worker onboarding.
+      4. Hold preview at 80 and rely on the hint alone — considered;
+      the 200-char preview is the comfort lift that lets recipients
+      decide-without-reading on the common case (notifications under
+      ~1.5KB of context). The hint stays load-bearing for the long
+      tail.
+    tags: [coordination, fifo, observability, bugfix]
+    maps_to: [project:G2, project:V2, project:D79]
+    refs:
+      - file: claude_worker/manager.py
+        identifier: THREAD_NOTIFICATION_PREVIEW_LENGTH
+        role: implements
+      - file: claude_worker/manager.py
+        identifier: check_thread_changes
+        role: implements
+      - file: .cwork/tickets/090-thread-send-message-truncation/TECHNICAL.md
+        identifier: Fix-1 design
+        role: defines
+      - file: tests/test_thread_notifications.py
+        identifier: test_long_message_persists_full_content
+        role: tests
+      - file: tests/test_thread_notifications.py
+        identifier: test_long_message_notification_includes_truncation_hint
+        role: tests
+      - file: tests/test_thread_notifications.py
+        identifier: test_short_message_no_truncation_hint
+        role: tests
+      - file: tests/test_thread_notifications.py
+        identifier: test_stdin_path_long_message
+        role: tests
+      - file: tests/test_thread_notifications.py
+        identifier: test_thread_monitor_injection_long_message
+        role: tests
+      - file: tests/test_end_to_end.py
+        identifier: TestThreadRoundtripFullContent
+        role: tests

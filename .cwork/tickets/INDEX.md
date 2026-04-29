@@ -85,11 +85,14 @@
 | 081 | worker-tool-call-visibility | done | medium-high | lead | human | repl:20333-pts33 | - | human |
 | 082 | stop-wrapup-test-flakiness | done | medium | lead | PM | - | - | pm |
 | 083 | subagents-subcommand | done | medium | lead | TL | - | - | pm |
-| 084 | ephemeral-completion-notify | review | medium-high | lead | TL | - | - | pm |
-| 085 | show-response-thread-routing | review | **high** | lead | human | repl:18793-pts45 | - | pm |
-| 086 | thread-since-prefix-match | review | medium | lead | human | repl:18793-pts45 | - | pm |
-| 087 | thread-auto-detection-consumer | review | medium-high | lead | human | repl:18793-pts45 | - | pm |
-| 088 | manager-hot-reload | review | medium-high | lead | human | repl:18793-pts45 | - | pm |
+| 084 | ephemeral-completion-notify | done | medium-high | lead | TL | - | - | pm |
+| 085 | show-response-thread-routing | done | **high** | lead | human | repl:18793-pts45 | - | pm |
+| 086 | thread-since-prefix-match | done | medium | lead | human | repl:18793-pts45 | - | pm |
+| 087 | thread-auto-detection-consumer | done | medium-high | lead | human | repl:18793-pts45 | - | pm |
+| 088 | manager-hot-reload | done | medium-high | lead | human | repl:18793-pts45 | - | pm |
+| 089 | save-read-marker-nameerror | done | medium | lead | TL | - | - | pm |
+| 090 | thread-send-message-truncation | done | **high** | lead | human | chat:dwp3-bug-report-2026-04-29 | - | pm |
+| 091 | thread-send-queue-timeout-on-success | todo | medium-high | - | human | chat:dwp3-bug-report-2026-04-29 | - | pm |
 
 ## Done (migrated from future-queries)
 
