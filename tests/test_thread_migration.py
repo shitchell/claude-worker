@@ -174,7 +174,9 @@ def test_send_writes_to_thread_not_fifo(
 
     args = _make_send_args("tl", "hello from pm", queue=True)
     # Neutralize the post-send wait (it'd hang on a missing process)
-    monkeypatch.setattr(cw_cli, "_wait_for_queue_response", lambda *a, **kw: 0)
+    monkeypatch.setattr(
+        cw_cli, "_wait_for_queue_response", lambda *a, **kw: (0, "echo")
+    )
     monkeypatch.setattr(cw_cli, "_wait_for_turn", lambda *a, **kw: 0)
 
     rc = cw_cli._send_to_single_worker("tl", "hello from pm", args)
@@ -208,7 +210,9 @@ def test_send_uses_pair_thread_id(
     )
 
     monkeypatch.setenv("CW_WORKER_NAME", "pm")
-    monkeypatch.setattr(cw_cli, "_wait_for_queue_response", lambda *a, **kw: 0)
+    monkeypatch.setattr(
+        cw_cli, "_wait_for_queue_response", lambda *a, **kw: (0, "echo")
+    )
     monkeypatch.setattr(cw_cli, "_wait_for_turn", lambda *a, **kw: 0)
 
     args = _make_send_args("tl", "hi", queue=True)

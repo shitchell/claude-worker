@@ -331,3 +331,85 @@ class TestShutdownCleanup:
         while runtime_dir.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         assert not runtime_dir.exists()
+
+
+class TestQueueGracefulFallback:
+    """End-to-end exercise of the D109 queue-correlation graceful
+    fallback: a real manager + stub-claude where the stub responds
+    without echoing the [queue:<id>] tag. cmd_send must exit 0 with
+    a "Treating as success" stderr note, and the message must land
+    in the thread JSONL."""
+
+    def test_queue_no_echo_falls_back_to_turn_end(
+        self, running_worker, monkeypatch, capsys
+    ):
+        import argparse
+        from claude_worker import cli
+        from claude_worker.cli import _resolve_sender, cmd_send
+        from claude_worker.thread_store import pair_thread_id, read_messages
+
+        # Use scripted stub mode so the recipient's response does NOT
+        # naively echo the FIFO input — that would re-include the
+        # [queue:<id>] tag the sender just injected, and we'd hit the
+        # "echo" path instead of exercising the fallback.
+        handle = running_worker(
+            name="queue-fallback",
+            stub_script={
+                "default_emit": [
+                    {"type": "assistant", "text": "ack without echoing"},
+                    {"type": "result"},
+                ]
+            },
+        )
+        assert handle.wait_for_log('"type": "system"', timeout=5.0)
+
+        # Wrap _wait_for_queue_response with a shorter timeout so the
+        # tail loop times out within test budget; the production
+        # default is QUEUE_WAIT_TIMEOUT_SECONDS=600s. The timeout has
+        # to be longer than THREAD_MONITOR_INTERVAL_SECONDS (5s) so
+        # the [system:new-message] notification has time to reach the
+        # stub and the stub's turn-end has time to land in the log
+        # — the fallback's forward scan needs that turn-end to exist.
+        real_helper = cli._wait_for_queue_response
+
+        def short_helper(name, queue_id, timeout=10.0, after_uuid=None):
+            return real_helper(name, queue_id, timeout=timeout, after_uuid=after_uuid)
+
+        monkeypatch.setattr(cli, "_wait_for_queue_response", short_helper)
+
+        big_msg = "test queue fallback message"
+        args = argparse.Namespace(
+            name=handle.name,
+            message=[big_msg],
+            queue=True,
+            show_response=False,
+            show_full_response=False,
+            chat=None,
+            all_chats=False,
+            dry_run=False,
+            verbose=False,
+            broadcast=False,
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_send(args)
+        # Stub-claude does not echo [queue:<id>], but it does emit a
+        # turn-end after the marker — fallback should give exit 0.
+        assert exc_info.value.code == 0
+
+        captured = capsys.readouterr()
+        assert (
+            "Treating as success" in captured.err
+        ), f"Expected the fallback's stderr note. Got stderr:\n{captured.err}"
+
+        # The message must have landed in the thread JSONL — the source
+        # of truth for delivery — regardless of how correlation resolved.
+        sender = _resolve_sender()
+        tid = pair_thread_id(sender, handle.name)
+        msgs = read_messages(tid)
+        contents = [m.get("content", "") for m in msgs]
+        assert any(big_msg in c for c in contents), (
+            f"thread {tid} did not contain the sent message; "
+            f"saw {len(contents)} messages"
+        )
+
+        handle.stop()

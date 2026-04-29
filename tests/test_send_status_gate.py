@@ -105,7 +105,7 @@ class TestSendStatusGate:
         def fake_wait_for_queue_response(name, queue_id, **kwargs):
             captured_args["name"] = name
             captured_args["queue_id"] = queue_id
-            return 0
+            return (0, "echo")
 
         monkeypatch.setattr(
             cw_cli, "_wait_for_queue_response", fake_wait_for_queue_response

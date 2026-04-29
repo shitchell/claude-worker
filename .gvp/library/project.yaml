@@ -2906,3 +2906,112 @@ observations:
       - file: tests/test_end_to_end.py
         identifier: TestThreadRoundtripFullContent
         role: tests
+
+  - id: D109
+    name: queue-correlation-graceful-fallback
+    extends: D2
+    rationale: >
+      `claude-worker thread send --queue` previously asked the recipient
+      to echo a literal `[queue:<id>]` correlation tag back in its
+      response, then exited 2 ("timeout") if the tag never appeared. In
+      practice, the tag-echo contract is best-effort — recipients
+      (including PM/TL identities and plain workers) often fail to
+      include the literal tag even after delivering the message and
+      finishing their turn. Operators saw exit 2 even on successful
+      runs, so orchestration scripts that branched on `$?` mis-classified
+      delivered work as failed (chat:dwp3-bug-report-2026-04-29, #091).
+
+      The fix makes queue correlation an *advisory* signal layered on
+      top of an honest delivery check. After the existing tail loop
+      times out without seeing the tag, `_wait_for_queue_response`
+      now runs `_forward_scan_for_turn_end(after_uuid=marker_uuid)`
+      one final time. If the recipient produced an assistant turn-end
+      strictly after the send marker, we treat the message as
+      successfully delivered and exit 0 with a stderr note naming
+      the fallback ("Treating as success"). If no turn-end exists,
+      the recipient is genuinely stuck and we exit 1 — distinct from
+      a transport failure, which now exits 2.
+
+      New exit-code contract:
+
+        | rc | reason            | meaning                                |
+        |----|-------------------|----------------------------------------|
+        | 0  | echo              | recipient echoed the literal tag       |
+        | 0  | turn-end-fallback | delivered + recipient finished turn    |
+        | 1  | stuck             | delivered, no turn-end within timeout  |
+        | 1  | died              | delivered, recipient process died      |
+        | 2  | transport         | could not deliver / log never appeared |
+
+      The helper now returns `(rc, reason)`; the `_send_to_single_worker`
+      queue branch unpacks the tuple and prints the reason to stderr
+      so operators can tell which branch fired without reading source
+      (V2). Reuses `_forward_scan_for_turn_end` and the `after_uuid`
+      marker pattern instead of duplicating log-walk logic — extends
+      D2's reach to the queue-wait helper (G4, V5).
+
+      Concurrent-sender risk acknowledged: if two `--queue` sends are
+      both in flight and one recipient turn-end follows both markers,
+      the fallback could assign the same turn-end to both senders.
+      Mitigation: the fallback only runs after the per-call tail loop
+      has timed out (default 600s); the cases that hit this path are
+      already cases where echo correlation broke down. The fallback's
+      "delivered + recipient finished turn" is no worse than the
+      previous "delivered + exited 2 lying" — and now operators see
+      a stderr note explaining the verdict.
+    alternatives: >
+      1. Keep the status quo (exit 2 on no-echo) — rejected: G2
+      requires loud-over-silent-failure, but exit 2 here was loud
+      AND lying. Orchestration scripts cannot distinguish "couldn't
+      deliver" from "delivered, no echo" today, so the existing
+      contract is operationally broken.
+
+      2. Fix-2 (TECHNICAL.md): identity-prompt nudge so PM/TL/plain
+      workers reliably echo the queue tag — rejected for this ticket.
+      Would be a band-aid on a contract PM agreed should be soft
+      (chat:dwp3-bug-report-2026-04-29 PM message: "the post-marker
+      turn check applies uniformly"). The fallback removes the need
+      to harden the echo contract; identity guidance can come back
+      if a separate signal arises.
+
+      3. Drop `--queue` entirely and rely on `_wait_for_turn` —
+      rejected: queue tag echo, when it works, gives stronger
+      correlation under concurrent senders than turn-end alone.
+      The fallback preserves the strong signal as the happy path
+      and falls back to the honest signal only when the literal
+      tag is absent.
+    tags: [coordination, races, fifo, observability, bugfix]
+    maps_to: [project:G2, project:V2, project:D2]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _wait_for_queue_response
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _send_to_single_worker
+        role: implements
+      - file: .cwork/tickets/091-thread-send-queue-timeout-on-success/TECHNICAL.md
+        identifier: Fix-1 Option A
+        role: defines
+      - file: tests/test_queue_response_marker.py
+        identifier: test_t1_echo_after_marker
+        role: tests
+      - file: tests/test_queue_response_marker.py
+        identifier: test_t2_turn_end_after_marker_no_echo
+        role: tests
+      - file: tests/test_queue_response_marker.py
+        identifier: test_t3_never_produces_turn_end
+        role: tests
+      - file: tests/test_queue_response_marker.py
+        identifier: test_t4_worker_died
+        role: tests
+      - file: tests/test_queue_response_marker.py
+        identifier: test_t5_transport_failure_returns_2
+        role: tests
+      - file: tests/test_queue_response_marker.py
+        identifier: test_t6_stale_tag_no_fresh_echo_no_fresh_turn_end
+        role: tests
+      - file: tests/test_queue_response_marker.py
+        identifier: test_t7_stale_tag_before_marker_fresh_turn_end_after
+        role: tests
+      - file: tests/test_end_to_end.py
+        identifier: test_queue_no_echo_falls_back_to_turn_end
+        role: tests

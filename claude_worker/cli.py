@@ -860,16 +860,28 @@ def _wait_for_queue_response(
     queue_id: str,
     timeout: float = QUEUE_WAIT_TIMEOUT_SECONDS,
     after_uuid: str | None = None,
-) -> int:
+) -> tuple[int, str]:
     """Tail the log waiting for an assistant message containing [queue:{id}].
 
-    Returns 0 if the correlation tag is found, 1 if the worker dies, 2 on timeout.
+    Returns a 2-tuple ``(rc, reason)``:
+
+    - ``(0, "echo")`` — the recipient echoed the literal correlation tag.
+    - ``(0, "turn-end-fallback")`` — tag never appeared, but the recipient
+      produced an assistant turn-end strictly after ``after_uuid``. The
+      message landed and the recipient finished its turn; treat as success.
+    - ``(1, "stuck")`` — tail loop timed out and no post-marker turn-end
+      was found. Recipient is stuck or hung.
+    - ``(1, "died")`` — recipient process died before the tag arrived.
+    - ``(2, "transport")`` — log file never appeared within ``timeout`` (a
+      transport-class failure: the FIFO never produced output).
 
     If ``after_uuid`` is provided, only log entries appearing *after* that
     UUID are considered. This avoids matching a stale [queue:<id>] string
     from a previous cycle (or a sub-millisecond collision between two
     recent queue IDs) — mirrors the race protection already in
-    ``_wait_for_turn``.
+    ``_wait_for_turn``. The same marker also bounds the fallback scan so
+    that an assistant turn-end from a prior cycle does not falsely satisfy
+    the "delivered" claim (D2).
     """
     runtime = get_runtime_dir(name)
     log_file = runtime / "log"
@@ -887,8 +899,7 @@ def _wait_for_queue_response(
         log_deadline = time.monotonic() + timeout
         while not log_file.exists():
             if time.monotonic() > log_deadline:
-                print("Error: timeout waiting for log file", file=sys.stderr)
-                return 2
+                return (2, "transport")
             time.sleep(POLL_INTERVAL_SECONDS)
 
     deadline = time.monotonic() + timeout
@@ -909,22 +920,27 @@ def _wait_for_queue_response(
                     passed_marker = True
                 continue
             if tag in line:
-                return 0
+                return (0, "echo")
         # Tail from current position (end of existing content). Everything
         # we tail now is by definition past the marker.
         while True:
             if time.monotonic() > deadline:
-                print(f"Error: timeout waiting for {tag}", file=sys.stderr)
-                return 2
+                # Tag never echoed. Fall back to: did the recipient
+                # produce an assistant turn-end after the marker? If yes,
+                # the message was delivered and the turn finished — that
+                # is the honest "delivered" signal. (D109)
+                turn = _forward_scan_for_turn_end(log_file, after_uuid=after_uuid)
+                if turn is not None:
+                    return (0, "turn-end-fallback")
+                return (1, "stuck")
             line = f.readline()
             if not line:
                 if not _manager_alive():
-                    print("Error: worker process died", file=sys.stderr)
-                    return 1
+                    return (1, "died")
                 time.sleep(POLL_INTERVAL_SECONDS)
                 continue
             if tag in line:
-                return 0
+                return (0, "echo")
 
 
 def _settle_is_stable(
@@ -1769,10 +1785,10 @@ def _send_to_single_worker(
         )
     except Exception as exc:
         print(
-            f"Error: could not write to thread '{thread_id}': {exc}",
+            f"Error: transport failure — could not write to thread '{thread_id}': {exc}",
             file=sys.stderr,
         )
-        return 1
+        return 2
 
     # For broadcast fire-and-forget, don't wait
     if (
@@ -1789,7 +1805,35 @@ def _send_to_single_worker(
         return 0
 
     if queue_id is not None:
-        rc = _wait_for_queue_response(name, queue_id, after_uuid=marker_uuid)
+        rc, reason = _wait_for_queue_response(name, queue_id, after_uuid=marker_uuid)
+        # Map the reason to a stderr message. "echo" is the silent happy
+        # path; every other reason gets a one-line note so operators can
+        # tell which branch fired without reading source (V2). (D109)
+        if reason == "turn-end-fallback":
+            print(
+                f"Note: recipient produced an assistant turn-end after the "
+                f"send marker but did not echo [{QUEUE_TAG_PREFIX}{queue_id}]. "
+                f"Treating as success.",
+                file=sys.stderr,
+            )
+        elif reason == "stuck":
+            print(
+                f"Error: delivered, but recipient produced no turn-end "
+                f"within {QUEUE_WAIT_TIMEOUT_SECONDS}s for "
+                f"[{QUEUE_TAG_PREFIX}{queue_id}].",
+                file=sys.stderr,
+            )
+        elif reason == "died":
+            print(
+                "Error: delivered, but recipient process died before "
+                "producing a response.",
+                file=sys.stderr,
+            )
+        elif reason == "transport":
+            print(
+                "Error: timeout waiting for recipient log to appear.",
+                file=sys.stderr,
+            )
     else:
         rc = _wait_for_turn(name, after_uuid=marker_uuid)
 
