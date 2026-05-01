@@ -156,6 +156,35 @@ worker responds. Message can be positional args or piped via stdin:
 echo "analyze this code" | claude-worker thread send myworker
 ```
 
+**Quoting hazards (positional vs. stdin).** A positional message goes
+through the shell first, then argparse — both can rewrite the body
+before it reaches the worker. The shell expands backticks and `$(...)`
+substitutions, splits on whitespace, and silently drops shell-glob
+characters (`**`); argparse strips a literal `--` separator and rejects
+unknown `--option`-style tokens. Long markdown bodies pasted into a
+positional arg routinely lose content this way and the failure looks
+like exit 0 with a clean status line.
+
+`thread send` refuses positional bodies that look risky (literal
+backticks, `$(`/`${`, em-/en-dashes or `**` in multi-token messages,
+embedded option-like `--word` tokens, embedded newlines) — the error
+names the matched trigger and points at the canonical stdin form. To
+bypass argparse and the shell entirely, pipe the body via stdin with a
+single-quoted heredoc:
+
+```bash
+cat <<'EOF' | claude-worker thread send myworker
+Run `ls` and tell me **why** —
+multi-line markdown survives intact.
+EOF
+
+# Or from a file:
+claude-worker thread send myworker < message.md
+```
+
+The single-quoted `'EOF'` is what disables shell interpretation inside
+the heredoc; without the quotes, backticks and `$(...)` still expand.
+
 - `--queue` — bypass the status gate; embed a `[queue:<epoch-ms>]` correlation
   tag in the message and wait for the specific tagged response. Use this when
   multiple senders might be producing responses concurrently, or when you

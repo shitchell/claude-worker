@@ -314,6 +314,67 @@ class TestThreadRoundtripFullContent:
         handle.stop()
 
 
+class TestStdinVerbatimDelivery:
+    """T12 / D110 — a heredoc-stdin send with backticks, em-dashes,
+    and embedded newlines must reach the thread store byte-for-byte.
+
+    The positional path would refuse this body via the heuristic
+    validator (matched: backtick); stdin bypasses both the shell-quoting
+    surface and the validator, so the recipient's thread JSONL is the
+    canonical source of truth for verbatim delivery."""
+
+    def test_stdin_with_shell_hazards_delivered_verbatim(
+        self, running_worker, monkeypatch
+    ):
+        import argparse
+        import io
+
+        from claude_worker.cli import _resolve_sender, cmd_send
+        from claude_worker.thread_store import pair_thread_id, read_messages
+
+        handle = running_worker(name="stdin-verbatim")
+        assert handle.wait_for_log('"type": "system"', timeout=5.0)
+
+        # Body that the positional path would refuse and the shell would
+        # mangle (backticks expand, em-dash + multi-token would trip
+        # the markdown heuristic, embedded newline trips the newline
+        # trigger). The single-quoted heredoc form is the canonical fix.
+        risky_payload = (
+            "Hi there — please run `ls` and tell me **why** the\n"
+            "directory listing matters.\n"
+            "\n"
+            "Reference $(date) and ${HOME} should appear literally.\n"
+        )
+        monkeypatch.setattr("sys.stdin", io.StringIO(risky_payload))
+
+        args = argparse.Namespace(
+            name=handle.name,
+            message=[],  # empty positional → cmd_send reads stdin
+            queue=False,
+            show_response=False,
+            show_full_response=False,
+            chat=None,
+            all_chats=False,
+            dry_run=False,
+            verbose=False,
+            broadcast=False,
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_send(args)
+        assert exc_info.value.code == 0
+
+        sender = _resolve_sender()
+        tid = pair_thread_id(sender, handle.name)
+        msgs = read_messages(tid)
+        contents = [m.get("content", "") for m in msgs]
+        assert risky_payload in contents, (
+            f"thread {tid} did not contain the verbatim stdin payload; "
+            f"saw lengths={[len(c) for c in contents]}"
+        )
+
+        handle.stop()
+
+
 class TestShutdownCleanup:
     """Manager should clean up its runtime dir on clean exit."""
 

@@ -92,7 +92,8 @@
 | 088 | manager-hot-reload | done | medium-high | lead | human | repl:18793-pts45 | - | pm |
 | 089 | save-read-marker-nameerror | done | medium | lead | TL | - | - | pm |
 | 090 | thread-send-message-truncation | done | **high** | lead | human | chat:dwp3-bug-report-2026-04-29 | - | pm |
-| 091 | thread-send-queue-timeout-on-success | todo | medium-high | - | human | chat:dwp3-bug-report-2026-04-29 | - | pm |
+| 091 | thread-send-queue-timeout-on-success | done | medium-high | lead | human | chat:dwp3-bug-report-2026-04-29 | - | pm |
+| 092 | thread-send-silent-drop-on-argparse-failure | active | medium | lead | playlite-pm | - | - | pm |
 
 ## Done (migrated from future-queries)
 

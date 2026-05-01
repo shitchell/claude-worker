@@ -6,6 +6,7 @@ import argparse
 import dataclasses
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -195,6 +196,12 @@ SENSITIVE_DENIAL_MARKER: str = "which is a sensitive file"
 MIGRATIONS_DIR: Path = Path.home() / ".cwork" / "migrations"
 MIGRATION_VERSION_FILE: str = ".migration-version"
 CWORK_VERSION_FILE: str = "version"
+
+# Positional-message shell-hazard detection (#092, D110). The em-/en-dash
+# and double-asterisk triggers only fire on bodies of this many tokens or
+# more — single-line prose like ``Run the test — verify`` is rare and
+# recovers via stdin if false-positive; ≥3 is the markdown-paste signal.
+MIN_TOKENS_FOR_MARKDOWN_HEURISTIC: int = 3
 
 from claude_worker.manager import (
     _atomic_write_text,
@@ -1909,6 +1916,76 @@ def _reparse_send_flags(args: argparse.Namespace) -> argparse.Namespace:
     return args
 
 
+_OPTION_LIKE_TOKEN_RE = re.compile(r"^--[a-zA-Z]")
+
+
+def _validate_positional_message(message_tokens: list[str]) -> str | None:
+    """Detect shell-mangled or risky positional bodies (#092, D110).
+
+    Returns the matched trigger name (e.g. ``"backtick"``, ``"em-dash"``)
+    if the message body contains a known-risky pattern, or ``None`` if
+    safe. The caller emits a stderr error and exits 1 — the canonical
+    fix is the stdin/heredoc form, which bypasses both shell quoting
+    and argparse.
+
+    The em-/en-dash and double-asterisk triggers gate on
+    ``MIN_TOKENS_FOR_MARKDOWN_HEURISTIC`` to avoid flagging single-line
+    prose like ``Run the test — verify``; ≥3 tokens is the
+    markdown-paste signal.
+    """
+    for tok in message_tokens:
+        if "`" in tok:
+            return "backtick"
+        if "$(" in tok or "${" in tok:
+            return "shell-substitution"
+        if tok == "--":
+            return "double-dash-separator"
+        if _OPTION_LIKE_TOKEN_RE.match(tok):
+            return "option-like-token"
+        if "\n" in tok:
+            return "embedded-newline"
+    if len(message_tokens) >= MIN_TOKENS_FOR_MARKDOWN_HEURISTIC:
+        for tok in message_tokens:
+            if "—" in tok:
+                return "em-dash"
+            if "–" in tok:
+                return "en-dash"
+            if "**" in tok:
+                return "double-asterisk"
+    return None
+
+
+def _emit_positional_validation_error(
+    trigger: str, *, command: str = "thread send <name>"
+) -> None:
+    """Print the canonical positional-refusal error to stderr (#092, D110).
+
+    Format is intentionally verbatim across cmd_send and cmd_broadcast
+    so operators see the same guidance every time. ``command`` is
+    interpolated into the example heredoc lines so the suggestion
+    matches the subcommand they actually invoked.
+    """
+    msg = (
+        f"Error: positional message contains characters that may be\n"
+        f"shell-mangled (matched: {trigger}).\n"
+        f"\n"
+        f"Pass the message via stdin instead:\n"
+        f"\n"
+        f"    cat <<'EOF' | claude-worker {command}\n"
+        f"    ...your message...\n"
+        f"    EOF\n"
+        f"\n"
+        f"Or from a file:\n"
+        f"\n"
+        f"    claude-worker {command} < message.md\n"
+        f"\n"
+        f"Note the single-quoted EOF: it disables shell interpretation\n"
+        f"inside the heredoc, which is what makes long/markdown messages\n"
+        f"survive intact."
+    )
+    print(msg, file=sys.stderr)
+
+
 def cmd_send(args: argparse.Namespace) -> None:
     """Send a message to a single worker (or known thread participant).
 
@@ -1929,8 +2006,16 @@ def cmd_send(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    # Get message from arg or stdin
+    # Get message from arg or stdin. Risky positional bodies are refused
+    # here so operators get a clear hint rather than silent shell-mangled
+    # delivery (#092, D110).
     if args.message:
+        trigger = _validate_positional_message(args.message)
+        if trigger is not None:
+            _emit_positional_validation_error(
+                trigger, command="thread send <name>"
+            )
+            sys.exit(1)
         content = " ".join(args.message)
     else:
         content = sys.stdin.read()
@@ -1975,7 +2060,12 @@ def cmd_broadcast(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
+    # Refuse risky positional bodies before fan-out (#092, D110).
     if args.message:
+        trigger = _validate_positional_message(args.message)
+        if trigger is not None:
+            _emit_positional_validation_error(trigger, command="broadcast")
+            sys.exit(1)
         content = " ".join(args.message)
     else:
         content = sys.stdin.read()
@@ -6150,8 +6240,51 @@ examples:
 """
 
 
+_ARGPARSE_UNRECOGNIZED_PREFIX: str = "unrecognized arguments:"
+
+_ARGPARSE_POSITIONAL_POSTSCRIPT: str = (
+    "\n\nThis usually means a shell-special character or option-like\n"
+    "token leaked into the positional message. Pass the message via\n"
+    "stdin to bypass argparse:\n"
+    "\n"
+    "    cat <<'EOF' | claude-worker thread send <name>\n"
+    "    ...\n"
+    "    EOF"
+)
+
+
+class ShellAwareParser(argparse.ArgumentParser):
+    """ArgumentParser that augments ``unrecognized arguments`` errors with
+    a postscript pointing at the canonical stdin/heredoc pattern (#092,
+    D110).
+
+    Subclasses ``argparse.ArgumentParser`` so that ``parse_args`` still
+    exits 2 via ``self.exit(2, ...)`` and the standard error envelope is
+    preserved — only the message text is augmented when the well-known
+    "unrecognized arguments:" prefix appears.
+    """
+
+    def error(self, message: str) -> None:  # type: ignore[override]
+        if message.startswith(_ARGPARSE_UNRECOGNIZED_PREFIX):
+            message = message + _ARGPARSE_POSITIONAL_POSTSCRIPT
+        super().error(message)
+
+
+# Help-text epilog appended to thread-send and broadcast subparsers.
+# ``RawDescriptionHelpFormatter`` preserves newlines so the heredoc
+# example stays legible (#092, D110).
+_STDIN_HINT_EPILOG: str = (
+    "Tip: for messages with backticks, em-dashes, double-asterisks, or\n"
+    "multi-line markdown, pass via stdin to avoid shell-quoting\n"
+    "surprises:\n"
+    "    cat <<'EOF' | claude-worker thread send NAME\n"
+    "    ...message...\n"
+    "    EOF"
+)
+
+
 def main():
-    parser = argparse.ArgumentParser(
+    parser = ShellAwareParser(
         prog="claude-worker",
         description="Launch and communicate with Claude Code subprocess workers",
         epilog=EXAMPLES,
@@ -6262,6 +6395,8 @@ def main():
     p_broadcast = sub.add_parser(
         "broadcast",
         help="Send a message to all workers matching filter flags",
+        epilog=_STDIN_HINT_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_broadcast.add_argument(
         "message", nargs="*", help="Message text (reads stdin if omitted)"
@@ -6648,7 +6783,10 @@ def main():
 
     # thread send — full-flag send (post-D95, replaces top-level `send`)
     p_thread_send = thread_sub.add_parser(
-        "send", help="Send a message to a worker (or known thread participant)"
+        "send",
+        help="Send a message to a worker (or known thread participant)",
+        epilog=_STDIN_HINT_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_thread_send.add_argument(
         "name",

@@ -3015,3 +3015,137 @@ observations:
       - file: tests/test_end_to_end.py
         identifier: test_queue_no_echo_falls_back_to_turn_end
         role: tests
+
+  - id: D110
+    name: positional-message-shell-hazard-detection
+    rationale: >
+      `claude-worker thread send <name> "<msg>"` had two failure classes
+      with one root cause: the shell mangles or splits the message body
+      before argparse sees it. Class A is loud — argparse rejects an
+      unknown ``--flag`` token leaked into the body and exits 2 with a
+      bare "unrecognized arguments" message that doesn't tell operators
+      how to recover. Class B is silent — argparse accepts a mangled
+      body (backticks expanded to `cmd` output, `**glob**` expanded to
+      filenames, em-dashes/`**bold**` passed through unchanged), our
+      code joins it with spaces, and the wrong content is shipped with
+      exit 0 + a clean status line. Operators saw "delivered" but
+      recipients saw garbage. Cross-project bug report from
+      playlite-pm 2026-04-30 (#092, OBS29 in PM library).
+
+      The trifold fix puts loud failure on every silent path and points
+      operators at the canonical stdin/heredoc form that bypasses both
+      shell and argparse:
+
+      1. **Heuristic refusal.** ``_validate_positional_message`` runs
+         after ``_reparse_send_flags`` in both ``cmd_send`` and
+         ``cmd_broadcast``. Triggers: backtick anywhere, ``$(`` /
+         ``${`` substring, a literal ``--`` token, an option-like
+         ``--<word>`` token (regex ``^--[a-zA-Z]``), embedded newline,
+         and (with ≥3 tokens) em-dash/en-dash/``**``. On match, exit 1
+         with a stderr message naming the trigger and showing the
+         canonical heredoc pattern.
+
+      2. **Argparse postscript.** ``ShellAwareParser`` subclasses
+         ``argparse.ArgumentParser`` and overrides ``error()``: when
+         the message starts with ``unrecognized arguments:``, append a
+         postscript pointing at the heredoc pattern. Top-level parser
+         and (via ``add_subparsers`` defaulting ``parser_class`` to
+         ``type(self)``) every sub-parser inherit the augmented error
+         path; argparse still exits 2.
+
+      3. **Docs.** Both ``thread send`` and ``broadcast`` get a
+         ``--help`` epilog tip. README's ``thread send`` section gets a
+         "Quoting hazards" callout immediately after the existing
+         positional/stdin example.
+
+      The ≥3-token gate on the markdown-marker triggers (em-/en-dash,
+      ``**``) is intentional and pinned via the
+      ``MIN_TOKENS_FOR_MARKDOWN_HEURISTIC`` constant: single-line
+      prose like ``Run the test — verify`` is rare and recovers via
+      stdin if false-positive; ≥3 tokens is the markdown-paste signal.
+      Backticks and shell-substitution markers fire regardless of
+      token count because they always indicate shell-mangling risk.
+
+      Closes OBS29 in the PM observation library — once D110 lands,
+      PM can mark the observation resolved with a ref to D110.
+    alternatives: >
+      1. Always-prefer-stdin-when-non-tty — rejected: breaks the
+      established UX (positional always wins over stdin) and surprises
+      callers in CI runners or nested shells where stdin happens to be
+      non-TTY without operator intent. The heuristic refusal preserves
+      "positional wins" for safe bodies and only redirects the risky
+      shapes.
+
+      2. Full positional deprecation — rejected: short positional
+      messages are fine 95% of the time; refusing every positional
+      send punishes the common case to fix the rare one.
+
+      3. Per-shell auto-detection (e.g., re-quote based on
+      ``$BASH_VERSION`` / ``$ZSH_VERSION``) — rejected: the universal
+      hazard is shell-shape-agnostic. Bash, zsh, and fish all expand
+      backticks/``$()`` inside double quotes and split on whitespace
+      outside them. Stdin is the universal-safe path; reach for it
+      directly instead of guessing the user's shell.
+    tags: [coordination, observability, bugfix, shell-quoting]
+    maps_to: [project:G2, project:V2]
+    refs:
+      - file: claude_worker/cli.py
+        identifier: _validate_positional_message
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: _emit_positional_validation_error
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: ShellAwareParser
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_send
+        role: implements
+      - file: claude_worker/cli.py
+        identifier: cmd_broadcast
+        role: implements
+      - file: README.md
+        identifier: thread-send-quoting-hazards
+        role: documents
+      - file: .cwork/tickets/092-thread-send-silent-drop-on-argparse-failure/TECHNICAL.md
+        identifier: Fix-1 + Fix-2 + Fix-3
+        role: defines
+      - file: tests/test_send_positional_validation.py
+        identifier: test_t1_backtick_token_returns_backtick
+        role: tests
+      - file: tests/test_send_positional_validation.py
+        identifier: test_t2_dollar_paren_returns_shell_substitution
+        role: tests
+      - file: tests/test_send_positional_validation.py
+        identifier: test_t3_dollar_brace_returns_shell_substitution
+        role: tests
+      - file: tests/test_send_positional_validation.py
+        identifier: test_t4_em_dash_with_three_tokens_returns_em_dash
+        role: tests
+      - file: tests/test_send_positional_validation.py
+        identifier: test_t5_double_asterisk_with_three_tokens_returns_double_asterisk
+        role: tests
+      - file: tests/test_send_positional_validation.py
+        identifier: test_t6_unrecognized_argument_emits_postscript
+        role: tests
+      - file: tests/test_send_positional_validation.py
+        identifier: test_t7_stdin_with_risky_content_is_delivered_verbatim
+        role: tests
+      - file: tests/test_send_positional_validation.py
+        identifier: test_t8_simple_positional_message_passes_validator
+        role: tests
+      - file: tests/test_send_positional_validation.py
+        identifier: test_t9_em_dash_alone_in_one_token_is_safe
+        role: tests
+      - file: tests/test_send_positional_validation.py
+        identifier: test_t10_only_queue_flag_extracts_to_queue_true
+        role: tests
+      - file: tests/test_send_positional_validation.py
+        identifier: test_t11_trailing_queue_after_message_extracts_cleanly
+        role: tests
+      - file: tests/test_send_positional_validation.py
+        identifier: test_cmd_broadcast_refuses_backtick_body
+        role: tests
+      - file: tests/test_end_to_end.py
+        identifier: test_stdin_with_shell_hazards_delivered_verbatim
+        role: tests
