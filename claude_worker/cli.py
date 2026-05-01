@@ -2012,9 +2012,7 @@ def cmd_send(args: argparse.Namespace) -> None:
     if args.message:
         trigger = _validate_positional_message(args.message)
         if trigger is not None:
-            _emit_positional_validation_error(
-                trigger, command="thread send <name>"
-            )
+            _emit_positional_validation_error(trigger, command="thread send <name>")
             sys.exit(1)
         content = " ".join(args.message)
     else:

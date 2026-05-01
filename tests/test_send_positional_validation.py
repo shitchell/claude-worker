@@ -70,23 +70,17 @@ class TestValidatePositionalMessage:
     def test_t2_dollar_paren_returns_shell_substitution(self):
         from claude_worker.cli import _validate_positional_message
 
-        assert (
-            _validate_positional_message(["echo", "$(date)"]) == "shell-substitution"
-        )
+        assert _validate_positional_message(["echo", "$(date)"]) == "shell-substitution"
 
     def test_t3_dollar_brace_returns_shell_substitution(self):
         from claude_worker.cli import _validate_positional_message
 
-        assert (
-            _validate_positional_message(["echo", "${HOME}"]) == "shell-substitution"
-        )
+        assert _validate_positional_message(["echo", "${HOME}"]) == "shell-substitution"
 
     def test_t4_em_dash_with_three_tokens_returns_em_dash(self):
         from claude_worker.cli import _validate_positional_message
 
-        assert (
-            _validate_positional_message(["use", "—", "tool"]) == "em-dash"
-        )
+        assert _validate_positional_message(["use", "—", "tool"]) == "em-dash"
 
     def test_t5_double_asterisk_with_three_tokens_returns_double_asterisk(self):
         from claude_worker.cli import _validate_positional_message
@@ -134,9 +128,7 @@ class TestValidatePositionalMessage:
     def test_embedded_newline_returns_embedded_newline(self):
         from claude_worker.cli import _validate_positional_message
 
-        assert (
-            _validate_positional_message(["line1\nline2"]) == "embedded-newline"
-        )
+        assert _validate_positional_message(["line1\nline2"]) == "embedded-newline"
 
     def test_simple_safe_message_returns_none(self):
         from claude_worker.cli import _validate_positional_message
@@ -151,9 +143,7 @@ class TestValidatePositionalMessage:
     def test_en_dash_with_three_tokens_returns_en_dash(self):
         from claude_worker.cli import _validate_positional_message
 
-        assert (
-            _validate_positional_message(["a", "–", "b", "c"]) == "en-dash"
-        )
+        assert _validate_positional_message(["a", "–", "b", "c"]) == "en-dash"
 
 
 # -- T1-T5: cmd_send refusal integration --------------------------------
@@ -206,9 +196,7 @@ class TestCmdSendRefusalIntegration:
         assert exc_info.value.code == 1
         assert "matched: em-dash" in capsys.readouterr().err
 
-    def test_t5_cmd_send_refuses_double_asterisk_multi_token(
-        self, fake_worker, capsys
-    ):
+    def test_t5_cmd_send_refuses_double_asterisk_multi_token(self, fake_worker, capsys):
         from claude_worker.cli import cmd_send
 
         name = fake_worker([], alive=True)
@@ -315,8 +303,7 @@ class TestStdinBypassesValidator:
         monkeypatch.setattr(cw_cli, "_print_worker_status", lambda *_a, **_k: None)
 
         risky_payload = (
-            "Run `ls` and tell me **why** —\n"
-            "multi-line markdown survives intact.\n"
+            "Run `ls` and tell me **why** —\n" "multi-line markdown survives intact.\n"
         )
         monkeypatch.setattr("sys.stdin", io.StringIO(risky_payload))
 
